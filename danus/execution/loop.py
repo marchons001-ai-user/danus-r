@@ -193,6 +193,8 @@ def main(worker_dir: str) -> int:
     project = wl.project
     worker = wl.name
     role = _read_role(wl)
+    if role.get("BACKEND"):
+        os.environ["CODEX_BACKEND"] = role["BACKEND"]
 
     # Pin the worker's gateway to THIS interpreter (sys.executable = the venv
     # python danus runs on), rewritten every start: a moved/rebuilt venv is
