@@ -38,7 +38,7 @@ from . import layout as L
 from . import scaffold
 from danus import codex
 
-_FACT_ID_RE = re.compile(r'"?fact_id"?\s*[:=]\s*"?([0-9a-f]{16})"?')
+_FACT_ID_RE = re.compile(r"(?i:fact(?:_|\s+)id)\b[\"'`\s]*[:=]?\s*[\"'`]?([0-9a-f]{16})[\"'`]?")
 
 
 # --- the per-round prompt (continuation semantics; see worker.md) ----------- #
