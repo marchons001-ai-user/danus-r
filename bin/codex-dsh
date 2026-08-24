@@ -135,10 +135,9 @@ if [ ! -f "$RUN_HOME/settings.yaml" ]; then
   printf 'agent-default-model:\n  provider: %s\n  model: %s\n' "$provider" "$model_sel" > "$RUN_HOME/settings.yaml"
 fi
 
-# A model without a reasoning mode must not get a reasoningEffort line (headless
-# rejects unsupported efforts). Keep the effort only when the deployment home
-# already carries one, or the operator overrides DANUS_DSH_EFFORT explicitly.
-if [ -z "${DANUS_DSH_EFFORT:-}" ] && ! grep -q 'reasoningEffort' "$SRC_HOME/settings.yaml" 2>/dev/null; then
+# Do not invent a reasoning mode when neither the call nor the deployment asks
+# for one. An explicit per-call effort must win even if settings.yaml omits it.
+if [ -z "${DANUS_DSH_EFFORT:-}" ] && [ -z "${effort_arg:-}" ] && ! grep -q 'reasoningEffort' "$SRC_HOME/settings.yaml" 2>/dev/null; then
   effort_sel=""
 fi
 
