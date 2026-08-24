@@ -12,15 +12,16 @@ it must hand off. Runtime/tool permissions remain enforced separately by Danus.
 | `researcher.md` | scientific worker | Exploratory hypothesis/mechanism generation, theoretical reasoning, experiment proposals, and evidence interpretation. |
 | `reviewer.md` | scientific worker | Conservative pre-code review: prior art, falsifiability, confounds, complexity, integrity, and minimum experiment design. |
 | `experimenter.md` | scientific worker | Minimal implementation and faithful empirical execution; produces evidence-oriented handoffs and preserves negative/null outcomes. |
-| `supervisor.md` | control plane | Danus-R target coordinator: role scheduling, drift/integrity/budget supervision, escalation, and user alignment. Defined in A2-3; heartbeat/progress runtime comes later. |
-| `main_agent.md` | legacy main tier | Existing math-oriented Danus main-agent runtime contract. Kept unchanged in A2-3 for compatibility; Danus-R will migrate orchestration toward `supervisor.md` rather than rewriting it prematurely. |
-| `verifier.md` | mathematical verification | Current stateless LLM proof verifier used by legacy `fact_submit`. It remains the analytical-verification backend until A2-4 extends scientific fact/evidence verification. |
+| `supervisor.md` | control plane | Danus-R target coordinator: role scheduling, drift/integrity/budget supervision, escalation, and user alignment. Heartbeat/progress runtime comes later. |
+| `main_agent.md` | legacy main tier | Existing math-oriented Danus main-agent runtime contract, retained for compatibility while orchestration migrates toward `supervisor.md`. |
+| `verifier.md` | analytical verification | Stateless mathematical proof verifier. It remains the analytical backend of the Scientific Verification Layer. |
+| `empirical_verifier.md` | empirical verification | Stateless semantic evidence auditor. It runs only after deterministic evidence/provenance checks pass and judges claim support, scope, post-hoc status, failures/deviations, and overclaiming. |
 
 Scientific **role is independent of model/backend/effort**. A `.role` may select
 `ROLE=researcher`, `ROLE=reviewer`, or `ROLE=experimenter` while `MODEL`, `BACKEND`,
 and `REASONING_EFFORT` remain separate execution choices.
 
-## Composition in A2-3
+## Scientific worker composition
 
 Scientific workers receive:
 
@@ -29,16 +30,11 @@ Scientific workers receive:
 3. the project's `RESEARCH_CHARTER.md`;
 4. `TASK.md`, shared memory/facts, and existing worker tools.
 
-Role contracts are intentionally **semantic**, not tied to the legacy Fact Graph's
-`statement + proof` storage format. They define research handoffs now; A2-4 will
-define how analytical/empirical claims and evidence are represented and verified.
-
 Where a scientific role explicitly overrides a base-worker behavior (notably the
-Experimenter's approved computation, or the temporary rule not to send empirical
-results through the mathematical verifier), the role contract wins. Common honesty,
-workspace, memory, and existing analytical-verification rules remain in force.
+Experimenter's approved computation), the role contract wins. Common honesty,
+workspace, memory, and analytical-verification rules remain in force.
 
-## Scientific handoffs (semantic, not yet a storage schema)
+## Scientific handoffs
 
 - **Researcher → Reviewer:** `Research Proposal` — question, current evidence,
   hypothesis/mechanism, competing explanation, falsifier, cheapest decisive test,
@@ -51,12 +47,22 @@ workspace, memory, and existing analytical-verification rules remain in force.
 - **Experimenter → Researcher/Reviewer:** `Evidence Packet` — what ran,
   provenance, matrix coverage, primary metrics, negative/null results, anomalies,
   deterministic checks, artifact references, and unresolved issues.
-- **Researcher → future Verification Layer:** `Candidate Scientific Claim` with
-  scope, supporting evidence, alternatives, limitations, what is not established,
-  and confirmatory/exploratory status.
+- **Researcher → Verification Layer:** `Candidate Scientific Claim` with scope,
+  supporting evidence, limitations, what is not established, and
+  confirmatory/exploratory status.
 
-A2-3 freezes these scientific meanings only. It deliberately does **not** freeze a
-JSON/Markdown/Fact-Graph serialization format.
+## A2-4 verification split
+
+The Scientific Verification Layer has two paths:
+
+- **analytical:** existing mathematical prechecks + `verifier.md`;
+- **empirical:** deterministic Evidence Store checks first; only a clean bundle is
+  passed to `empirical_verifier.md` for semantic claim/evidence auditing.
+
+The empirical semantic verifier deliberately has no Danus MCP tool bundle. It is
+not allowed to redesign experiments, search the web, or re-run computation. If a
+program can decide an integrity condition exactly, the program decides it before
+any LLM is invoked.
 
 ## Project policy
 
@@ -69,7 +75,7 @@ user decisions. Do not duplicate project-specific rules into every role prompt.
 
 - Local memory is private continuity.
 - Global memory is shared awareness/findings, not truth.
-- The Fact Graph remains the current verified-truth store.
-- The legacy verifier remains the mathematical correctness gate until A2-4.
+- The Scientific Fact Graph is the verified-truth store for analytical and
+  empirical facts.
 - Failed paths and negative evidence are first-class research information.
 - User instructions and project policy outrank agent convenience.
