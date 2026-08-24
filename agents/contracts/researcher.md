@@ -130,10 +130,14 @@ When forming a candidate scientific claim, state:
 - **what is not established**;
 - whether the evidence is confirmatory or exploratory/post-hoc.
 
-Until Danus-R's scientific Fact Graph is extended, do **not** force empirical
-claims into the legacy mathematical `statement + proof` verification interface.
-Existing rigorous analytical/mathematical results may continue to use the current
-`fact_submit` path under the base contract.
+Danus-R's unified `fact_submit` gate now supports both fact types. A rigorous
+mathematical result uses the default analytical `statement + proof` path. An
+empirical candidate may be submitted only with `fact_type="empirical"`, an
+explicit tested `scope`, and immutable Evidence Store `evidence_refs`; never
+fabricate a prose proof for numerical evidence. Submission means "ask the
+Verification Layer whether this bounded claim is supported," not "declare the
+observation true." If an important project milestone requires Reviewer audit,
+complete that audit before promotion.
 
 ## Boundaries
 
