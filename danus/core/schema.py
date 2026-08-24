@@ -1,13 +1,13 @@
-"""Schemas + content-addressed fact id for the three core data structures.
+"""Schemas + content-addressed ids for Danus truth-layer records.
 
 Kept minimal on purpose: code only models the *fixed* parts of the data
-structures (the fact node and the fact id). Behavior — when to publish, verify,
-promote — is prose (prompts/skills), not code.
+structures. Behavior — when to publish, verify, promote, or interpret — stays in
+prompts/skills.
 
-The glossary (``glossary_introduces``) is kept: it is what makes a fact readable
-and composable (every symbol has a definition somewhere). See ``DATA_MODEL.md``
-§3 and ``glossary.py``. ``compute_fact_id`` is the Danus scheme, including the
-glossary term.
+Backward compatibility is load-bearing: the existing analytical ``Fact`` shape
+and ``compute_fact_id`` hash are preserved exactly. Scientific extensions are
+additive: empirical facts use a separate canonical hash payload and optional
+fields that old analytical facts simply omit on disk.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Any, Dict, List
 
 # --------------------------------------------------------------------------- #
 # global memory kinds (the strong categorization) + statuses                  #
@@ -43,6 +43,10 @@ STATUSES = (
     "unverified", "verifying", "verified", "refuted",  # verifiable entries
     "open", "supported", "challenged",                  # judgment entries
 )
+
+# Fact types are classified by how the claim is supported/verified, not by its
+# rhetorical role. A counterexample can therefore be analytical or empirical.
+FACT_TYPES = ("analytical", "empirical")
 
 
 # --------------------------------------------------------------------------- #
@@ -75,9 +79,13 @@ def clean_external_refs(refs: object) -> List[Dict[str, object]]:
 
 @dataclass
 class Fact:
-    """A verified fact = one node in the fact graph. Frontmatter (fact_id /
-    problem_id / author / predecessors / glossary_introduces / external_refs) +
-    the markdown body (statement / proof / optional intuition)."""
+    """A verified scientific fact = one node in the shared fact graph.
+
+    Existing analytical facts use ``statement`` + ``proof`` and retain their
+    exact historical on-disk/hash behavior. Empirical facts additionally carry a
+    machine-readable ``scope`` and immutable ``evidence_refs`` plus a short human
+    ``evidence_summary``; those fields are ignored by analytical facts.
+    """
 
     fact_id: str
     problem_id: str
@@ -88,11 +96,13 @@ class Fact:
     glossary_introduces: Dict[str, str] = field(default_factory=dict)  # symbol -> definition
     intuition: str = ""
     # Structured bibliography of external (published) results the proof cites.
-    # Mutable metadata — NOT part of the content-addressed fact_id (see
-    # compute_fact_id): the reference auditor corrects these post-hoc, so binding
-    # them into the id would break the DAG on every audit. The citation *keys* used
-    # in the proof text are already hashed (they live in `proof`).
+    # Mutable metadata — NOT part of the analytical content-addressed fact_id.
     external_refs: List[Dict[str, object]] = field(default_factory=list)
+    # Scientific extensions. Defaults preserve old analytical callers/files.
+    fact_type: str = "analytical"
+    scope: Dict[str, Any] = field(default_factory=dict)
+    evidence_refs: List[str] = field(default_factory=list)
+    evidence_summary: str = ""
 
 
 def _normalize(text: str) -> str:
@@ -109,14 +119,12 @@ def compute_fact_id(
     statement: str,
     proof: str,
 ) -> str:
-    """Deterministic 16-hex SHA-256 of the canonical content (the Danus scheme).
-    Same content -> same id -> natural dedup.
+    """Historical analytical-fact id. DO NOT change this payload.
 
-    Note: ``external_refs`` is deliberately excluded — it is mutable bibliographic
-    metadata the reference auditor corrects after the fact is verified; hashing it
-    would change the id (and break the DAG) on every audit, and would also perturb
-    the ids of all pre-existing facts. The cited keys themselves are already in
-    ``proof``, which is hashed."""
+    Deterministic 16-hex SHA-256 of the canonical content. ``external_refs`` and
+    newer scientific fields are deliberately absent so every pre-A2-4 analytical
+    fact keeps the exact same id.
+    """
     body = {
         "problem_id": problem_id,
         "predecessors": sorted(predecessors),
@@ -127,4 +135,33 @@ def compute_fact_id(
         "proof": _normalize(proof),
     }
     canon = json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(canon).hexdigest()[:16]
+
+
+def compute_empirical_fact_id(
+    *,
+    problem_id: str,
+    predecessors: List[str],
+    statement: str,
+    scope: Dict[str, Any],
+    evidence_refs: List[str],
+) -> str:
+    """Content-address an empirical claim without touching analytical ids.
+
+    Identity binds the claim to its tested scope and immutable evidence-record
+    ids. ``evidence_summary`` is intentionally excluded: it is explanatory text,
+    not the evidence identity. Evidence records themselves are content-addressed.
+    """
+    refs = sorted({str(x).strip() for x in evidence_refs if str(x).strip()})
+    body = {
+        "fact_type": "empirical",
+        "problem_id": problem_id,
+        "predecessors": sorted(predecessors),
+        "statement": _normalize(statement),
+        "scope": scope,
+        "evidence_refs": refs,
+    }
+    canon = json.dumps(
+        body, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
     return hashlib.sha256(canon).hexdigest()[:16]
