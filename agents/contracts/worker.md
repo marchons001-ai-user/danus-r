@@ -13,6 +13,24 @@ The data model is authoritative; see it if anything is ambiguous: `local memory`
 verified truth). The **fact graph is the only correctness source** — a proof may
 build only on facts (cite a `fact_id`).
 
+## Danus-R scientific-role compatibility
+
+This file remains the common/legacy worker contract. If the round prompt injects a
+recognized Danus-R scientific role (`researcher`, `reviewer`, or `experimenter`),
+that role contract controls the worker's **scientific mission, role workflow,
+role-specific output, computation boundary, and whether the current mathematical
+`fact_submit` interface is appropriate**. Math-only instructions in this file
+apply to a scientific role only when relevant to its assigned work.
+
+The role contract does **not** cancel the common honesty, workspace, memory-scope,
+shared-store, or analytical-verification disciplines here. In particular, a
+rigorous mathematical result still uses the existing verifier gate. Until A2-4
+extends scientific facts, an empirical result must not be disguised as a prose
+mathematical proof merely to enter the legacy Fact Graph.
+
+With no recognized scientific role, this entire file applies unchanged as the
+legacy mathematical-worker contract.
+
 ## The three memories — how you record and recall
 
 - **local memory (yours, private, rough).** Your own running log. Write/read/grep
@@ -242,19 +260,15 @@ to stop.** A hard open problem is not a stopping condition — do not give up.
   directories, other workers' private `local_memory/`, or any other project — the
   only cross-worker channels are global memory (awareness) and the fact graph
   (truth).
-- **Text-only mathematics — NO CPU-intensive computation (iron rule).** Do your
-  mathematics by symbolic and textual reasoning, the skills, and literature
-  search — **never** by heavy machine computation. Do **not** run brute-force or
-  exhaustive searches, large numerical sweeps, SAT/SMT solvers, or heavy
-  symbolic-algebra / NumPy / Sage / Mathematica-style jobs, and do **not** spawn
-  long-running or parallel compute. Two reasons this is absolute: (1) heavy
-  computation can saturate the host and can break the operator's live session; (2)
-  correctness here comes from a *verifier-checked proof*, never from a number a
-  machine produced (the verifier cannot re-check a computation you ran). If a tiny
-  finite check genuinely sharpens intuition, keep it trivial (a second or two,
-  negligible memory) and record the *reasoning*, not a compute artifact. When a
-  subproblem looks like it needs real computation, take that as a signal to find a
-  structural or theoretical argument instead.
+- **Computation boundary.** Legacy mathematical workers, Researcher, and Reviewer
+  remain text/symbolic-first and must not run heavy machine computation. The
+  **Experimenter role is the sole explicit exception**: it may run the bounded
+  computation required by a Reviewer-approved experiment plan under
+  `experimenter.md` and the project Research Charter. Outside that approved scope,
+  the original prohibition still applies: no opportunistic brute force, unplanned
+  sweeps, SAT/SMT, heavy symbolic jobs, or parallel compute merely to search for a
+  favorable result. Tiny finite checks for mathematical intuition remain acceptable
+  when negligible and recorded as reasoning rather than empirical proof.
 - **Failed paths are valuable** — publish them (`dead_end`/`obstacle`) so the swarm
   does not re-walk them.
 - An open conjecture is not a stopping condition; never claim success unless the
