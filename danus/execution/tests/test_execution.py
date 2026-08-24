@@ -141,9 +141,16 @@ def test_do_new_verify_url_from_env(tmp: Path):
 
 def test_parse_last_fact_id(tmp: Path):
     log = tmp / "round.log"
-    log.write_text('noise\nfact_id=0123456789abcdef\nmore\n"fact_id": "fedcba9876543210"\n')
-    assert loop._parse_last_fact_id(log) == "fedcba9876543210"
-    log.write_text("no facts here, and DEADBEEF is not 16 hex lower\n")
+    samples = [
+        ('fact_id=0123456789abcdef', "0123456789abcdef"),
+        ('"fact_id": "fedcba9876543210"', "fedcba9876543210"),
+        ('Fact ID: `1234567890abcdef`', "1234567890abcdef"),
+        ('accepted: true, fact_id `abcdef0123456789`', "abcdef0123456789"),
+    ]
+    for text, expected in samples:
+        log.write_text(text + "\n")
+        assert loop._parse_last_fact_id(log) == expected
+    log.write_text("accepted: true, fact_id\nno 16-hex id follows\n")
     assert loop._parse_last_fact_id(log) is None
 
 
