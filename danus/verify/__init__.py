@@ -1,13 +1,23 @@
-"""danus.verify — the cold-start proof-verifier HTTP service (the sole write-gate).
+"""Danus verification service.
 
-``service.app`` is the FastAPI app (POST /verify, GET /health). Run as
-``python -m danus.verify`` (or ``uvicorn danus.verify.service:app``).
+``service.app`` exposes the historical mathematical ``POST /verify`` route and
+the empirical ``POST /verify/empirical`` route. Empirical verification performs
+deterministic evidence-integrity checks before any semantic LLM audit.
 """
 
 from __future__ import annotations
 
-from .service import VerifyRequest, app
-from .launcher import run_codex_verification
+from .empirical import check_empirical_evidence
+from .launcher import run_codex_verification, run_empirical_verification
 from .prechecks import run_prechecks
+from .service import EmpiricalVerifyRequest, VerifyRequest, app
 
-__all__ = ["app", "VerifyRequest", "run_codex_verification", "run_prechecks"]
+__all__ = [
+    "app",
+    "VerifyRequest",
+    "EmpiricalVerifyRequest",
+    "run_codex_verification",
+    "run_empirical_verification",
+    "run_prechecks",
+    "check_empirical_evidence",
+]
