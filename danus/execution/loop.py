@@ -9,6 +9,12 @@ per-round hard timeout, or it bails); the loop then relaunches a fresh session
 that resumes from memory. Stops on the ``.stop`` flag (graceful, at a round
 boundary), the project deadline, or a round backstop.
 
+Danus-R scientific roles are supplementary contracts. ``ROLE`` in a worker's
+``.role`` selects researcher/reviewer/experimenter independently of backend,
+model, and reasoning effort. The loop injects that role contract and the project's
+Research Charter into each scientific round; legacy roles keep the original worker
+behavior.
+
 Config:
   - codex binary resolved via the shared ``danus.codex`` launcher
     (``DANUS_CODEX_BIN`` / ``CODEX_BIN`` alias / PATH);
@@ -43,21 +49,46 @@ _FACT_ID_RE = re.compile(r"(?i:fact(?:_|\s+)id)\b[\"'`\s]*[:=]?\s*[\"'`]?([0-9a-
 
 # --- the per-round prompt (continuation semantics; see worker.md) ----------- #
 
-def kickoff(project: str, worker: str) -> str:
+def _scientific_context(project: str, role_name: str) -> str:
+    role_path = L.scientific_role_md(role_name)
+    if role_path is None:
+        return ""
+    role_text = role_path.read_text(encoding="utf-8")
+    charter_path = L.research_charter(project)
+    if charter_path.exists():
+        charter_text = charter_path.read_text(encoding="utf-8")
+    else:
+        charter_text = (
+            "# Research Charter\n\n"
+            "No project RESEARCH_CHARTER.md exists. Do not invent project-specific "
+            "constraints; surface the missing Charter before substantive scientific work.\n"
+        )
+    return (
+        f"\n\n6. Your Danus-R scientific ROLE is '{role_name}'. The role contract "
+        f"and project Research Charter below are binding for this round. The role "
+        f"contract supplements the common AGENTS.md contract; where it explicitly "
+        f"overrides role behavior, follow the role contract.\n\n"
+        f"<SCIENTIFIC_ROLE_CONTRACT>\n{role_text}\n</SCIENTIFIC_ROLE_CONTRACT>\n\n"
+        f"<PROJECT_RESEARCH_CHARTER>\n{charter_text}\n</PROJECT_RESEARCH_CHARTER>"
+    )
+
+
+def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
     prompt = (
         f"You are worker '{worker}' on project '{project}'. Continue solving the "
         f"problem (this is a continuation round, not a fresh start).\n"
         f"1. Read TASK.md — your current assignment (which direction/subgoal is yours).\n"
-        f"2. Follow AGENTS.md (worker.md) exactly — your standing contract (the adaptive "
-        f"control loop, memory discipline, the fact_submit gate). Drive toward a full "
-        f"verified result.\n"
+        f"2. Follow AGENTS.md (worker.md) exactly — your standing common contract "
+        f"(the adaptive control loop, memory discipline, and current fact_submit gate).\n"
         f"3. Resume from state: gm_search relevant findings + dead ends, read the fact "
         f"graph and the latest master_guidance — DO NOT restart from zero; build on what "
         f"is already there.\n"
         f"4. Keep going: assess -> pick skills adaptively -> act -> persist, repeatedly. "
         f"An open problem is not a reason to stop. Do NOT finalize prematurely.\n"
         f"5. Persist as you go: rough progress to local memory; shareable findings via "
-        f"gm_add; any verified result via fact_submit."
+        f"gm_add; use fact_submit only where the active contracts say the current legacy "
+        f"verification path is appropriate."
+        f"{_scientific_context(project, role_name)}"
     )
     return codex.prepare_prompt(
         prompt, L.worker_md(), L.worker_skills_dir(),
@@ -76,7 +107,7 @@ def kickoff(project: str, worker: str) -> str:
 
 def _read_role(wl: L.WorkerLayout) -> dict:
     out = {"MODEL": codex.model(),
-           "REASONING_EFFORT": "high", "ROLE": "high", "DANUS_AUTHOR": wl.name}
+           "REASONING_EFFORT": "high", "ROLE": "worker", "DANUS_AUTHOR": wl.name}
     rp = wl.role
     if rp.exists():
         for line in rp.read_text(encoding="utf-8").splitlines():
@@ -207,7 +238,7 @@ def main(worker_dir: str) -> int:
     max_rounds = int(os.environ.get("DANUS_MAX_ROUNDS", "0"))
     max_fail = int(os.environ.get("DANUS_MAX_CONSEC_FAILURES", "5"))
     wl.logs.mkdir(parents=True, exist_ok=True)
-    prompt = kickoff(project, worker)
+    prompt = kickoff(project, worker, role.get("ROLE", "worker"))
 
     def _on_term(signum, _frame):
         if _Child.proc is not None:

@@ -9,15 +9,20 @@ which is also the codex working dir / LocalMemory root)::
 
     <agents_root>/<project>/           # = DANUS_PROJECT_DIR (shared)
       global_memory/  fact_graph/      # created lazily by core on first write
+      RESEARCH_CHARTER.md              # project-level scientific policy
       project.json                     # roster + metadata
       .run_deadline                    # optional epoch ceiling
       workers/<worker>/                # worker home (codex cwd, LocalMemory root)
-        AGENTS.md -> agents/contracts/worker.md   # the static contract codex reads
+        AGENTS.md -> agents/contracts/worker.md   # common worker contract
         .agents/skills -> agents/skills/worker    # the worker skills
         .codex/config.toml                        # MCP = danus gateway, role=worker
         TASK.md                                   # per-round assignment (danus assign)
         local_memory/                             # worker-private (codex writes)
         .role .pid .pid.lock .stop .status.json  logs/
+
+Scientific role contracts are supplementary data under ``agents/contracts`` and
+are injected by the outer loop according to ``ROLE`` in ``.role``. They are kept
+separate from model/backend/reasoning-effort selection.
 
 Key defaults:
   - the MCP server is launched as the installed package ``python -m danus.gateway``
@@ -40,7 +45,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 # --------------------------------------------------------------------------- #
-# per-worker control-file names — the single source of truth                  #
+# per-worker / per-project control-file names                                  #
 # --------------------------------------------------------------------------- #
 
 TASK_FILE = "TASK.md"
@@ -51,6 +56,9 @@ STOP_FILE = ".stop"
 STATUS_FILE = ".status.json"
 LOGS_DIR = "logs"
 DEADLINE_FILE = ".run_deadline"
+RESEARCH_CHARTER_FILE = "RESEARCH_CHARTER.md"
+
+SCIENTIFIC_ROLES = frozenset({"researcher", "reviewer", "experimenter"})
 
 
 # --------------------------------------------------------------------------- #
@@ -76,8 +84,9 @@ def agents_root() -> Path:
 
 
 def worker_md() -> Path:
-    """The worker contract codex auto-reads (symlinked to AGENTS.md). Pinned path
-    ``agents/contracts/worker.md``; override with ``DANUS_WORKER_CONTRACT``."""
+    """The common worker contract codex auto-reads (symlinked to AGENTS.md).
+    Pinned path ``agents/contracts/worker.md``; override with
+    ``DANUS_WORKER_CONTRACT``."""
     env = os.environ.get("DANUS_WORKER_CONTRACT")
     if env:
         return Path(env).resolve()
@@ -93,12 +102,32 @@ def worker_skills_dir() -> Path:
     return repo_root() / "agents" / "skills" / "worker"
 
 
+def scientific_role_md(role: str) -> Optional[Path]:
+    """Return the supplementary Danus-R contract for a scientific worker role.
+
+    Unknown/legacy roles intentionally return ``None`` so existing math workers
+    (e.g. ROLE=high/xhigh) keep their old behavior. The allow-list also prevents a
+    .role value from becoming an arbitrary filesystem path."""
+    name = (role or "").strip().lower()
+    if name not in SCIENTIFIC_ROLES:
+        return None
+    return repo_root() / "agents" / "contracts" / f"{name}.md"
+
+
+def research_charter_template() -> Path:
+    return repo_root() / "agents" / "contracts" / "research_charter.md"
+
+
 # --------------------------------------------------------------------------- #
-# project / worker dirs                                                        #
+# project / worker dirs                                                       #
 # --------------------------------------------------------------------------- #
 
 def project_dir(project: str) -> Path:
     return agents_root() / project
+
+
+def research_charter(project: str) -> Path:
+    return project_dir(project) / RESEARCH_CHARTER_FILE
 
 
 def workers_dir(project: str) -> Path:
@@ -125,7 +154,7 @@ def list_projects() -> List[str]:
 
 
 # --------------------------------------------------------------------------- #
-# typed per-worker layout (a thin convenience over the path constants)          #
+# typed per-worker layout                                                     #
 # --------------------------------------------------------------------------- #
 
 @dataclass(frozen=True)
@@ -186,7 +215,7 @@ class WorkerLayout:
 
 
 # --------------------------------------------------------------------------- #
-# target parsing                                                              #
+# target parsing                                                             #
 # --------------------------------------------------------------------------- #
 
 def resolve_target(target: str) -> Tuple[str, Optional[str]]:
@@ -207,7 +236,7 @@ def target_worker_dirs(target: str) -> List[Path]:
 
 
 # --------------------------------------------------------------------------- #
-# role spec                                                                   #
+# role spec                                                                  #
 # --------------------------------------------------------------------------- #
 
 _ROLE_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*?):(\d+)$")
@@ -218,7 +247,11 @@ def parse_roles(spec: str) -> List[Tuple[str, str]]:
     ("high3","high"), ("xhigh","xhigh"), …]``. Returns (worker_name, base_role)
     pairs; the base role (digits stripped) drives the codex reasoning effort. The
     first worker of a base keeps the bare name; the rest get numeric suffixes.
-    Raises ``ValueError`` on a malformed/empty spec or a count < 1."""
+    Raises ``ValueError`` on a malformed/empty spec or a count < 1.
+
+    Historical note: this CLI field is an effort roster, not the Danus-R
+    scientific ``ROLE``. A2-3 deliberately keeps that interface unchanged; the
+    scientific role lives independently in each worker's ``.role`` file."""
     out: List[Tuple[str, str]] = []
     for part in (p.strip() for p in spec.split(",") if p.strip()):
         m = _ROLE_RE.match(part)

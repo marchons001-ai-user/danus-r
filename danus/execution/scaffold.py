@@ -9,7 +9,9 @@ Notes:
   - the codex MCP wiring launches the installed package ``python -m danus.gateway``
     (a pinned interface) rather than an absolute path to a server file;
   - the config template + defaults (verify URL, model) come from env at CALL time
-    (with a built-in fallback default), not hard-wired at import time.
+    (with a built-in fallback default), not hard-wired at import time;
+  - every project gets a ``RESEARCH_CHARTER.md`` copied from the repository
+    template. Scientific worker roles receive it through the round prompt.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from danus import codex
 from . import layout as L
 
 # --------------------------------------------------------------------------- #
-# atomic file helpers                                                         #
+# atomic file helpers                                                        #
 # --------------------------------------------------------------------------- #
 
 def atomic_write(path: Path, text: str) -> None:
@@ -52,7 +54,7 @@ def symlink(target: Path, link: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# codex config template + task placeholder                                    #
+# codex config template + task placeholder                                   #
 # --------------------------------------------------------------------------- #
 
 # The MCP server is the installed danus gateway (role=worker) launched as a
@@ -110,14 +112,17 @@ def write_codex_config(wl: "L.WorkerLayout") -> None:
 
 
 # --------------------------------------------------------------------------- #
-# do_new — scaffold a project                                                 #
+# do_new — scaffold a project                                                #
 # --------------------------------------------------------------------------- #
 
 def do_new(project: str, roles: str = "high:3,xhigh:4",
            model: Optional[str] = None) -> Dict:
-    """Scaffold a project dir + one worker home per role. Refuses to clobber an
-    existing project dir (no silent overwrite of a live fact graph). Returns
-    ``{"project_dir", "workers"}``."""
+    """Scaffold a project dir + one worker home per effort roster entry.
+
+    Refuses to clobber an existing project dir (no silent overwrite of a live fact
+    graph). The historical ``roles`` CLI argument remains an effort roster in
+    A2-3; Danus-R scientific role is a separate ``ROLE`` field in each worker's
+    ``.role``. Returns ``{"project_dir", "workers"}``."""
     pdir = L.project_dir(project)
     if pdir.exists():
         raise SystemExit(f"project already exists: {pdir} (pick another name or remove it)")
@@ -127,14 +132,20 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
     L.workers_dir(project).mkdir(parents=True, exist_ok=True)
     (pdir / "global_memory").mkdir(exist_ok=True)
     (pdir / "fact_graph").mkdir(exist_ok=True)
+    atomic_write(
+        L.research_charter(project),
+        L.research_charter_template().read_text(encoding="utf-8"),
+    )
 
     created: List[str] = []
-    for worker, base in role_pairs:
+    for worker, effort in role_pairs:
         wl = L.WorkerLayout(L.worker_dir(project, worker))
         wl.local_memory.mkdir(parents=True, exist_ok=True)
         wl.logs.mkdir(exist_ok=True)
 
-        # static contract + skills (symlinks stay in sync with the repo)
+        # static common contract + skills (symlinks stay in sync with the repo).
+        # Scientific role contract + project Charter are injected by loop.kickoff
+        # from ROLE in .role, so model/backend/effort remain independent.
         symlink(L.worker_md(), wl.dir / "AGENTS.md")
         (wl.dir / ".agents").mkdir(exist_ok=True)
         symlink(L.worker_skills_dir(), wl.dir / ".agents" / "skills")
@@ -142,8 +153,10 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
         # codex MCP wiring (role=worker)
         write_codex_config(wl)
         atomic_write(wl.task, _TASK_PLACEHOLDER)
-        atomic_write(wl.role,
-                     f"MODEL={model}\nREASONING_EFFORT={base}\nROLE={base}\nDANUS_AUTHOR={worker}\n")
+        atomic_write(
+            wl.role,
+            f"MODEL={model}\nREASONING_EFFORT={effort}\nROLE=worker\nDANUS_AUTHOR={worker}\n",
+        )
         atomic_write(wl.status,
                      json.dumps({"worker": worker, "state": "created", "round": 0}, indent=2))
         created.append(worker)
@@ -154,7 +167,7 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
 
 
 # --------------------------------------------------------------------------- #
-# spawn_loop — detached launch of one worker's outer loop                     #
+# spawn_loop — detached launch of one worker's outer loop                    #
 # --------------------------------------------------------------------------- #
 
 def spawn_loop(wdir: Path) -> int:
