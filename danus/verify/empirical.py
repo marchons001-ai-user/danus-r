@@ -88,6 +88,57 @@ def check_empirical_evidence(
         }
 
     store = EvidenceStore(root)
+
+    def load_protocol_chain(protocol_id: str) -> None:
+        """Validate and collect a protocol plus every declared revision ancestor."""
+        current = protocol_id
+        seen = set()
+        while current and current not in seen:
+            seen.add(current)
+            protocol = store.get_protocol(current)
+            check(
+                f"protocol:{current}:exists",
+                protocol is not None,
+                "protocol exists" if protocol is not None else "missing or unreadable protocol",
+            )
+            if protocol is None:
+                return
+            protocols[current] = protocol
+            identity_ok = (
+                protocol.get("protocol_id") == current
+                and _content_id(_protocol_identity(protocol)) == current
+            )
+            check(
+                f"protocol:{current}:identity",
+                identity_ok,
+                "content-addressed protocol id matches protocol contents",
+            )
+            check(
+                f"protocol:{current}:frozen",
+                protocol.get("status") == "frozen",
+                f"protocol status is {protocol.get('status')!r}; expected 'frozen'",
+            )
+            parent = str(protocol.get("parent_protocol_id") or "")
+            if parent:
+                check(
+                    f"protocol:{current}:revision_reason",
+                    bool(str(protocol.get("revision_reason") or "").strip()),
+                    "protocol revision records a revision_reason",
+                )
+            if bool(protocol.get("post_hoc")):
+                check(
+                    f"protocol:{current}:post_hoc_lineage",
+                    bool(parent),
+                    "post-hoc protocol names the parent whose observed result motivated the revision",
+                )
+            current = parent
+        if current:
+            check(
+                f"protocol:{protocol_id}:lineage_cycle",
+                False,
+                f"protocol lineage cycles at {current}",
+            )
+
     for evidence_id in refs:
         record = store.get_record(evidence_id)
         check(
@@ -115,53 +166,8 @@ def check_empirical_evidence(
             bool(protocol_id),
             "evidence record names a protocol_id",
         )
-        if not protocol_id:
-            continue
-
-        protocol = store.get_protocol(protocol_id)
-        check(
-            f"protocol:{protocol_id}:exists",
-            protocol is not None,
-            "protocol exists" if protocol is not None else "missing or unreadable protocol",
-        )
-        if protocol is None:
-            continue
-        protocols[protocol_id] = protocol
-
-        protocol_id_ok = (
-            protocol.get("protocol_id") == protocol_id
-            and _content_id(_protocol_identity(protocol)) == protocol_id
-        )
-        check(
-            f"protocol:{protocol_id}:identity",
-            protocol_id_ok,
-            "content-addressed protocol id matches protocol contents",
-        )
-        check(
-            f"protocol:{protocol_id}:frozen",
-            protocol.get("status") == "frozen",
-            f"protocol status is {protocol.get('status')!r}; expected 'frozen'",
-        )
-
-        parent = str(protocol.get("parent_protocol_id") or "")
-        if parent:
-            parent_exists = store.get_protocol(parent) is not None
-            check(
-                f"protocol:{protocol_id}:parent",
-                parent_exists,
-                f"parent protocol {parent} exists",
-            )
-            check(
-                f"protocol:{protocol_id}:revision_reason",
-                bool(str(protocol.get("revision_reason") or "").strip()),
-                "protocol revision records a revision_reason",
-            )
-        if bool(protocol.get("post_hoc")):
-            check(
-                f"protocol:{protocol_id}:post_hoc_lineage",
-                bool(parent),
-                "post-hoc protocol names the parent whose observed result motivated the revision",
-            )
+        if protocol_id:
+            load_protocol_chain(protocol_id)
 
         check(
             f"evidence:{evidence_id}:matrix_coverage",
@@ -171,11 +177,7 @@ def check_empirical_evidence(
 
         artifacts = record.get("artifacts", [])
         if not isinstance(artifacts, list):
-            check(
-                f"evidence:{evidence_id}:artifacts",
-                False,
-                "artifacts must be a list",
-            )
+            check(f"evidence:{evidence_id}:artifacts", False, "artifacts must be a list")
             continue
         for index, artifact in enumerate(artifacts):
             prefix = f"evidence:{evidence_id}:artifact:{index}"
