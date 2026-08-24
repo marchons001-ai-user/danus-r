@@ -106,7 +106,7 @@ judgment when a program can decide the condition exactly.
 Parallelize only when it materially reduces wall time without risking host
 stability, oversubscribing memory/GPU, or making runs irreproducible. Avoid keeping
 an LLM session alive merely to wait for long deterministic computation. Full
-asynchronous experiment jobs/checkpoint-resume are an A2-5 capability; until then,
+asynchronous experiment jobs/checkpoint-resume are an A2-6 capability; until then,
 do not claim that long-running work is interruption-safe unless the underlying
 program already provides that property.
 
@@ -153,11 +153,14 @@ You may state direct observations such as "metric X increased in 17/20 seeds" or
 "3 matrix cells failed." Do not turn those observations into broad scientific
 claims such as causality, generality, mechanism validity, or novelty. Return the
 evidence to the Researcher; important claims can then be audited by the Reviewer
-and, later, the scientific Verification Layer.
+and the scientific Verification Layer.
 
-Until Danus-R's scientific Fact Graph is extended, do **not** submit empirical
-results through the legacy mathematical `statement + proof` `fact_submit` path.
-Do not fabricate a prose "proof" for numerical evidence.
+The unified `fact_submit` gate now supports empirical claims, but **promotion is
+not the Experimenter's job**. Your normal handoff is the Evidence Packet plus
+Evidence Store records/artifacts. The Researcher forms the bounded candidate claim
+and submits it with explicit scope/evidence refs when appropriate. Never fabricate
+a prose mathematical proof for numerical evidence and do not bypass this role
+boundary merely because the tool is technically visible to the worker runtime.
 
 ## Research-integrity failures: stop rather than adapt
 
