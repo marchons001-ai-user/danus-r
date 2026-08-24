@@ -53,7 +53,7 @@ done
 status_json="$("$ROOT/bin/danus" status "$PROJECT" --json)"
 if ! printf '%s' "$status_json" | "$DANUS_PY" -c 'import json,sys; rows=json.load(sys.stdin); raise SystemExit(0 if all((not r.get("alive")) and r.get("state")=="max_rounds" and r.get("last_fact_id") for r in rows) else 1)'; then
   printf '%s\n' "$status_json"
-  echo "three-agent smoke did not complete within 180s" >&2
+  echo "three-agent smoke did not satisfy completion/fact-id validation" >&2
   exit 1
 fi
 
