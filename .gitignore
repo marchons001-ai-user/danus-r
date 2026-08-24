@@ -60,8 +60,10 @@ paper/.runs/
 .coverage
 .cov_*
 
-# verify agent home — provisioned on service start (launcher.ensure_agent_home)
+# verify agent homes — provisioned on service start
+# (launcher.ensure_agent_home / ensure_empirical_agent_home)
 danus/verify/agent/
+danus/verify/empirical_agent/
 
 # node deps provisioned by bootstrap.sh (human-summary PDF render: markdown-it/katex)
 .claude/skills/human-summary/node_modules/
