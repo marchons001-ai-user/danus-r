@@ -1,90 +1,145 @@
-# danus.verify — the verify service (sole write-gate)
+# danus.verify — Scientific Verification Layer
 
-An **informal-LLM proof verifier** behind a tiny HTTP gateway. It is the sole
-authority on mathematical correctness: a worker's `fact_submit` (in `danus.gateway`)
-calls it, and the candidate fact is written to the fact graph **iff** this service
-returns `verdict: "correct"`.
+`danus.verify` is the HTTP verification service behind Danus-R's fact write gate.
+It now has two deliberately separate verification paths while preserving the
+historical mathematical contract.
 
-It is **not** a formal / Lean checker — a gpt-5.5 codex agent reads the
-natural-language markdown proof (logic, theorem application, external-citation
-checking) and returns a verdict. There is **no human in the loop by default** —
-research-level target theorems still need expert review before being trusted.
+## Routes
 
-## Black-box contract
+### Analytical / mathematical
 
-```
+```text
 POST /verify
-  request : {"statement": <str, >=1 char>, "proof": <str, >=1 char>}   # application/json
-  200     : {"verification_report": {"summary": str,
-                                      "critical_errors": [{"location": str, "issue": str}, ...],
-                                      "gaps":            [{"location": str, "issue": str}, ...]},
-             "verdict": "correct" | "wrong",
-             "repair_hints": str}                # "" iff verdict == "correct"
-  400     : vacuous input, or a P1/P3/P5 pre-check match (see prechecks.py)
-  422     : request-model validation (empty statement/proof)
-  500     : codex failed / wrote no output / output is not valid JSON / non-dict
-  504     : codex exec timed out (only if CODEX_TIMEOUT_SECONDS is set)
-
-GET /health -> {"status": "ok", "pid": <int>}    # async; never queues behind /verify
-                                                 # pid self-identifies the instance so
-                                                 # doctor/services can tell OUR verify
-                                                 # from a foreign one on a shared port
+{"statement": "...", "proof": "..."}
 ```
 
-**Invariant (enforced by the verifier *prompt*, not this code):**
-`verdict == "correct"` ⟺ `critical_errors == []` **and** `gaps == []`. This service
-returns whatever the agent wrote; it does not recompute the verdict.
+The existing path is unchanged:
 
-## Modules
-- `prechecks.py` — pure, offline-testable: vacuousness + P1/P3/P5 hard prohibitions
-  (all env-toggleable, all purely additive — they can only *reject* more).
-- `launcher.py` — cold-start codex launcher (via the shared `danus.codex`): `codex
-  exec --model gpt-5.5 --config model_reasoning_effort="xhigh" -C <AGENT_HOME>
-  -c <danus MCP, role=verifier> --dangerously-bypass-approvals-and-sandbox <prompt>`;
-  atomic run-id; reads back `verification.json`. Injects the gateway as **`python
-  -m danus.gateway`**.
-- `service.py` — FastAPI app (`/verify`, `/health`).
-
-## Run
-
-```bash
-python -m danus.verify          # 127.0.0.1:8091, default CODEX_TIMEOUT_SECONDS=900
+```text
+statement + proof
+→ deterministic math prechecks
+→ cold-start mathematical verifier (`agents/contracts/verifier.md`)
+→ verdict: correct | wrong
 ```
 
-Binds **loopback by default** (set `VERIFY_HOST=0.0.0.0` if the
-gateway runs on another host). Needs a codex CLI: set **`DANUS_CODEX_BIN`** (or
-`codex` on PATH / the repo's `bin/codex` wrapper) and
-an account via `CODEX_HOME` — **there is no built-in fallback path** (BYO). The
-verifier agent runs `python -m danus.gateway`, so `danus` must be installed in that
-environment.
+The mathematical verifier is an informal LLM judge, not Lean or another formal
+proof assistant. Existing `fact_submit` callers continue to use this route.
 
-## Configuration (env vars)
+### Empirical
 
-| var | default | meaning |
-| --- | --- | --- |
-| `VERIFY_HOST` / `VERIFY_PORT` (or `PORT`) | `127.0.0.1` / `8091` | bind addr (`python -m danus.verify`) |
-| `VERIFY_AGENT_HOME` | `<this dir>/agent` | the codex `-C` working dir (AGENTS.md + skills) |
-| `VERIFIER_RESULTS_DIR` | `<this dir>/runs` | per-verification run dirs (`log.md` + `verification.json`) |
-| `DANUS_CODEX_BIN` | `<repo>/bin/codex` → `which codex` → bare `"codex"` | the codex binary; resolved via the shared `danus.codex` launcher |
-| `DANUS_VERIFY_MODEL` / `DANUS_VERIFY_EFFORT` (fall back to neutral `DANUS_CODEX_MODEL` / `DANUS_CODEX_EFFORT`) | `gpt-5.5` / `xhigh` | codex knobs |
-| `CODEX_TIMEOUT_SECONDS` | `0` lib / **`900`** via `python -m danus.verify` | per-verification codex timeout |
-| `VERIFY_MIN_STATEMENT_CHARS` / `VERIFY_MIN_PROOF_CHARS` / `VERIFY_MIN_PROOF_WORDS` | 10 / 30 / 5 | vacuousness thresholds |
-| `VERIFY_REJECT_PROBLEM_MD_CITATIONS` / `VERIFY_REJECT_UNPROVEN_CONDITIONALS` / `VERIFY_REJECT_VAGUE_GESTURES` | `1` | toggle P1 / P3 / P5 (`0` disables) |
+```text
+POST /verify/empirical
+{
+  "statement": "...",
+  "project_dir": "/path/to/project",
+  "scope": {...},
+  "evidence_refs": ["<evidence_id>", ...],
+  "evidence_summary": "..."
+}
+```
 
-## How `fact_submit` reaches it
-`danus.gateway`'s `fact_submit` POSTs `{statement, proof}` to `DANUS_VERIFY_URL`
-(e.g. `http://127.0.0.1:8091/verify`), writes the fact **iff** `verdict ==
-"correct"`, and always records the outcome to global memory (kind `verification`).
-Until this service is up and `DANUS_VERIFY_URL` is set, `fact_submit` returns a
-clear "verify service not wired" error.
+The empirical path is intentionally ordered by cost and determinism:
 
-## Trust assumptions (security)
+```text
+candidate empirical claim
+→ deterministic Evidence Store checks
+   - project/scope/evidence references
+   - content-addressed evidence-record identity
+   - frozen protocol identity + revision/post-hoc lineage
+   - explicit matrix coverage
+   - artifact existence, byte size, SHA-256
+→ if any deterministic check fails: verdict=wrong, NO LLM CALL
+→ otherwise: semantic evidence audit (`agents/contracts/empirical_verifier.md`)
+→ verdict: correct | wrong
+```
 
-- The verifier runs `codex exec --dangerously-bypass-approvals-and-sandbox` inside
-  `VERIFY_AGENT_HOME` — that agent home (its `AGENTS.md` + skills) is **trusted
-  input**; do not point it at untrusted content.
-- It is an **LLM judge, not a formal (Lean) checker**, with **no human in the loop
-  by default**; a `correct` verdict writes a permanent fact. Research-level target
-  theorems need expert human review before being trusted.
-- Binds **loopback** by default; `DANUS_VERIFY_TIMEOUT` (900 via `python -m
-  danus.verify`) bounds each codex call.
+The semantic verifier judges only questions a deterministic program cannot
+reliably decide from generic experiment records: whether the claim is actually
+supported, whether it exceeds the tested scope, whether it hides negative/failed
+runs or deviations, whether a post-hoc result is being misrepresented as
+independent confirmation, and whether causal/mechanistic language exceeds the
+experimental design.
+
+`post_hoc=true` is not an automatic rejection. It is provenance: the claim must be
+phrased and interpreted accordingly.
+
+The empirical semantic verifier receives the small protocol/evidence manifests,
+not raw experiment trees. It has no Danus MCP tools, does not search the web, and
+does not re-run experiments. Raw artifacts are protected by the hashes stored in
+the Evidence Store.
+
+## Why there are two paths
+
+The distinction is by **verification mechanism**, not by separate truth stores.
+Analytical and empirical facts later enter the same Scientific Fact Graph; only
+the evidence and gate differ.
+
+- analytical fact → proof correctness;
+- empirical fact → evidence integrity + semantic claim/evidence support.
+
+A program should decide every condition it can decide exactly before an LLM is
+used. This both lowers cost and avoids asking a probabilistic judge to verify file
+integrity or arithmetic bookkeeping.
+
+## HTTP behavior
+
+`GET /health` returns:
+
+```json
+{"status": "ok", "pid": 12345}
+```
+
+For both verification paths, `wrong` is a normal scientific verdict and is
+returned as HTTP 200. Transport/process failures remain HTTP errors.
+
+The empirical deterministic-rejection response includes the failed checks in
+`verification_report.deterministic_checks`, so the caller can repair provenance
+without spending a semantic-verifier call.
+
+## Launcher behavior
+
+Both semantic agents reuse `danus.verify.launcher` for:
+
+- unique run ids;
+- isolated run directories;
+- model/effort resolution through `danus.codex`;
+- timeout/error handling;
+- log capture;
+- reading `verification.json`.
+
+The analytical verifier retains its existing Danus theorem-search MCP tool and
+verification skills. The empirical verifier uses a separate agent home and no MCP
+tools/skills because deterministic work is completed before it runs.
+
+## Configuration
+
+Shared/analytical settings remain compatible:
+
+- `VERIFY_HOST` / `VERIFY_PORT`
+- `VERIFY_AGENT_HOME`
+- `VERIFIER_RESULTS_DIR`
+- `DANUS_VERIFY_MODEL` / `DANUS_VERIFY_EFFORT`
+- `DANUS_CODEX_MODEL` / `DANUS_CODEX_EFFORT`
+- `CODEX_TIMEOUT_SECONDS`
+- existing mathematical precheck toggles
+
+Empirical semantic-audit overrides are optional:
+
+- `EMPIRICAL_VERIFY_AGENT_HOME`
+- `DANUS_EMPIRICAL_VERIFY_MODEL`
+- `DANUS_EMPIRICAL_VERIFY_EFFORT`
+
+If empirical model/effort overrides are unset they fall back to the analytical
+verify overrides, then to the neutral Codex defaults. This allows a cheaper
+semantic-audit model to be selected without weakening deterministic checks.
+
+## Current A2-4 boundary
+
+A2-4b provides verification routing only. The gateway's existing `fact_submit`
+still uses the analytical route. A2-4c will connect empirical submission to this
+route, write accepted empirical facts into the unified Scientific Fact Graph, and
+persist the final verification/promotion trace.
+
+The verify service itself is stateless with respect to project truth stores: it
+reads empirical Evidence Store records for verification but does not write the
+Fact Graph or Global Memory.
