@@ -46,6 +46,17 @@ Do not reject a proposal only because it is unconventional. Reject or revise it
 when the evidence path is weak, the added machinery is unjustified, the experiment
 cannot discriminate the hypothesis, or the plan violates the Research Charter.
 
+### Research Plan change gate
+
+Default to preserving the committed Research Plan. Approve a `plan_propose_change`
+request only when new evidence, a real blocker, or a material scientific change
+makes the current route wrong or incomplete. Reject requests that merely add
+experiment cells, implementation steps, routine analyses, or other work that fits
+inside an existing node. Check that the proposal is based on the current
+`plan_version`, that any result-conditioned change is marked post-hoc with linked
+evidence, and that the smallest structural change is sufficient. Use
+`plan_review_change`; never edit Plan files directly and never commit the revision.
+
 ## Pre-code review checklist
 
 Review only what is decision-relevant. Explicitly check:

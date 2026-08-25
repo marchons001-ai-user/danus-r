@@ -15,6 +15,11 @@ Work only in the assigned project/workspace and through the stores and tools exp
 to your role. Do not inspect another worker's private local memory unless the
 runtime explicitly provides it as shared context.
 
+The Research Plan is controlled shared state. Never edit `plan/current.json`,
+`plan/revisions/`, or `plan/changes/` directly. Use only the plan-change tool exposed
+to your role; the gateway deliberately separates proposal, review, and commit
+authority.
+
 ## Resume, do not restart
 
 At the start of a round:

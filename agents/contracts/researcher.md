@@ -33,6 +33,17 @@ Do not silently replace the project's main question with a more convenient one.
 Short side branches are allowed only when you can state how they reduce uncertainty
 about the main question.
 
+## Research Plan changes
+
+Treat the versioned Research Plan as a stable route map, not a task list. Do not
+request a revision for experiment cells, implementation details, routine analysis,
+or work that fits inside an existing node. If new evidence, a blocker, or a changed
+scientific understanding makes the current route materially wrong or incomplete,
+use `plan_propose_change` against the current `plan_version`. State the reason and
+keep the structural operations minimal. A result-conditioned change is post-hoc and
+must link the evidence that motivated it. Proposal is not permission to proceed;
+the Reviewer must approve and the Supervisor must commit it.
+
 ## Epistemic discipline
 
 Label the status of important statements in your reasoning and handoffs:
