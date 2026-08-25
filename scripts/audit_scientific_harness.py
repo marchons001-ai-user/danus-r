@@ -14,8 +14,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from danus.execution import layout as L
+from danus.execution import scaffold
 from danus.execution.loop import kickoff
-from danus.gateway.roles import ROLE_TOOLS, tools_for
+from danus.gateway.roles import tools_for
 
 ROLES = ("worker", "researcher", "reviewer", "experimenter")
 PROJECT = "A2_5_AUDIT"
@@ -44,12 +45,6 @@ def _skills(role: str) -> list[Path]:
     return [] if root is None else sorted(root.glob("**/SKILL.md"))
 
 
-def _gateway_role(role: str) -> str:
-    # A2-5b changes only contract/skill harness. Scientific gateway surfaces are
-    # introduced in A2-5c; until then they still use DANUS_ROLE=worker.
-    return role if role in ROLE_TOOLS else "worker"
-
-
 def main() -> None:
     charter_template = L.research_charter_template()
     charter_bytes = _nbytes(charter_template)
@@ -72,7 +67,7 @@ def main() -> None:
                 codex_prompt_bytes = len(kickoff(PROJECT, worker, role).encode("utf-8"))
             with _env(DANUS_AGENTS_ROOT=str(root), CODEX_BACKEND="dsh"):
                 dsh_prompt_bytes = len(kickoff(PROJECT, worker, role).encode("utf-8"))
-            gateway_role = _gateway_role(role)
+            gateway_role = scaffold.gateway_role(role)
             rows.append(
                 {
                     "role": role,
