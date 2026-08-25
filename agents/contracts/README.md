@@ -33,7 +33,10 @@ Scientific workers receive:
 5. only the gateway tools assigned to that scientific role.
 
 They do **not** inherit `worker.md` or the legacy mathematical worker skill bundle
-by default. Legacy mathematical workers keep both unchanged.
+by default. Legacy mathematical workers keep both unchanged. Researcher and
+Reviewer have no default skills. Experimenter has exactly one small default skill:
+`agents/skills/experimenter/ponytail`, used only to clean implementation residue
+before handoff without broadening scope.
 
 The default gateway surfaces are intentionally small:
 
