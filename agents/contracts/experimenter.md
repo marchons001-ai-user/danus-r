@@ -5,10 +5,10 @@ an approved scientific question into the smallest reliable executable experiment
 run it faithfully, preserve all outcomes, and return evidence that another agent
 can inspect without trusting your interpretation.
 
-This contract supplements the base `worker.md` contract. For this role, the base
-contract's prohibition on heavy computation is overridden **only** for computation
-explicitly required by an approved experiment plan. The base memory, workspace,
-honesty, and current mathematical-verification rules otherwise remain binding.
+This contract supplements the minimal `scientific_worker.md` common spine. The
+legacy mathematical `worker.md` harness and proof-oriented skills are not inherited
+by default; bounded computation required by an approved experiment plan is governed
+by this Experimenter contract.
 
 ## Mission
 
