@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from danus.core import ProgressLedger, ResearchPlanGraph
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
 
@@ -82,13 +83,27 @@ def _read_status(wl: L.WorkerLayout) -> Dict:
         return {}
 
 
+def _read_worker_role(wl: L.WorkerLayout) -> str:
+    if not wl.role.is_file():
+        return "worker"
+    try:
+        for line in wl.role.read_text(encoding="utf-8").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == "ROLE" and value.strip():
+                return value.strip().lower()
+    except OSError:
+        pass
+    return "worker"
+
+
 # --------------------------------------------------------------------------- #
 # assign                                                                       #
 # --------------------------------------------------------------------------- #
 
-def do_assign(target: str, task: str) -> Dict:
-    """Overwrite (replace, NOT append) a worker's TASK.md, ensuring a trailing
-    newline. Rejects a bare project, a nonexistent worker, and an empty task."""
+def do_assign(target: str, task: str, node_id: Optional[str] = None) -> Dict:
+    """Replace one worker TASK.md and, for planned projects, bind it to Plan."""
     project, worker = L.resolve_target(target)
     if not worker:
         raise SystemExit("assign needs a specific worker: <project>/<worker>")
@@ -97,8 +112,52 @@ def do_assign(target: str, task: str) -> Dict:
         raise SystemExit(f"no such worker: {project}/{worker}")
     if not task.strip():
         raise SystemExit("refusing to assign an empty task")
-    atomic_write(wl.task, task if task.endswith("\n") else task + "\n")
-    return {"worker": f"{project}/{worker}", "task_file": str(wl.task)}
+
+    text = task if task.endswith("\n") else task + "\n"
+    pdir = wl.project_dir
+    planned = (pdir / "plan" / "current.json").is_file()
+    if not planned:
+        if node_id:
+            raise SystemExit("cannot use --node: project has no Research Plan")
+        atomic_write(wl.task, text)
+        return {"worker": f"{project}/{worker}", "task_file": str(wl.task)}
+    if not node_id:
+        raise SystemExit("assign on a planned project requires --node <plan_node_id>")
+
+    try:
+        plan_version = ResearchPlanGraph(pdir).snapshot()["plan_version"]
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(f"cannot read Research Plan: {exc}") from exc
+
+    old_task = None
+    if wl.task.exists():
+        try:
+            old_task = wl.task.read_text(encoding="utf-8")
+        except OSError:
+            old_task = None
+    atomic_write(wl.task, text)
+    try:
+        assignment = ProgressLedger(pdir).assign(
+            worker=worker,
+            role=_read_worker_role(wl),
+            node_id=node_id,
+            plan_version=plan_version,
+            task=text,
+        )
+    except ValueError as exc:
+        if old_task is None:
+            wl.task.unlink(missing_ok=True)
+        else:
+            atomic_write(wl.task, old_task)
+        raise SystemExit(f"cannot bind assignment: {exc}") from exc
+
+    return {
+        "worker": f"{project}/{worker}",
+        "task_file": str(wl.task),
+        "assignment_id": assignment["assignment_id"],
+        "node_id": assignment["node_id"],
+        "plan_version": assignment["plan_version"],
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -131,7 +190,6 @@ def do_finalize(project: str, fact_ids: List[str],
     fg = FactGraph(pdir)
 
     if not fact_ids:
-        # suggestion mode: never auto-pick — just list candidate terminal facts.
         return {"project": project, "paper_id": paper_id,
                 "suggested": assemble._terminal_facts(fg)}
 
@@ -141,13 +199,11 @@ def do_finalize(project: str, fact_ids: List[str],
             f"cannot finalize: unknown fact id(s) in {project}: {', '.join(unknown)} "
             f"(a target must be a verified fact in the project's graph)"
         )
-    # validate a non-default paper_id as a single safe path segment before writing.
     try:
         if not assemble._is_default_paper(paper_id):
             assemble._validate_paper_id(paper_id)  # type: ignore[arg-type]
     except ValueError as e:
         raise SystemExit(f"cannot finalize: {e}")
-    # de-dup while preserving order
     seen: set = set()
     ids: List[str] = []
     for fid in fact_ids:
@@ -176,7 +232,7 @@ def _start_one(wl: L.WorkerLayout) -> str:
             return "locked"
         if _alive(_read_pid(wl)):
             return "already-running"
-        wl.stop.unlink(missing_ok=True)  # clear a stale stop flag
+        wl.stop.unlink(missing_ok=True)
         pid = spawn_loop(wl.dir)
         atomic_write(wl.pid, str(pid))
         return "started"
@@ -211,7 +267,6 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
     age = (now - last) if isinstance(last, (int, float)) else None
 
     if alive:
-        # a round legitimately runs for hours; only flag truly stale running rounds
         rs = st.get("round_started_at")
         hard = int(os.environ.get("DANUS_ROUND_HARD_TIMEOUT", "14400"))
         if state == "running" and isinstance(rs, (int, float)) and (now - rs) > hard * 1.5:
@@ -221,10 +276,25 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
     else:
         label = state if state in ("stopped", "deadline", "max_rounds", "error",
                                    "terminated", "created") else "dead"
+
+    progress = None
+    progress_error = None
+    ledger_path = wl.project_dir / "progress" / "ledger.jsonl"
+    if ledger_path.is_file():
+        try:
+            progress = ProgressLedger(wl.project_dir).current(wl.name, refresh_stale=True)
+        except (FileNotFoundError, ValueError) as exc:
+            progress_error = str(exc)
+
     return {
         "worker": wl.name, "pid": pid, "alive": alive, "state": state,
         "round": st.get("round", 0), "age_s": round(age, 1) if age is not None else None,
         "last_fact_id": st.get("last_fact_id"), "label": label,
+        "assignment_id": progress.get("assignment_id") if progress else None,
+        "plan_node_id": progress.get("node_id") if progress else None,
+        "plan_version": progress.get("plan_version") if progress else None,
+        "progress_state": progress.get("state") if progress else None,
+        "progress_error": progress_error,
     }
 
 
@@ -285,9 +355,8 @@ def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
     if not force:
         if not _alive(pid):
             return "not-running"
-        wl.stop.touch()      # graceful: loop exits at round boundary
+        wl.stop.touch()
         return "stopping (graceful)"
-    # force: kill the loop's process group (loop + its codex child), then SIGKILL
     if not _alive(pid):
         wl.pid.unlink(missing_ok=True)
         return "not-running"
@@ -296,7 +365,7 @@ def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
         os.killpg(pgid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
-    for _ in range(50):                          # up to ~5s for a clean exit
+    for _ in range(50):
         if not _alive(pid):
             break
         time.sleep(0.1)
@@ -348,6 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--task", default=None)
     a.add_argument("--file", default=None)
     a.add_argument("--stdin", action="store_true")
+    a.add_argument("--node", default=None, help="Research Plan node id; required when a plan exists")
 
     f = sub.add_parser("finalize", help="record the finalized target fact_id(s) in "
                                         "a paper's TARGET.md (write-paper reads this)")
@@ -382,8 +452,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"created {args.project} with {len(r['workers'])} workers: "
               f"{', '.join(r['workers'])}\n  {r['project_dir']}")
     elif args.cmd == "assign":
-        r = do_assign(args.target, _task_from_args(args))
-        print(f"assigned {r['worker']} -> {r['task_file']}")
+        r = do_assign(args.target, _task_from_args(args), node_id=args.node)
+        suffix = ""
+        if r.get("assignment_id"):
+            suffix = f" [node {r['node_id']} @ plan v{r['plan_version']}]"
+        print(f"assigned {r['worker']} -> {r['task_file']}{suffix}")
     elif args.cmd == "finalize":
         r = do_finalize(args.project, args.fact_ids, paper_id=args.paper)
         paper_note = f" (paper {args.paper})" if args.paper else ""

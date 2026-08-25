@@ -6,6 +6,7 @@ Shared stores:
                      analytical + empirical scientific facts.
 - ``EvidenceStore``— immutable frozen protocols and empirical evidence records.
 - ``ResearchPlanGraph`` — coarse project research directions and dependencies.
+- ``ProgressLedger`` — append-only runtime assignment/progress state.
 - ``GlobalMemory`` — project-shared strongly-typed findings (awareness, not truth).
 - ``LocalMemory``  — per-worker private scratch log.
 
@@ -21,6 +22,7 @@ from .factgraph import FactGraph, parse_frontmatter, serialize_fact, statement_o
 from .global_memory import GlobalMemory
 from .local_memory import DEFAULT_CHANNELS, LocalMemory
 from .plan import ResearchPlanGraph
+from .progress import ProgressLedger
 from .schema import (
     EXTERNAL_REF_KEYS,
     FACT_TYPES,
@@ -36,6 +38,7 @@ __all__ = [
     "FactGraph",
     "EvidenceStore",
     "ResearchPlanGraph",
+    "ProgressLedger",
     "GlobalMemory",
     "LocalMemory",
     "DEFAULT_CHANNELS",
