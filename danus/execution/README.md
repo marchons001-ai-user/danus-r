@@ -23,8 +23,10 @@ Memory, and lifecycle control files.
 Harness selection is role-dependent:
 
 - legacy mathematical worker → `worker.md` + `agents/skills/worker`;
-- Researcher/Reviewer/Experimenter → `scientific_worker.md` + injected role
-  contract + Research Charter, with no default skill bundle.
+- Researcher/Reviewer → `scientific_worker.md` + injected role contract + Research
+  Charter, with no default skills;
+- Experimenter → the same scientific spine/contract/Charter plus only
+  `agents/skills/experimenter/ponytail` for final code cleanup.
 
 The loop re-syncs Danus-managed harness symlinks and the gateway `DANUS_ROLE` from
 `.role` on every worker start. Role-specific gateway permissions are defined once
@@ -44,7 +46,9 @@ atomically. Resumability is continuity in the stores rather than process state.
 Legacy workers retain the historical adaptive mathematical skill loop. Scientific
 roles receive a smaller kickoff focused on `TASK.md`, the common scientific spine,
 their role contract, the Charter, relevant project state, and only the tool names
-actually exposed to that role.
+actually exposed to that role. The Experimenter's single Ponytail skill is also
+included in DSH prompt shaping and exposed through the worker-home skill link for
+Codex.
 
 ## Connects to
 
