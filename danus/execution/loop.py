@@ -1,31 +1,10 @@
 """The per-worker autonomous outer loop — the round driver.
 
-Launched detached by ``danus start`` (``python -m danus.execution <worker_dir>``).
-Self-contained. Each round runs ONE ``codex exec`` session
-whose internal control loop (worker.md + the worker skills) drives toward a full
-verified result — a round is *continue solving from persisted memory*, NOT one
-increment. The round ends when codex's session ends (its stopping rule, the
-per-round hard timeout, or it bails); the loop then relaunches a fresh session
-that resumes from memory. Stops on the ``.stop`` flag (graceful, at a round
-boundary), the project deadline, or a round backstop.
-
-Danus-R scientific roles are supplementary contracts. ``ROLE`` in a worker's
-``.role`` selects researcher/reviewer/experimenter independently of backend,
-model, and reasoning effort. The loop injects that role contract and the project's
-Research Charter into each scientific round; legacy roles keep the original worker
-behavior.
-
-Config:
-  - codex binary resolved via the shared ``danus.codex`` launcher
-    (``DANUS_CODEX_BIN`` / ``CODEX_BIN`` alias / PATH);
-  - all config read at CALL time from env (matches core/gateway/verify).
-
-Env (all optional; tests inject these):
-  DANUS_CODEX_BIN            codex binary (default "codex")
-  DANUS_ROUND_BEAT           seconds to sleep between rounds (default 5)
-  DANUS_ROUND_HARD_TIMEOUT   per-round hard timeout, seconds (default 14400 = 4h)
-  DANUS_MAX_ROUNDS           round backstop, 0 = unlimited (default 0)
-  DANUS_MAX_CONSEC_FAILURES  bail after this many consecutive failed rounds (default 5)
+Each round runs one model session and resumes from persisted project state. Legacy
+mathematical workers keep the historical ``worker.md`` + mathematical skills.
+Researcher/Reviewer/Experimenter rounds use the minimal scientific worker spine,
+their role contract, and the project Research Charter; no mathematical skill bundle
+is attached by default.
 """
 
 from __future__ import annotations
@@ -47,7 +26,7 @@ from danus import codex
 _FACT_ID_RE = re.compile(r"(?i:fact(?:_|\s+)id)\b[\"'`\s]*[:=]?\s*[\"'`]?([0-9a-f]{16})[\"'`]?")
 
 
-# --- the per-round prompt (continuation semantics; see worker.md) ----------- #
+# --- the per-round prompt -------------------------------------------------- #
 
 def _scientific_context(project: str, role_name: str) -> str:
     role_path = L.scientific_role_md(role_name)
@@ -64,31 +43,52 @@ def _scientific_context(project: str, role_name: str) -> str:
             "constraints; surface the missing Charter before substantive scientific work.\n"
         )
     return (
-        f"\n\n6. Your Danus-R scientific ROLE is '{role_name}'. The role contract "
-        f"and project Research Charter below are binding for this round. The role "
-        f"contract supplements the common AGENTS.md contract; where it explicitly "
-        f"overrides role behavior, follow the role contract.\n\n"
+        f"\n\nYour Danus-R scientific ROLE is '{role_name}'. The role contract and "
+        "project Research Charter below are binding for this round and supplement "
+        "the minimal common AGENTS.md scientific-worker spine.\n\n"
         f"<SCIENTIFIC_ROLE_CONTRACT>\n{role_text}\n</SCIENTIFIC_ROLE_CONTRACT>\n\n"
         f"<PROJECT_RESEARCH_CHARTER>\n{charter_text}\n</PROJECT_RESEARCH_CHARTER>"
     )
 
 
 def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
+    role_key = (role_name or "worker").strip().lower()
+    scientific = role_key in L.SCIENTIFIC_ROLES
+    if scientific:
+        prompt = (
+            f"You are worker '{worker}' on project '{project}'. Continue the current "
+            "scientific task; this is a continuation round, not a fresh start.\n"
+            "1. Read TASK.md.\n"
+            "2. Follow AGENTS.md, your injected scientific role contract, and the project "
+            "Research Charter.\n"
+            "3. Resume from only the relevant shared findings, verified facts/evidence, "
+            "prior decisions, and your own local continuity; do not restart from zero.\n"
+            "4. Perform only the work assigned to your role and current task; do not "
+            "inherit the legacy mathematical skill loop by default.\n"
+            "5. Persist useful progress in the correct knowledge layer and keep claims at "
+            "their actual evidence status."
+            f"{_scientific_context(project, role_key)}"
+        )
+        return codex.prepare_prompt(
+            prompt, L.scientific_worker_md(),
+            tools=("gm_add", "gm_search", "fact_search", "fact_submit",
+                   "search_arxiv_theorems"),
+        )
+
     prompt = (
         f"You are worker '{worker}' on project '{project}'. Continue solving the "
-        f"problem (this is a continuation round, not a fresh start).\n"
-        f"1. Read TASK.md — your current assignment (which direction/subgoal is yours).\n"
-        f"2. Follow AGENTS.md (worker.md) exactly — your standing common contract "
-        f"(the adaptive control loop, memory discipline, and current fact_submit gate).\n"
-        f"3. Resume from state: gm_search relevant findings + dead ends, read the fact "
-        f"graph and the latest master_guidance — DO NOT restart from zero; build on what "
-        f"is already there.\n"
-        f"4. Keep going: assess -> pick skills adaptively -> act -> persist, repeatedly. "
-        f"An open problem is not a reason to stop. Do NOT finalize prematurely.\n"
-        f"5. Persist as you go: rough progress to local memory; shareable findings via "
-        f"gm_add; use fact_submit only where the active contracts say the current legacy "
-        f"verification path is appropriate."
-        f"{_scientific_context(project, role_name)}"
+        "problem (this is a continuation round, not a fresh start).\n"
+        "1. Read TASK.md — your current assignment (which direction/subgoal is yours).\n"
+        "2. Follow AGENTS.md (worker.md) exactly — your standing common contract "
+        "(the adaptive control loop, memory discipline, and current fact_submit gate).\n"
+        "3. Resume from state: gm_search relevant findings + dead ends, read the fact "
+        "graph and the latest master_guidance — DO NOT restart from zero; build on what "
+        "is already there.\n"
+        "4. Keep going: assess -> pick skills adaptively -> act -> persist, repeatedly. "
+        "An open problem is not a reason to stop. Do NOT finalize prematurely.\n"
+        "5. Persist as you go: rough progress to local memory; shareable findings via "
+        "gm_add; use fact_submit only where the active contracts say the current legacy "
+        "verification path is appropriate."
     )
     return codex.prepare_prompt(
         prompt, L.worker_md(), L.worker_skills_dir(),
@@ -97,13 +97,7 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
     )
 
 
-# --- config (read at call time) -------------------------------------------- #
-
-# codex binary + model/effort defaults are resolved via the shared danus.codex
-# launcher (DANUS_CODEX_BIN / DANUS_CODEX_MODEL / DANUS_CODEX_EFFORT).
-
-
-# --- small helpers --------------------------------------------------------- #
+# --- config --------------------------------------------------------------- #
 
 def _read_role(wl: L.WorkerLayout) -> dict:
     out = {"MODEL": codex.model(),
@@ -164,16 +158,12 @@ class _Child:
 
 def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
               hard_timeout: int) -> int:
-    """Exec one ``codex exec`` continuation session. Returns codex's rc, 124 on
-    hard-timeout (terminate → wait 10s → kill), or 127 if the codex binary is
-    missing."""
+    """Exec one continuation session. Returns rc, 124 on timeout, 127 if missing."""
     wdir = wl.dir
     codex_bin = codex.resolve_bin()
     cmd = codex.exec_cmd(
         codex_bin, role["MODEL"], role["REASONING_EFFORT"],
         "-C", str(wdir),
-        # on an install without .git (tarball download), codex's
-        # trusted-directory check refuses to run the worker round
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
         prompt,
@@ -205,7 +195,6 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
 # --- the loop -------------------------------------------------------------- #
 
 def _cleanup_pid(wl: L.WorkerLayout) -> None:
-    """Remove our own .pid if it still points at us (clean exit only)."""
     pf = wl.pid
     try:
         if pf.exists() and pf.read_text().strip() == str(os.getpid()):
@@ -224,13 +213,13 @@ def main(worker_dir: str) -> int:
     project = wl.project
     worker = wl.name
     role = _read_role(wl)
+    role_name = role.get("ROLE", "worker")
     if role.get("BACKEND"):
         os.environ["CODEX_BACKEND"] = role["BACKEND"]
 
-    # Pin the worker's gateway to THIS interpreter (sys.executable = the venv
-    # python danus runs on), rewritten every start: a moved/rebuilt venv is
-    # picked up, and a bare `python3` on codex's PATH can never resolve the
-    # gateway to a different install.
+    # The role can change between starts. Rewire only Danus-managed harness links
+    # before Codex/DSH enters the worker home.
+    scaffold.sync_worker_harness(wl, role_name)
     scaffold.write_codex_config(wl)
 
     beat = float(os.environ.get("DANUS_ROUND_BEAT", "5"))
@@ -238,7 +227,7 @@ def main(worker_dir: str) -> int:
     max_rounds = int(os.environ.get("DANUS_MAX_ROUNDS", "0"))
     max_fail = int(os.environ.get("DANUS_MAX_CONSEC_FAILURES", "5"))
     wl.logs.mkdir(parents=True, exist_ok=True)
-    prompt = kickoff(project, worker, role.get("ROLE", "worker"))
+    prompt = kickoff(project, worker, role_name)
 
     def _on_term(signum, _frame):
         if _Child.proc is not None:
@@ -274,7 +263,7 @@ def main(worker_dir: str) -> int:
                 last_rc=rc, last_fact_id=_parse_last_fact_id(log_path),
             )
 
-            if rc == 127:                    # codex missing — do not spin
+            if rc == 127:
                 write_status(wl, state="error", error="codex binary not found")
                 return 127
             consec_fail = consec_fail + 1 if rc not in (0, 124) else 0
