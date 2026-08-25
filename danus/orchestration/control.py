@@ -21,7 +21,6 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
     ledger = ProgressLedger(root)
     current_assignments = ledger.snapshot(refresh_stale=True)
     all_assignments = ledger.assignments()
-    completed = set(ledger.completed_nodes())
     nodes = plan["nodes"]
     status_by_worker = {str(row.get("worker") or ""): row for row in worker_rows}
 
@@ -38,15 +37,30 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
             current = node.get("parent")
         return True
 
-    def blocked_dependencies(node_id: str) -> List[str]:
-        node = nodes.get(node_id) or {}
-        return [dep for dep in node.get("depends_on", []) if dep not in completed]
-
     active_children = {node_id: [] for node_id in nodes}
     for node_id, node in nodes.items():
         parent = node.get("parent")
         if parent in active_children and active_route(node_id):
             active_children[parent].append(node_id)
+
+    # A recorded DONE remains effective only while its route is active and every
+    # active child is also complete. Progressive expansion therefore reopens the
+    # parent for dependency purposes without rewriting the old ledger event.
+    completed = set(ledger.completed_nodes())
+    changed = True
+    while changed:
+        changed = False
+        for node_id in list(completed):
+            if (
+                not active_route(node_id)
+                or any(child not in completed for child in active_children[node_id])
+            ):
+                completed.remove(node_id)
+                changed = True
+
+    def blocked_dependencies(node_id: str) -> List[str]:
+        node = nodes.get(node_id) or {}
+        return [dep for dep in node.get("depends_on", []) if dep not in completed]
 
     frontier = sorted(
         node_id
