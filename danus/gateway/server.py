@@ -366,16 +366,30 @@ def fact_submit(
 def fact_search(query: str, limit: int = 10, project: Optional[str] = None) -> Dict[str, Any]:
     """BM25 search over the unified verified scientific fact graph. The derived
     search index is rebuilt on demand from fact files; the graph stays the single
-    source of truth. Returns ranked ``{fact_id, score, statement}`` entries."""
+    source of truth. Results include fact type, scope, and empirical evidence ids
+    so a searched claim can be followed to its immutable Evidence Record/artifacts."""
     return {"query": query, "results": _fg(project).search(query, limit=limit)}
 
 
-def fact_revoke(fact_id: str, reason: str, project: Optional[str] = None) -> Dict[str, Any]:
-    """Cascade-revoke a wrong fact and everything that depends on it. Destructive;
-    operator / main-agent only. Main agent: pass ``project`` to target the project
-    that owns the fact."""
-    revoked = _fg(project).revoke(fact_id, reason=reason)
-    return {"revoked": revoked}
+def fact_revoke(
+    fact_id: str,
+    reason: str,
+    project: Optional[str] = None,
+    replacement_fact_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Cascade-revoke a wrong/superseded fact and everything that depends on it.
+    Operator / main-agent only. ``replacement_fact_id`` must already name an active
+    verified fact and cannot depend on the retiring fact. Historical files remain
+    archived under ``_revoked``. Main agent: pass ``project`` to target the project."""
+    revoked = _fg(project).revoke(
+        fact_id,
+        reason=reason,
+        replacement_fact_id=replacement_fact_id,
+    )
+    out: Dict[str, Any] = {"revoked": revoked}
+    if replacement_fact_id:
+        out["replacement_fact_id"] = replacement_fact_id
+    return out
 
 
 # --------------------------------------------------------------------------- #

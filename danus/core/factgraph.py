@@ -295,7 +295,7 @@ class FactGraph:
         return {}
 
     def search(self, query: str, limit: int = 10) -> List[Dict[str, object]]:
-        """BM25 over all verified fact bodies, analytical and empirical."""
+        """BM25 over active verified facts, including evidence pointers."""
         fids = self.list()
         if not fids:
             return []
@@ -306,7 +306,17 @@ class FactGraph:
         for fid, raw, score in sorted(zip(fids, raws, scores), key=lambda t: -t[2]):
             if score <= 0:
                 break
-            ranked.append({"fact_id": fid, "score": score, "statement": statement_of(raw)})
+            meta = parse_frontmatter(raw)
+            ranked.append(
+                {
+                    "fact_id": fid,
+                    "score": score,
+                    "statement": statement_of(raw),
+                    "fact_type": meta["fact_type"],
+                    "scope": meta["scope"],
+                    "evidence_refs": meta["evidence_refs"],
+                }
+            )
             if len(ranked) >= limit:
                 break
         return ranked
@@ -378,11 +388,25 @@ class FactGraph:
         )
 
     # --------------------------------------------------------------- revoke
-    def revoke(self, fact_id: str, reason: str) -> List[str]:
-        """Cascade-revoke ``fact_id`` and every scientific fact depending on it."""
+    def revoke(
+        self,
+        fact_id: str,
+        reason: str,
+        replacement_fact_id: Optional[str] = None,
+    ) -> List[str]:
+        """Cascade-revoke one fact/descendants, optionally linking its replacement."""
         if not self.exists(fact_id):
             raise ValueError(f"unknown fact_id: {fact_id}")
+        replacement = str(replacement_fact_id or "").strip() or None
+        if replacement == fact_id:
+            raise ValueError("replacement_fact_id must differ from revoked fact")
+        if replacement and not self.exists(replacement):
+            raise ValueError(f"replacement_fact_id is not an active fact: {replacement}")
+
         to_revoke = [fact_id] + self.descendants(fact_id)
+        if replacement and replacement in to_revoke:
+            raise ValueError("replacement_fact_id depends on the fact being revoked")
+
         self.revoked_dir.mkdir(parents=True, exist_ok=True)
         for fid in to_revoke:
             src = self._path(fid)
@@ -395,6 +419,7 @@ class FactGraph:
                     "fact_id": fid,
                     "reason": reason,
                     "revoked_as_dependent_of": fid != fact_id and fact_id or None,
+                    "superseded_by": replacement if fid == fact_id else None,
                 },
             )
         return to_revoke
