@@ -1,4 +1,4 @@
-"""Offline A2-5b tests for role-selected worker harnesses."""
+"""Offline A2-5 tests for role-selected worker harnesses and tool surfaces."""
 from __future__ import annotations
 
 import os
@@ -8,6 +8,7 @@ from pathlib import Path
 
 from danus.execution import layout as L
 from danus.execution import loop, scaffold
+from danus.gateway.roles import tools_for
 
 
 @contextmanager
@@ -55,6 +56,22 @@ def test_sync_worker_harness_switches_only_managed_links(tmp: Path):
     assert (wl.dir / ".agents" / "skills").resolve() == L.worker_skills_dir().resolve()
 
 
+def test_role_specific_gateway_config(tmp: Path):
+    wl = L.WorkerLayout(tmp / "P" / "workers" / "w")
+    wl.dir.mkdir(parents=True)
+    expected = {
+        "worker": "worker",
+        "researcher": "researcher",
+        "reviewer": "reviewer",
+        "experimenter": "experimenter",
+    }
+    for role, gateway_role in expected.items():
+        scaffold.write_codex_config(wl, role)
+        cfg = wl.codex_config.read_text(encoding="utf-8")
+        assert f'DANUS_ROLE = "{gateway_role}"' in cfg
+    assert scaffold.gateway_role("legacy") == "worker"
+
+
 def test_scientific_dsh_prompt_excludes_legacy_math_harness(tmp: Path):
     legacy_contract = tmp / "legacy_worker.md"
     legacy_contract.write_text("LEGACY_WORKER_CONTRACT_MARKER\n", encoding="utf-8")
@@ -74,15 +91,35 @@ def test_scientific_dsh_prompt_excludes_legacy_math_harness(tmp: Path):
         CODEX_BACKEND="dsh",
     ):
         legacy = loop.kickoff("P", "w", "worker")
-        scientific = loop.kickoff("P", "w", "researcher")
+        researcher = loop.kickoff("P", "w", "researcher")
+        reviewer = loop.kickoff("P", "w", "reviewer")
+        experimenter = loop.kickoff("P", "w", "experimenter")
 
     assert "LEGACY_WORKER_CONTRACT_MARKER" in legacy
     assert "LEGACY_MATH_SKILL_MARKER" in legacy
-    assert "LEGACY_WORKER_CONTRACT_MARKER" not in scientific
-    assert "LEGACY_MATH_SKILL_MARKER" not in scientific
-    assert "# Danus-R Scientific Worker Spine" in scientific
-    assert "# Danus-R Researcher Contract" in scientific
-    assert "TEST_CHARTER" in scientific
+    assert "LEGACY_WORKER_CONTRACT_MARKER" not in researcher
+    assert "LEGACY_MATH_SKILL_MARKER" not in researcher
+    assert "# Danus-R Scientific Worker Spine" in researcher
+    assert "# Danus-R Researcher Contract" in researcher
+    assert "TEST_CHARTER" in researcher
+
+    fact_submit_note = "fact_submit -> mcp__danus__fact_submit"
+    arxiv_note = "search_arxiv_theorems -> mcp__danus__search_arxiv_theorems"
+    assert fact_submit_note in researcher and arxiv_note in researcher
+    assert fact_submit_note not in reviewer and arxiv_note in reviewer
+    assert fact_submit_note not in experimenter and arxiv_note not in experimenter
+
+
+def test_scientific_tool_sets():
+    assert tools_for("researcher") == [
+        "gm_add", "gm_search", "fact_submit", "fact_search", "search_arxiv_theorems"
+    ]
+    assert tools_for("reviewer") == [
+        "gm_add", "gm_search", "fact_search", "search_arxiv_theorems"
+    ]
+    assert tools_for("experimenter") == ["gm_add", "gm_search", "fact_search"]
+    assert "fact_submit" not in tools_for("reviewer")
+    assert "fact_submit" not in tools_for("experimenter")
 
 
 def main() -> None:
@@ -92,8 +129,13 @@ def main() -> None:
         test_sync_worker_harness_switches_only_managed_links(Path(d))
     print("  [ok] test_sync_worker_harness_switches_only_managed_links")
     with tempfile.TemporaryDirectory() as d:
+        test_role_specific_gateway_config(Path(d))
+    print("  [ok] test_role_specific_gateway_config")
+    with tempfile.TemporaryDirectory() as d:
         test_scientific_dsh_prompt_excludes_legacy_math_harness(Path(d))
     print("  [ok] test_scientific_dsh_prompt_excludes_legacy_math_harness")
+    test_scientific_tool_sets()
+    print("  [ok] test_scientific_tool_sets")
     print("ALL SCIENTIFIC HARNESS TESTS PASSED")
 
 
