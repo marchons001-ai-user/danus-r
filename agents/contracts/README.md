@@ -29,12 +29,23 @@ Scientific workers receive:
 1. the minimal `scientific_worker.md` common spine;
 2. one scientific role contract;
 3. the project's `RESEARCH_CHARTER.md`;
-4. `TASK.md` and relevant project state.
+4. `TASK.md` and relevant project state;
+5. only the gateway tools assigned to that scientific role.
 
 They do **not** inherit `worker.md` or the legacy mathematical worker skill bundle
-by default. Legacy mathematical workers keep both unchanged. A2-5c handles the
-remaining role-specific gateway/tool surface; A2-5b changes only the standing
-contract/skill harness.
+by default. Legacy mathematical workers keep both unchanged.
+
+The default gateway surfaces are intentionally small:
+
+| Role | Gateway tools |
+| --- | --- |
+| Researcher | `gm_add`, `gm_search`, `fact_search`, `fact_submit`, `search_arxiv_theorems` |
+| Reviewer | `gm_add`, `gm_search`, `fact_search`, `search_arxiv_theorems` |
+| Experimenter | `gm_add`, `gm_search`, `fact_search` |
+
+Only the Researcher has `fact_submit` among the three scientific workers. The
+Reviewer is the design/audit gate, not a Fact Graph writer. The Experimenter
+produces evidence and cannot promote a claim or invoke theorem search by default.
 
 ## Scientific handoffs
 
@@ -50,8 +61,7 @@ contract/skill harness.
   Store protocol/record ids and artifact references.
 - **Researcher → Verification Layer:** `Candidate Scientific Claim`. Analytical
   claims use `statement + proof`; empirical claims use explicit `scope` and
-  immutable `evidence_refs`. The Experimenter normally does not promote empirical
-  claims directly.
+  immutable `evidence_refs`.
 
 ## Scientific verification and promotion
 
