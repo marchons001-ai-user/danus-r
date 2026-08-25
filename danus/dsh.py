@@ -39,6 +39,26 @@ def read_agent_default_model(text: str) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def read_worker_gateway_role(text: str) -> Optional[str]:
+    """Read DANUS_ROLE from the generated ``[mcp_servers.danus.env]`` block."""
+    in_env = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_env = line == "[mcp_servers.danus.env]"
+            continue
+        if in_env and line.startswith("DANUS_ROLE"):
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "DANUS_ROLE":
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] == '"':
+                    role = value[1:-1]
+                    if role and role[0].isalpha() and all(c.isalnum() or c == "_" for c in role):
+                        return role
+                return None
+    return None
+
+
 def rewrite_agent_default_model(path: Path, provider: str, model: str,
                                 effort: str) -> None:
     """Replace the ``agent-default-model`` section; append one if missing."""
@@ -112,7 +132,7 @@ def write_headless_gateway_patch(
 def _cli(argv: list[str]) -> int:
     if not argv:
         print("usage: dsh.py rewrite-settings|read-agent-default-key|"
-              "write-gateway-patch …", file=sys.stderr)
+              "read-worker-gateway-role|write-gateway-patch …", file=sys.stderr)
         return 2
     cmd, rest = argv[0], argv[1:]
     if cmd == "rewrite-settings":
@@ -136,6 +156,18 @@ def _cli(argv: list[str]) -> int:
         val = provider if rest[1] == "provider" else model
         if val:
             sys.stdout.write(val)
+        return 0
+    if cmd == "read-worker-gateway-role":
+        if len(rest) != 1:
+            print("usage: dsh.py read-worker-gateway-role CONFIG.toml", file=sys.stderr)
+            return 2
+        try:
+            text = Path(rest[0]).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return 0
+        role = read_worker_gateway_role(text)
+        if role:
+            sys.stdout.write(role)
         return 0
     if cmd == "write-gateway-patch":
         p = argparse.ArgumentParser(prog="write-gateway-patch")
