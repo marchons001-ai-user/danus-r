@@ -3,8 +3,8 @@
 Each round runs one model session and resumes from persisted project state. Legacy
 mathematical workers keep the historical ``worker.md`` + mathematical skills.
 Researcher/Reviewer/Experimenter rounds use the minimal scientific worker spine,
-their role contract, project Research Charter, and role-specific gateway tools; no
-mathematical skill bundle is attached by default.
+their role contract, project Research Charter, and role-specific gateway tools.
+Researcher/Reviewer have no default skills; the Experimenter gets only Ponytail.
 """
 
 from __future__ import annotations
@@ -71,8 +71,12 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
             "their actual evidence status."
             f"{_scientific_context(project, role_key)}"
         )
+        paths = [L.scientific_worker_md()]
+        skills = L.harness_skills_dir(role_key)
+        if skills is not None:
+            paths.append(skills)
         return codex.prepare_prompt(
-            prompt, L.scientific_worker_md(), tools=tuple(tools_for(gateway_role)),
+            prompt, *paths, tools=tuple(tools_for(gateway_role)),
         )
 
     prompt = (
