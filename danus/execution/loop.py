@@ -3,8 +3,8 @@
 Each round runs one model session and resumes from persisted project state. Legacy
 mathematical workers keep the historical ``worker.md`` + mathematical skills.
 Researcher/Reviewer/Experimenter rounds use the minimal scientific worker spine,
-their role contract, and the project Research Charter; no mathematical skill bundle
-is attached by default.
+their role contract, project Research Charter, and role-specific gateway tools; no
+mathematical skill bundle is attached by default.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from typing import Optional
 from . import layout as L
 from . import scaffold
 from danus import codex
+from danus.gateway.roles import tools_for
 
 _FACT_ID_RE = re.compile(r"(?i:fact(?:_|\s+)id)\b[\"'`\s]*[:=]?\s*[\"'`]?([0-9a-f]{16})[\"'`]?")
 
@@ -54,6 +55,7 @@ def _scientific_context(project: str, role_name: str) -> str:
 def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
     role_key = (role_name or "worker").strip().lower()
     scientific = role_key in L.SCIENTIFIC_ROLES
+    gateway_role = scaffold.gateway_role(role_key)
     if scientific:
         prompt = (
             f"You are worker '{worker}' on project '{project}'. Continue the current "
@@ -70,9 +72,7 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
             f"{_scientific_context(project, role_key)}"
         )
         return codex.prepare_prompt(
-            prompt, L.scientific_worker_md(),
-            tools=("gm_add", "gm_search", "fact_search", "fact_submit",
-                   "search_arxiv_theorems"),
+            prompt, L.scientific_worker_md(), tools=tuple(tools_for(gateway_role)),
         )
 
     prompt = (
@@ -92,8 +92,7 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
     )
     return codex.prepare_prompt(
         prompt, L.worker_md(), L.worker_skills_dir(),
-        tools=("gm_add", "gm_search", "fact_search", "fact_submit",
-               "search_arxiv_theorems"),
+        tools=tuple(tools_for("worker")),
     )
 
 
@@ -218,9 +217,9 @@ def main(worker_dir: str) -> int:
         os.environ["CODEX_BACKEND"] = role["BACKEND"]
 
     # The role can change between starts. Rewire only Danus-managed harness links
-    # before Codex/DSH enters the worker home.
+    # and the matching gateway surface before Codex/DSH enters the worker home.
     scaffold.sync_worker_harness(wl, role_name)
-    scaffold.write_codex_config(wl)
+    scaffold.write_codex_config(wl, role_name)
 
     beat = float(os.environ.get("DANUS_ROUND_BEAT", "5"))
     hard_timeout = int(os.environ.get("DANUS_ROUND_HARD_TIMEOUT", "14400"))
