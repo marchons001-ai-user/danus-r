@@ -153,6 +153,10 @@ fi
 # dir = the grandparent (the truth stores live at <project>/fact_graph etc.).
 GW_ROLE="worker"; GW_AUTHOR="$(basename "$PWD")"
 GW_PROJECT="$(dirname "$(dirname "$PWD")")"; GW_FAIL="true"
+if [ -z "${mcp_arg:-}" ] && [ -f "$PWD/.codex/config.toml" ]; then
+  r="$("$PY" "$DSH_PY" read-worker-gateway-role "$PWD/.codex/config.toml" || true)"
+  [ -n "$r" ] && GW_ROLE="$r"
+fi
 if [ -n "${mcp_arg:-}" ]; then
   r="$(printf '%s' "$mcp_arg" | sed -n 's/.*DANUS_ROLE="\([^"]*\)".*/\1/p')"
   [ -n "$r" ] && GW_ROLE="$r"

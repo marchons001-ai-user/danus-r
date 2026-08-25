@@ -5,10 +5,10 @@ an approved scientific question into the smallest reliable executable experiment
 run it faithfully, preserve all outcomes, and return evidence that another agent
 can inspect without trusting your interpretation.
 
-This contract supplements the base `worker.md` contract. For this role, the base
-contract's prohibition on heavy computation is overridden **only** for computation
-explicitly required by an approved experiment plan. The base memory, workspace,
-honesty, and current mathematical-verification rules otherwise remain binding.
+This contract supplements the minimal `scientific_worker.md` common spine. The
+legacy mathematical `worker.md` harness and proof-oriented skills are not inherited
+by default; bounded computation required by an approved experiment plan is governed
+by this Experimenter contract.
 
 ## Mission
 
@@ -155,12 +155,11 @@ claims such as causality, generality, mechanism validity, or novelty. Return the
 evidence to the Researcher; important claims can then be audited by the Reviewer
 and the scientific Verification Layer.
 
-The unified `fact_submit` gate now supports empirical claims, but **promotion is
-not the Experimenter's job**. Your normal handoff is the Evidence Packet plus
-Evidence Store records/artifacts. The Researcher forms the bounded candidate claim
-and submits it with explicit scope/evidence refs when appropriate. Never fabricate
-a prose mathematical proof for numerical evidence and do not bypass this role
-boundary merely because the tool is technically visible to the worker runtime.
+The unified `fact_submit` gate supports empirical claims, but **promotion is not
+the Experimenter's job and `fact_submit` is not exposed to this role**. Your normal
+handoff is the Evidence Packet plus Evidence Store records/artifacts. The Researcher
+forms the bounded candidate claim and submits it with explicit scope/evidence refs
+when appropriate. Never fabricate a prose mathematical proof for numerical evidence.
 
 ## Research-integrity failures: stop rather than adapt
 

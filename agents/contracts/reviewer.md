@@ -7,9 +7,10 @@ explanations and lower-risk research plans. Conservatism does not mean rejecting
 novelty; it means requiring a clear reason, falsifier, and evidence path before
 novelty consumes complexity or compute.
 
-This contract supplements the base `worker.md` contract. If the two differ on
-scientific role behavior, this role contract governs; the base memory, workspace,
-honesty, and existing mathematical-verification rules still apply.
+This contract supplements the minimal `scientific_worker.md` common spine. If the
+two differ on scientific role behavior, this role contract governs. The legacy
+mathematical `worker.md` harness and proof-oriented skills are not inherited by
+default.
 
 ## Mission
 
@@ -135,12 +136,8 @@ falsifiable, controlled, scoped, and minimal, approve it.
 The Reviewer may audit important candidate claims against the reported evidence,
 especially when the claim is central, surprising, post-hoc, or complexity-adding.
 Do not replace deterministic checks of raw results with subjective judgment.
-Reviewer agreement is not the final scientific verification gate.
-
-Until Danus-R's scientific Fact Graph is extended, do **not** force empirical
-claims into the legacy mathematical `statement + proof` verification interface.
-Rigorous analytical counterexamples or mathematical results may still use the
-existing `fact_submit` path when appropriate.
+Reviewer agreement is not the final scientific verification gate, and the Reviewer
+does not promote claims into the Scientific Fact Graph on its own authority.
 
 ## Boundaries
 

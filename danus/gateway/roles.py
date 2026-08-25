@@ -1,25 +1,13 @@
-"""Role -> allowed-tools table — the permission skeleton of the whole system.
+"""Role -> allowed-tools table for the Danus gateway.
 
-This is the single, first-class source of truth for separation of duties: which
-MCP tools each agent role may even see. It is data (easy to audit / change), not
-logic scattered across the server.
-
-Invariants (load-bearing — see ARCHITECTURE.md §3):
-  - ``main`` has NO ``fact_submit``: the orchestrator does no math and can never
-    fabricate a fact.
-  - ``verifier`` is read-only: only ``search_arxiv_theorems`` (it reads the fact
-    graph as files, writes nothing).
-  - ``worker`` is the only role that can ``fact_submit`` (verifier-gated write).
-All three roles get ``search_arxiv_theorems`` (literature grounding); ``worker``
-and ``main`` additionally get ``fact_search`` (read view over verified facts).
+This is the single source of truth for which MCP tools each runtime role may see.
+Unknown roles fail closed to the verifier surface.
 """
 
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-# All tools the gateway can expose (names must match the functions registered in
-# server.py). Kept here so the role table and the implementation can't drift.
 ALL_TOOLS: Tuple[str, ...] = (
     "gm_add",
     "gm_search",
@@ -30,7 +18,13 @@ ALL_TOOLS: Tuple[str, ...] = (
 )
 
 ROLE_TOOLS: Dict[str, Tuple[str, ...]] = {
+    # Historical mathematical worker: unchanged.
     "worker": ("gm_add", "gm_search", "fact_submit", "fact_search", "search_arxiv_theorems"),
+    # Scientific roles: expose only what each standing contract requires.
+    "researcher": ("gm_add", "gm_search", "fact_submit", "fact_search", "search_arxiv_theorems"),
+    "reviewer": ("gm_add", "gm_search", "fact_search", "search_arxiv_theorems"),
+    "experimenter": ("gm_add", "gm_search", "fact_search"),
+    # Control / verification roles: unchanged.
     "main": ("gm_add", "gm_search", "fact_search", "fact_revoke", "search_arxiv_theorems"),
     "verifier": ("search_arxiv_theorems",),
     "all": ALL_TOOLS,
@@ -38,8 +32,5 @@ ROLE_TOOLS: Dict[str, Tuple[str, ...]] = {
 
 
 def tools_for(role: str) -> List[str]:
-    """The tool names a given role may use. An unknown / misconfigured role falls
-    back to the most-restrictive read-only set (``verifier``), so a typo can never
-    grant write access (fail-closed); the full set requires the explicit
-    ``"all"`` key (dev use)."""
+    """Return the allowed tool names; unknown roles fail closed."""
     return list(ROLE_TOOLS.get(role, ROLE_TOOLS["verifier"]))

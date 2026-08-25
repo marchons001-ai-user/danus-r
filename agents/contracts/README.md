@@ -8,7 +8,8 @@ it must hand off. Runtime/tool permissions remain enforced separately by Danus.
 
 | File | Role/tier | Purpose |
 | --- | --- | --- |
-| `worker.md` | base worker | Legacy Danus mathematical worker contract plus the shared worker honesty/memory/workspace spine. |
+| `worker.md` | legacy mathematical worker | Historical Danus proving harness and mathematical-workflow contract. |
+| `scientific_worker.md` | scientific common spine | Minimal shared honesty, memory, evidence, workspace, persistence, and efficiency rules for Researcher/Reviewer/Experimenter. |
 | `researcher.md` | scientific worker | Exploratory hypothesis/mechanism generation, theoretical reasoning, experiment proposals, evidence interpretation, and bounded candidate-claim promotion. |
 | `reviewer.md` | scientific worker | Conservative pre-code review: prior art, falsifiability, confounds, complexity, integrity, and minimum experiment design. |
 | `experimenter.md` | scientific worker | Minimal implementation and faithful empirical execution; produces evidence-oriented handoffs and preserves negative/null outcomes. |
@@ -25,15 +26,29 @@ and `REASONING_EFFORT` remain separate execution choices.
 
 Scientific workers receive:
 
-1. the common `worker.md` contract;
+1. the minimal `scientific_worker.md` common spine;
 2. one scientific role contract;
 3. the project's `RESEARCH_CHARTER.md`;
-4. `TASK.md`, shared memory/facts, and existing worker tools.
+4. `TASK.md` and relevant project state;
+5. only the gateway tools assigned to that scientific role.
 
-Where a scientific role explicitly overrides a base-worker behavior (notably the
-Experimenter's approved computation or who is responsible for empirical claim
-promotion), the role contract wins. Common honesty, workspace, memory, and
-analytical-verification rules remain in force.
+They do **not** inherit `worker.md` or the legacy mathematical worker skill bundle
+by default. Legacy mathematical workers keep both unchanged. Researcher and
+Reviewer have no default skills. Experimenter has exactly one small default skill:
+`agents/skills/experimenter/ponytail`, used only to clean implementation residue
+before handoff without broadening scope.
+
+The default gateway surfaces are intentionally small:
+
+| Role | Gateway tools |
+| --- | --- |
+| Researcher | `gm_add`, `gm_search`, `fact_search`, `fact_submit`, `search_arxiv_theorems` |
+| Reviewer | `gm_add`, `gm_search`, `fact_search`, `search_arxiv_theorems` |
+| Experimenter | `gm_add`, `gm_search`, `fact_search` |
+
+Only the Researcher has `fact_submit` among the three scientific workers. The
+Reviewer is the design/audit gate, not a Fact Graph writer. The Experimenter
+produces evidence and cannot promote a claim or invoke theorem search by default.
 
 ## Scientific handoffs
 
@@ -49,8 +64,7 @@ analytical-verification rules remain in force.
   Store protocol/record ids and artifact references.
 - **Researcher → Verification Layer:** `Candidate Scientific Claim`. Analytical
   claims use `statement + proof`; empirical claims use explicit `scope` and
-  immutable `evidence_refs`. The Experimenter normally does not promote empirical
-  claims directly.
+  immutable `evidence_refs`.
 
 ## Scientific verification and promotion
 
@@ -76,7 +90,7 @@ single project-level place for durable scientific constraints: objective, succes
 criteria, anti-patching rules, experiment/code discipline, domain constraints, and
 user decisions. Do not duplicate project-specific rules into every role prompt.
 
-## Shared spine retained from Danus
+## Shared scientific spine
 
 - Local memory is private continuity.
 - Global memory is shared awareness/findings, not truth.

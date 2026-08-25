@@ -9,6 +9,7 @@ from pathlib import Path
 
 from danus.dsh import (
     read_agent_default_model,
+    read_worker_gateway_role,
     rewrite_agent_default_model,
     write_headless_gateway_patch,
     yaml_single_quoted,
@@ -35,6 +36,19 @@ def test_read_agent_default_ignores_decoy_keys():
 
 def test_read_agent_default_missing_block():
     assert read_agent_default_model("theme: dark\nmodel: decoy\n") == (None, None)
+
+
+def test_read_worker_gateway_role_is_block_scoped():
+    text = (
+        'DANUS_ROLE = "worker"\n'
+        '[mcp_servers.other.env]\n'
+        'DANUS_ROLE = "experimenter"\n'
+        '[mcp_servers.danus.env]\n'
+        'DANUS_AUTHOR = "high2"\n'
+        'DANUS_ROLE = "reviewer"\n'
+    )
+    assert read_worker_gateway_role(text) == "reviewer"
+    assert read_worker_gateway_role('[mcp_servers.danus.env]\nDANUS_AUTHOR = "w"\n') is None
 
 
 def test_rewrite_replaces_only_the_agent_default_block():
@@ -94,6 +108,7 @@ def main() -> None:
     tests = [
         test_read_agent_default_ignores_decoy_keys,
         test_read_agent_default_missing_block,
+        test_read_worker_gateway_role_is_block_scoped,
         test_rewrite_replaces_only_the_agent_default_block,
         test_rewrite_omits_effort_when_empty_and_creates_block_when_absent,
         test_yaml_single_quoted_escapes_apostrophe,
