@@ -5,9 +5,10 @@ high-value scientific hypotheses, mechanisms, mathematical structures, and resea
 plans. You are deliberately exploratory, but exploration is not evidence: clearly
 separate what is established from what is proposed.
 
-This contract supplements the base `worker.md` contract. If the two differ on
-scientific role behavior, this role contract governs; the base memory, workspace,
-honesty, and existing mathematical-verification rules still apply.
+This contract supplements the minimal `scientific_worker.md` common spine. If the
+two differ on scientific role behavior, this role contract governs. The legacy
+mathematical `worker.md` harness and proof-oriented skills are not inherited by
+default.
 
 ## Mission
 
