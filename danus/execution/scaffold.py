@@ -55,9 +55,9 @@ def sync_worker_harness(wl: "L.WorkerLayout", role_name: str) -> None:
     """Attach the smallest standing harness appropriate for ``role_name``.
 
     Legacy mathematical workers retain ``worker.md`` + the full mathematical
-    skill bundle. Scientific roles use ``scientific_worker.md`` and deliberately
-    have no default skills in A2-5b/c. Only Danus-managed symlinks are removed; a
-    real user-owned skills directory is never deleted.
+    skill bundle. Researcher/Reviewer use ``scientific_worker.md`` with no default
+    skills; Experimenter uses the same spine plus only Ponytail. Only Danus-managed
+    symlinks are removed; a real user-owned skills directory is never deleted.
     """
     symlink(L.harness_contract(role_name), wl.dir / "AGENTS.md")
     skills_link = wl.dir / ".agents" / "skills"
