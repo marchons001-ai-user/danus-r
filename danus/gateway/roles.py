@@ -14,18 +14,29 @@ ALL_TOOLS: Tuple[str, ...] = (
     "fact_submit",
     "fact_search",
     "fact_revoke",
+    "plan_propose_change",
+    "plan_review_change",
+    "plan_commit_change",
     "search_arxiv_theorems",
 )
 
 ROLE_TOOLS: Dict[str, Tuple[str, ...]] = {
     # Historical mathematical worker: unchanged.
     "worker": ("gm_add", "gm_search", "fact_submit", "fact_search", "search_arxiv_theorems"),
-    # Scientific roles: expose only what each standing contract requires.
-    "researcher": ("gm_add", "gm_search", "fact_submit", "fact_search", "search_arxiv_theorems"),
-    "reviewer": ("gm_add", "gm_search", "fact_search", "search_arxiv_theorems"),
+    # Scientific roles: plan authority is enforced here, not only in prompts.
+    "researcher": (
+        "gm_add", "gm_search", "fact_submit", "fact_search",
+        "plan_propose_change", "search_arxiv_theorems",
+    ),
+    "reviewer": (
+        "gm_add", "gm_search", "fact_search", "plan_review_change", "search_arxiv_theorems",
+    ),
     "experimenter": ("gm_add", "gm_search", "fact_search"),
-    # Control / verification roles: unchanged.
-    "main": ("gm_add", "gm_search", "fact_search", "fact_revoke", "search_arxiv_theorems"),
+    # The current control-plane `main` identity is the Supervisor commit authority.
+    "main": (
+        "gm_add", "gm_search", "fact_search", "fact_revoke",
+        "plan_commit_change", "search_arxiv_theorems",
+    ),
     "verifier": ("search_arxiv_theorems",),
     "all": ALL_TOOLS,
 }

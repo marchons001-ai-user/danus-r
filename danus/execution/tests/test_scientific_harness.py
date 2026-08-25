@@ -124,14 +124,16 @@ def test_scientific_dsh_prompt_excludes_legacy_math_harness(tmp: Path):
 
 def test_scientific_tool_sets():
     assert tools_for("researcher") == [
-        "gm_add", "gm_search", "fact_submit", "fact_search", "search_arxiv_theorems"
+        "gm_add", "gm_search", "fact_submit", "fact_search",
+        "plan_propose_change", "search_arxiv_theorems",
     ]
     assert tools_for("reviewer") == [
-        "gm_add", "gm_search", "fact_search", "search_arxiv_theorems"
+        "gm_add", "gm_search", "fact_search", "plan_review_change", "search_arxiv_theorems"
     ]
     assert tools_for("experimenter") == ["gm_add", "gm_search", "fact_search"]
     assert "fact_submit" not in tools_for("reviewer")
     assert "fact_submit" not in tools_for("experimenter")
+    assert "plan_commit_change" in tools_for("main")
 
 
 def main() -> None:

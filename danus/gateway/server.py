@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from danus._mcp import FastMCP
-from danus.core import FACT_TYPES, FactGraph, GlobalMemory
+from danus.core import FACT_TYPES, FactGraph, GlobalMemory, ResearchPlanGraph
 from danus.integrations import search as _arxiv_search
 
 from .roles import tools_for
@@ -90,6 +90,10 @@ def _gm(project: Optional[str] = None) -> GlobalMemory:
 
 def _fg(project: Optional[str] = None) -> FactGraph:
     return FactGraph(_project(project))
+
+
+def _pg(project: Optional[str] = None) -> ResearchPlanGraph:
+    return ResearchPlanGraph(_project(project))
 
 
 def _verify_endpoint(*, empirical: bool = False) -> str:
@@ -375,6 +379,46 @@ def fact_revoke(fact_id: str, reason: str, project: Optional[str] = None) -> Dic
 
 
 # --------------------------------------------------------------------------- #
+# research-plan change gate                                                   #
+# --------------------------------------------------------------------------- #
+
+def plan_propose_change(
+    base_plan_version: int,
+    reason: str,
+    operations: List[Dict[str, Any]],
+    post_hoc: bool = False,
+    evidence_refs: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Researcher-only path: propose a structural change without mutating Plan."""
+    change_id = _pg().propose_change(
+        base_plan_version=base_plan_version,
+        proposer=_author(),
+        reason=reason,
+        operations=operations,
+        post_hoc=post_hoc,
+        evidence_refs=evidence_refs,
+    )
+    return {"change_id": change_id, "status": "PROPOSED"}
+
+
+def plan_review_change(change_id: str, approve: bool, rationale: str) -> Dict[str, Any]:
+    """Reviewer-only path: approve/reject one change without mutating Plan."""
+    record = _pg().review_change(
+        change_id,
+        reviewer=_author(),
+        approve=approve,
+        rationale=rationale,
+    )
+    return {"change_id": change_id, "status": record["status"]}
+
+
+def plan_commit_change(change_id: str, project: Optional[str] = None) -> Dict[str, Any]:
+    """Supervisor/control-plane-only path: commit one approved plan change."""
+    version = _pg(project).commit_change(change_id, committer=_author())
+    return {"change_id": change_id, "status": "COMMITTED", "plan_version": version}
+
+
+# --------------------------------------------------------------------------- #
 # arXiv theorem search (external integration)                                 #
 # --------------------------------------------------------------------------- #
 
@@ -399,6 +443,9 @@ _TOOLS = {
     "fact_submit": fact_submit,
     "fact_search": fact_search,
     "fact_revoke": fact_revoke,
+    "plan_propose_change": plan_propose_change,
+    "plan_review_change": plan_review_change,
+    "plan_commit_change": plan_commit_change,
     "search_arxiv_theorems": search_arxiv_theorems,
 }
 
