@@ -45,29 +45,15 @@ from .roles import tools_for
 _PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-# --------------------------------------------------------------------------- #
-# config resolution (env read at call time — testable / reconfigurable)       #
-# --------------------------------------------------------------------------- #
-
 def _author() -> str:
     return os.environ.get("DANUS_AUTHOR", "unknown")
 
 
 def _role() -> str:
-    # Fail-closed: an UNSET role gets the most-restrictive read-only set, same as
-    # a mis-typed one (roles.tools_for). Dev use of the full set is explicit:
-    # DANUS_ROLE=all.
     return os.environ.get("DANUS_ROLE", "verifier")
 
 
 def _project(project: Optional[str] = None) -> Path:
-    """Resolve the project dir to operate on.
-
-    ``project`` (the main agent's per-call selector) wins: it names a project
-    under ``DANUS_AGENTS_ROOT`` (``<root>/<project>``), so one session can touch
-    several projects. With no ``project`` we fall back to ``DANUS_PROJECT_DIR``
-    (a worker is always pinned this way). The name is validated to a single path
-    segment — no ``/`` or ``..`` — so it can never escape the agents root."""
     agents_root = os.environ.get("DANUS_AGENTS_ROOT", "")
     project_dir = os.environ.get("DANUS_PROJECT_DIR", "")
     if project:
@@ -97,7 +83,6 @@ def _pg(project: Optional[str] = None) -> ResearchPlanGraph:
 
 
 def _verify_endpoint(*, empirical: bool = False) -> str:
-    """Resolve the analytical or empirical sibling endpoint from one env value."""
     verify_url = os.environ.get("DANUS_VERIFY_URL", "").rstrip("/")
     if not verify_url:
         raise RuntimeError("DANUS_VERIFY_URL is not set (verify service not wired yet)")
@@ -114,26 +99,16 @@ def _post_verify(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     except ValueError:
         timeout = 3600
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted local URL)
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         return json.loads(resp.read().decode("utf-8"))
 
 
 def _verify(statement: str, proof: str) -> Dict[str, Any]:
-    """Historical analytical verification HTTP call."""
     return _post_verify(_verify_endpoint(), {"statement": statement, "proof": proof})
 
 
-def _verify_empirical(
-    *,
-    statement: str,
-    scope: Dict[str, Any],
-    evidence_refs: List[str],
-    evidence_summary: str,
-) -> Dict[str, Any]:
-    """Empirical verification HTTP call; deterministic checks run in the service."""
+def _verify_empirical(*, statement: str, scope: Dict[str, Any], evidence_refs: List[str], evidence_summary: str) -> Dict[str, Any]:
     return _post_verify(
         _verify_endpoint(empirical=True),
         {
@@ -146,26 +121,9 @@ def _verify_empirical(
     )
 
 
-# --------------------------------------------------------------------------- #
-# global memory                                                               #
-# --------------------------------------------------------------------------- #
-
-def gm_add(
-    kind: str,
-    claim: str,
-    evidence: str = "",
-    verifiable: Optional[bool] = None,
-    glossary: Optional[Dict[str, str]] = None,
-    links: Optional[Dict[str, Any]] = None,
-    project: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Publish a finding to shared global memory (claim + evidence). Verifiable
-    kinds (conclusion/example/counterexample/proof_attempt) require explicit
-    evidence; judgments (plan/direction/obstacle/master_guidance/elaboration) do
-    not. Define your symbols in ``glossary`` and reuse project terminology.
-
-    Main agent: pass ``project`` to target one of several projects by name;
-    workers omit it (pinned to their own project)."""
+def gm_add(kind: str, claim: str, evidence: str = "", verifiable: Optional[bool] = None,
+           glossary: Optional[Dict[str, str]] = None, links: Optional[Dict[str, Any]] = None,
+           project: Optional[str] = None) -> Dict[str, Any]:
     entry_id = _gm(project).append(
         kind, claim=claim, evidence=evidence, author=_author(),
         verifiable=verifiable, glossary=glossary, links=links,
@@ -175,15 +133,8 @@ def gm_add(
 
 def gm_search(query: str, kinds: Optional[List[str]] = None, limit_per_kind: int = 10,
               project: Optional[str] = None) -> Dict[str, Any]:
-    """BM25 over shared global-memory findings. Use to reuse others' results,
-    avoid duplicate work, and learn which paths already died. Main agent: pass
-    ``project`` to search a specific project; workers omit it."""
     return _gm(project).search(query, kinds=kinds, limit_per_kind=limit_per_kind)
 
-
-# --------------------------------------------------------------------------- #
-# fact graph                                                                  #
-# --------------------------------------------------------------------------- #
 
 def fact_submit(
     statement: str,
@@ -198,52 +149,26 @@ def fact_submit(
     evidence_refs: Optional[List[str]] = None,
     evidence_summary: str = "",
 ) -> Dict[str, Any]:
-    """The only way to write a verified scientific fact.
-
-    ``fact_type="analytical"`` preserves the historical ``statement + proof``
-    path. ``fact_type="empirical"`` requires explicit ``scope`` and immutable
-    ``evidence_refs`` and routes to ``/verify/empirical``; do not fabricate a
-    prose proof for numerical evidence.
-
-    Once a verdict exists, the outcome is **always** recorded to global memory
-    (kind ``verification``). If ``source_id`` names the shared finding being
-    promoted, a successful fact write also marks that finding ``verified`` and
-    back-links the returned ``fact_id``. A rejection does not mark the source
-    ``refuted``: failed support/verification is not proof that the claim is false.
-
-    ``external_refs`` remains mutable bibliographic metadata and does not affect
-    either analytical or empirical fact identity."""
     fg = _fg()
     gm = _gm()
     problem_id = os.environ.get("DANUS_PROBLEM_ID", Path(_project()).name)
     kind = (fact_type or "analytical").strip().lower()
     preds = predecessors or []
-
-    # Cheap input checks happen before HTTP/LLM work.
     if kind not in FACT_TYPES:
-        return {"accepted": False, "verdict": "error",
-                "error": f"unknown fact_type {fact_type!r}; expected one of {FACT_TYPES}"}
+        return {"accepted": False, "verdict": "error", "error": f"unknown fact_type {fact_type!r}; expected one of {FACT_TYPES}"}
     if not statement.strip():
         return {"accepted": False, "verdict": "error", "error": "statement is required"}
     if kind == "analytical" and not proof.strip():
         return {"accepted": False, "verdict": "error", "error": "analytical fact requires proof"}
-
     empirical_scope = scope or {}
-    empirical_refs = list(dict.fromkeys(
-        str(x).strip() for x in (evidence_refs or []) if str(x).strip()
-    ))
+    empirical_refs = list(dict.fromkeys(str(x).strip() for x in (evidence_refs or []) if str(x).strip()))
     if kind == "empirical":
         if not empirical_scope:
-            return {"accepted": False, "verdict": "error",
-                    "error": "empirical fact requires non-empty scope"}
+            return {"accepted": False, "verdict": "error", "error": "empirical fact requires non-empty scope"}
         if not empirical_refs:
-            return {"accepted": False, "verdict": "error",
-                    "error": "empirical fact requires evidence_refs"}
+            return {"accepted": False, "verdict": "error", "error": "empirical fact requires evidence_refs"}
         if glossary_introduces:
-            return {"accepted": False, "verdict": "error",
-                    "error": "glossary_introduces is currently analytical-only"}
-
-    # Mathematical symbol coverage remains advisory and analytical-only.
+            return {"accepted": False, "verdict": "error", "error": "glossary_introduces is currently analytical-only"}
     undefined: List[str] = []
     if kind == "analytical":
         try:
@@ -253,9 +178,6 @@ def fact_submit(
             )
         except Exception:
             undefined = []
-
-    # 1) Verify. If the service errors, no verdict exists yet: return a clean
-    # error so the worker can retry. Nothing is promoted or traced as a verdict.
     try:
         if kind == "analytical":
             result = _verify(statement, proof)
@@ -271,22 +193,13 @@ def fact_submit(
         if kind == "analytical":
             out["undefined_symbols"] = undefined
         return out
-
     if not isinstance(result, dict):
-        out = {
-            "accepted": False,
-            "verdict": "error",
-            "error": f"verify service returned a non-dict body ({type(result).__name__})",
-        }
+        out = {"accepted": False, "verdict": "error", "error": f"verify service returned a non-dict body ({type(result).__name__})"}
         if kind == "analytical":
             out["undefined_symbols"] = undefined
         return out
-
     verdict = result.get("verdict")
     accepted = verdict == "correct"
-
-    # 2) Write the verified fact. The two types share the same DAG but retain
-    # type-specific identity/body semantics.
     fact_id = None
     write_error = None
     if accepted:
@@ -306,18 +219,12 @@ def fact_submit(
                 )
         except Exception as e:
             write_error = str(e)
-
-    # 3) Close the source finding only after the fact really exists. Keep this
-    # separate from the verifier verdict: accepted-but-write-failed is not promoted.
     promotion_error = None
     if fact_id and source_id:
         try:
             gm.set_status(source_id, "verified", fact_id=fact_id)
         except Exception as e:
             promotion_error = str(e)
-
-    # 4) ALWAYS trace once a verifier verdict exists, including write/promotion
-    # failures. Empirical deterministic checks are already embedded in the report.
     report = result.get("verification_report")
     gm.append(
         "verification",
@@ -325,11 +232,7 @@ def fact_submit(
         evidence="verdict: correct" if accepted else (result.get("repair_hints") or "verdict: wrong"),
         author=_author(),
         verifiable=False,
-        links={
-            "source_id": source_id,
-            "predecessors": preds,
-            "evidence_refs": empirical_refs if kind == "empirical" else [],
-        },
+        links={"source_id": source_id, "predecessors": preds, "evidence_refs": empirical_refs if kind == "empirical" else []},
         verification_type=kind,
         scope=empirical_scope if kind == "empirical" else {},
         verdict=verdict,
@@ -338,15 +241,8 @@ def fact_submit(
         promotion_error=promotion_error,
         verification_report=report,
     )
-
-    # 5) Return.
     if not accepted:
-        out = {
-            "accepted": False,
-            "verdict": verdict,
-            "repair_hints": result.get("repair_hints"),
-            "verification_report": report,
-        }
+        out = {"accepted": False, "verdict": verdict, "repair_hints": result.get("repair_hints"), "verification_report": report}
         if kind == "analytical":
             out["undefined_symbols"] = undefined
         return out
@@ -364,34 +260,21 @@ def fact_submit(
 
 
 def fact_search(query: str, limit: int = 10, project: Optional[str] = None) -> Dict[str, Any]:
-    """BM25 search over the unified verified scientific fact graph. The derived
-    search index is rebuilt on demand from fact files; the graph stays the single
-    source of truth. Results include fact type, scope, and empirical evidence ids
-    so a searched claim can be followed to its immutable Evidence Record/artifacts."""
     return {"query": query, "results": _fg(project).search(query, limit=limit)}
 
 
 def fact_revoke(
     fact_id: str,
     reason: str,
-    replacement_fact_id: Optional[str] = None,
     project: Optional[str] = None,
+    replacement_fact_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Cascade-revoke a wrong/superseded fact and everything that depends on it.
-    Operator / main-agent only. ``replacement_fact_id`` must already name an active
-    verified fact and cannot depend on the retiring fact. Historical files remain
-    archived under ``_revoked``. Main agent: pass ``project`` to target the project."""
-    revoked = _fg(project).revoke(
-        fact_id,
-        reason=reason,
-        replacement_fact_id=replacement_fact_id,
-    )
-    return {"revoked": revoked, "replacement_fact_id": replacement_fact_id}
+    revoked = _fg(project).revoke(fact_id, reason=reason, replacement_fact_id=replacement_fact_id)
+    out: Dict[str, Any] = {"revoked": revoked}
+    if replacement_fact_id:
+        out["replacement_fact_id"] = replacement_fact_id
+    return out
 
-
-# --------------------------------------------------------------------------- #
-# research-plan change gate                                                   #
-# --------------------------------------------------------------------------- #
 
 def plan_propose_change(
     base_plan_version: int,
@@ -400,7 +283,6 @@ def plan_propose_change(
     post_hoc: bool = False,
     evidence_refs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Researcher-only path: propose a structural change without mutating Plan."""
     change_id = _pg().propose_change(
         base_plan_version=base_plan_version,
         proposer=_author(),
@@ -413,40 +295,18 @@ def plan_propose_change(
 
 
 def plan_review_change(change_id: str, approve: bool, rationale: str) -> Dict[str, Any]:
-    """Reviewer-only path: approve/reject one change without mutating Plan."""
-    record = _pg().review_change(
-        change_id,
-        reviewer=_author(),
-        approve=approve,
-        rationale=rationale,
-    )
+    record = _pg().review_change(change_id, reviewer=_author(), approve=approve, rationale=rationale)
     return {"change_id": change_id, "status": record["status"]}
 
 
 def plan_commit_change(change_id: str, project: Optional[str] = None) -> Dict[str, Any]:
-    """Supervisor/control-plane-only path: commit one approved plan change."""
     version = _pg(project).commit_change(change_id, committer=_author())
     return {"change_id": change_id, "status": "COMMITTED", "plan_version": version}
 
 
-# --------------------------------------------------------------------------- #
-# arXiv theorem search (external integration)                                 #
-# --------------------------------------------------------------------------- #
-
 def search_arxiv_theorems(query: str, num_results: int = 10) -> Dict[str, Any]:
-    """Semantic search over arXiv theorem statements (Matlas). Returns
-    **verbatim, as-published** theorem / lemma / definition statements — statement
-    fidelity matters for math reasoning and citation checking. Phrase the query as
-    a *complete mathematical statement* when possible. Returns ranked results,
-    each with ``title``, the full ``theorem`` text, ``arxiv_id``, and the in-paper
-    ``theorem_id``. External HTTP, no auth; on outage returns an ``error`` and
-    empty ``results`` (retry / fall back to built-in web search)."""
     return _arxiv_search(query, num_results=num_results)
 
-
-# --------------------------------------------------------------------------- #
-# role-based registration                                                     #
-# --------------------------------------------------------------------------- #
 
 _TOOLS = {
     "gm_add": gm_add,
@@ -462,9 +322,6 @@ _TOOLS = {
 
 
 def build_app(role: Optional[str] = None) -> FastMCP:
-    """Build the stdio MCP app exposing exactly the tools ``role`` may use.
-    ``role`` defaults to ``DANUS_ROLE`` (env); unset falls back to the read-only
-    verifier set (fail-closed)."""
     app = FastMCP("danus-core")
     for name in tools_for(role if role is not None else _role()):
         app.tool(name=name)(_TOOLS[name])
