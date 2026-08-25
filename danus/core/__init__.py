@@ -5,6 +5,7 @@ Shared stores:
 - ``FactGraph``    — one project-shared content-addressed DAG of verified
                      analytical + empirical scientific facts.
 - ``EvidenceStore``— immutable frozen protocols and empirical evidence records.
+- ``ResearchPlanGraph`` — coarse project research directions and dependencies.
 - ``GlobalMemory`` — project-shared strongly-typed findings (awareness, not truth).
 - ``LocalMemory``  — per-worker private scratch log.
 
@@ -19,6 +20,7 @@ from .evidence import EvidenceStore
 from .factgraph import FactGraph, parse_frontmatter, serialize_fact, statement_of
 from .global_memory import GlobalMemory
 from .local_memory import DEFAULT_CHANNELS, LocalMemory
+from .plan import ResearchPlanGraph
 from .schema import (
     EXTERNAL_REF_KEYS,
     FACT_TYPES,
@@ -33,6 +35,7 @@ from .schema import (
 __all__ = [
     "FactGraph",
     "EvidenceStore",
+    "ResearchPlanGraph",
     "GlobalMemory",
     "LocalMemory",
     "DEFAULT_CHANNELS",
