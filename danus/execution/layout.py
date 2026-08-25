@@ -4,34 +4,9 @@ This is the single source of truth for *where everything lives* — shared by
 ``danus.execution`` (the loop + scaffolding) and ``danus.orchestration`` (the CLI
 verbs). Every path/name is derived here so the two halves can never drift.
 
-Layout (a project root holds the *shared* stores; each worker has its own home,
-which is also the codex working dir / LocalMemory root)::
-
-    <agents_root>/<project>/           # = DANUS_PROJECT_DIR (shared)
-      global_memory/  fact_graph/      # created lazily by core on first write
-      RESEARCH_CHARTER.md              # project-level scientific policy
-      project.json                     # roster + metadata
-      .run_deadline                    # optional epoch ceiling
-      workers/<worker>/                # worker home (codex cwd, LocalMemory root)
-        AGENTS.md -> agents/contracts/worker.md   # common worker contract
-        .agents/skills -> agents/skills/worker    # the worker skills
-        .codex/config.toml                        # MCP = danus gateway, role=worker
-        TASK.md                                   # per-round assignment (danus assign)
-        local_memory/                             # worker-private (codex writes)
-        .role .pid .pid.lock .stop .status.json  logs/
-
-Scientific role contracts are supplementary data under ``agents/contracts`` and
-are injected by the outer loop according to ``ROLE`` in ``.role``. They are kept
-separate from model/backend/reasoning-effort selection.
-
-Key defaults:
-  - the MCP server is launched as the installed package ``python -m danus.gateway``
-    (a pinned interface) — never an absolute path to a server file;
-  - ``agents_root`` defaults to ``runtime/projects`` under the cwd, overridable with
-    ``DANUS_AGENTS_ROOT``;
-  - the worker contract + skills are resolved at CALL time from env
-    (``DANUS_WORKER_CONTRACT`` / ``DANUS_WORKER_SKILLS``), defaulting to the
-    repo-root ``agents/`` tree — testable + relocatable.
+Legacy mathematical workers use ``worker.md`` + ``agents/skills/worker``.
+Scientific workers use the small ``scientific_worker.md`` spine plus their injected
+role contract and Research Charter; they have no default skill bundle in A2-5b.
 
 Everything reads env at CALL time (not import time) to match core/gateway/verify.
 """
@@ -66,11 +41,7 @@ SCIENTIFIC_ROLES = frozenset({"researcher", "reviewer", "experimenter"})
 # --------------------------------------------------------------------------- #
 
 def repo_root() -> Path:
-    """The repo root that holds the ``agents/`` tree (contracts + skills).
-
-    The package lives at ``<repo>/danus/execution/layout.py``; the ``agents/``
-    tree is its sibling ``<repo>/agents``. Used only to locate the worker
-    contract + skills defaults (both env-overridable)."""
+    """The repo root that holds the ``agents/`` tree (contracts + skills)."""
     return Path(__file__).resolve().parents[2]
 
 
@@ -84,8 +55,7 @@ def agents_root() -> Path:
 
 
 def worker_md() -> Path:
-    """The common worker contract codex auto-reads (symlinked to AGENTS.md).
-    Pinned path ``agents/contracts/worker.md``; override with
+    """Legacy mathematical worker contract. Override with
     ``DANUS_WORKER_CONTRACT``."""
     env = os.environ.get("DANUS_WORKER_CONTRACT")
     if env:
@@ -94,24 +64,41 @@ def worker_md() -> Path:
 
 
 def worker_skills_dir() -> Path:
-    """The worker skills dir (symlinked to .agents/skills). Pinned path
-    ``agents/skills/worker``; override with ``DANUS_WORKER_SKILLS``."""
+    """Legacy mathematical worker skills. Override with
+    ``DANUS_WORKER_SKILLS``."""
     env = os.environ.get("DANUS_WORKER_SKILLS")
     if env:
         return Path(env).resolve()
     return repo_root() / "agents" / "skills" / "worker"
 
 
+def scientific_worker_md() -> Path:
+    """Minimal common contract for Researcher/Reviewer/Experimenter."""
+    return repo_root() / "agents" / "contracts" / "scientific_worker.md"
+
+
 def scientific_role_md(role: str) -> Optional[Path]:
     """Return the supplementary Danus-R contract for a scientific worker role.
 
     Unknown/legacy roles intentionally return ``None`` so existing math workers
-    (e.g. ROLE=high/xhigh) keep their old behavior. The allow-list also prevents a
-    .role value from becoming an arbitrary filesystem path."""
+    keep their historical behavior. The allow-list also prevents a role value from
+    becoming an arbitrary filesystem path."""
     name = (role or "").strip().lower()
     if name not in SCIENTIFIC_ROLES:
         return None
     return repo_root() / "agents" / "contracts" / f"{name}.md"
+
+
+def harness_contract(role: str) -> Path:
+    """Standing AGENTS.md contract for ``role``."""
+    return scientific_worker_md() if (role or "").strip().lower() in SCIENTIFIC_ROLES else worker_md()
+
+
+def harness_skills_dir(role: str) -> Optional[Path]:
+    """Default skill bundle for ``role``; scientific roles start with none."""
+    if (role or "").strip().lower() in SCIENTIFIC_ROLES:
+        return None
+    return worker_skills_dir()
 
 
 def research_charter_template() -> Path:
@@ -250,8 +237,8 @@ def parse_roles(spec: str) -> List[Tuple[str, str]]:
     Raises ``ValueError`` on a malformed/empty spec or a count < 1.
 
     Historical note: this CLI field is an effort roster, not the Danus-R
-    scientific ``ROLE``. A2-3 deliberately keeps that interface unchanged; the
-    scientific role lives independently in each worker's ``.role`` file."""
+    scientific ``ROLE``. The scientific role lives independently in each worker's
+    ``.role`` file."""
     out: List[Tuple[str, str]] = []
     for part in (p.strip() for p in spec.split(",") if p.strip()):
         m = _ROLE_RE.match(part)
