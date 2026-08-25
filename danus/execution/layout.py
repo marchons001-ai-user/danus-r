@@ -6,7 +6,8 @@ verbs). Every path/name is derived here so the two halves can never drift.
 
 Legacy mathematical workers use ``worker.md`` + ``agents/skills/worker``.
 Scientific workers use the small ``scientific_worker.md`` spine plus their injected
-role contract and Research Charter; they have no default skill bundle in A2-5b.
+role contract and Research Charter. Researcher/Reviewer have no default skills;
+the Experimenter gets only the small Ponytail cleanup skill.
 
 Everything reads env at CALL time (not import time) to match core/gateway/verify.
 """
@@ -95,8 +96,11 @@ def harness_contract(role: str) -> Path:
 
 
 def harness_skills_dir(role: str) -> Optional[Path]:
-    """Default skill bundle for ``role``; scientific roles start with none."""
-    if (role or "").strip().lower() in SCIENTIFIC_ROLES:
+    """Smallest default skill bundle for ``role``."""
+    name = (role or "").strip().lower()
+    if name == "experimenter":
+        return repo_root() / "agents" / "skills" / "experimenter"
+    if name in SCIENTIFIC_ROLES:
         return None
     return worker_skills_dir()
 
