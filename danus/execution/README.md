@@ -7,7 +7,7 @@ project/worker **scaffolding**, and the per-worker **round loop**. The `danus` C
 ```
 danus/execution/
   layout.py     paths + names; WorkerLayout; role-selected harness paths
-  scaffold.py   do_new, managed harness links, .codex config, spawn_loop
+  scaffold.py   do_new, managed harness links, role-specific .codex config, spawn_loop
   loop.py       kickoff prompt, run_round, stop conditions, status
   __main__.py   `python -m danus.execution <worker_dir>` → loop.main
   tests/        offline execution + harness tests
@@ -24,12 +24,14 @@ Harness selection is role-dependent:
 
 - legacy mathematical worker → `worker.md` + `agents/skills/worker`;
 - Researcher/Reviewer/Experimenter → `scientific_worker.md` + injected role
-  contract + Research Charter, with no default skill bundle in A2-5b.
+  contract + Research Charter, with no default skill bundle.
 
-The loop re-syncs Danus-managed harness symlinks from `ROLE` on every worker start,
-so changing role does not leave the old mathematical harness attached. A2-5c
-handles role-specific gateway/tool permissions; until then the MCP config remains
-`DANUS_ROLE=worker` for backward compatibility.
+The loop re-syncs Danus-managed harness symlinks and the gateway `DANUS_ROLE` from
+`.role` on every worker start. Role-specific gateway permissions are defined once
+in `danus/gateway/roles.py`: Researcher can submit candidate facts and search
+literature, Reviewer can review/search but cannot submit facts, and Experimenter
+has only shared-memory/fact-read tools by default. Legacy mathematical workers keep
+the historical `worker` tool surface.
 
 ## The round loop (`loop.py`)
 
@@ -41,7 +43,8 @@ atomically. Resumability is continuity in the stores rather than process state.
 
 Legacy workers retain the historical adaptive mathematical skill loop. Scientific
 roles receive a smaller kickoff focused on `TASK.md`, the common scientific spine,
-their role contract, the Charter, and relevant project state.
+their role contract, the Charter, relevant project state, and only the tool names
+actually exposed to that role.
 
 ## Connects to
 
