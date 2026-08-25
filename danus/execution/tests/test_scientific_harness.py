@@ -34,7 +34,11 @@ def test_role_harness_selection():
     assert L.harness_skills_dir("worker") == L.worker_skills_dir()
     for role in ("researcher", "reviewer", "experimenter"):
         assert L.harness_contract(role) == L.scientific_worker_md()
-        assert L.harness_skills_dir(role) is None
+    assert L.harness_skills_dir("researcher") is None
+    assert L.harness_skills_dir("reviewer") is None
+    experimenter_skills = L.harness_skills_dir("experimenter")
+    assert experimenter_skills is not None and experimenter_skills.is_dir()
+    assert [p.parent.name for p in experimenter_skills.glob("**/SKILL.md")] == ["ponytail"]
     assert L.scientific_worker_md().is_file()
 
 
@@ -50,6 +54,10 @@ def test_sync_worker_harness_switches_only_managed_links(tmp: Path):
     assert (wl.dir / "AGENTS.md").resolve() == L.scientific_worker_md().resolve()
     assert not (wl.dir / ".agents" / "skills").exists()
     assert not (wl.dir / ".agents" / "skills").is_symlink()
+
+    scaffold.sync_worker_harness(wl, "experimenter")
+    assert (wl.dir / "AGENTS.md").resolve() == L.scientific_worker_md().resolve()
+    assert (wl.dir / ".agents" / "skills").resolve() == L.harness_skills_dir("experimenter").resolve()
 
     scaffold.sync_worker_harness(wl, "worker")
     assert (wl.dir / "AGENTS.md").resolve() == L.worker_md().resolve()
@@ -102,6 +110,10 @@ def test_scientific_dsh_prompt_excludes_legacy_math_harness(tmp: Path):
     assert "# Danus-R Scientific Worker Spine" in researcher
     assert "# Danus-R Researcher Contract" in researcher
     assert "TEST_CHARTER" in researcher
+
+    assert "# Ponytail" not in researcher
+    assert "# Ponytail" not in reviewer
+    assert "# Ponytail" in experimenter
 
     fact_submit_note = "fact_submit -> mcp__danus__fact_submit"
     arxiv_note = "search_arxiv_theorems -> mcp__danus__search_arxiv_theorems"
