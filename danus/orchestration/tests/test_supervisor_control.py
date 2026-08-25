@@ -123,6 +123,26 @@ def test_dependency_and_ancestor_changes_stop_now_invalid_work(tmp_path: Path):
                for d in retired["decisions"])
 
 
+def test_progressive_expansion_reopens_completed_parent_for_dependencies(tmp_path: Path):
+    plan = ResearchPlanGraph.create(tmp_path, node_id="root", title="Root")
+    _commit(
+        plan,
+        [
+            {"op": "add_node", "node_id": "A", "title": "A", "parent": "root"},
+            {"op": "add_node", "node_id": "B", "title": "B", "parent": "root", "depends_on": ["A"]},
+        ],
+    )
+    ledger = ProgressLedger(tmp_path)
+    ledger.set_node_state("A", state="DONE", actor="supervisor")
+    assert reconcile(tmp_path, [])["frontier"] == ["B"]
+
+    _commit(plan, [{"op": "add_node", "node_id": "A1", "title": "A child", "parent": "A"}])
+    report = reconcile(tmp_path, [])
+    assert "A" not in report["completed_nodes"]
+    assert report["frontier"] == ["A1"]
+    assert "B" not in report["frontier"]
+
+
 @contextmanager
 def _agents_root(path: Path):
     old = os.environ.get("DANUS_AGENTS_ROOT")
