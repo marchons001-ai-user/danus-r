@@ -6,6 +6,7 @@
     danus finalize <project> [--paper <paper_id>] [<fact_id> ...]
     danus start  <project>[/<worker>]
     danus status <project>[/<worker>] [--json]
+    danus supervise <project> [--complete-node N | --reopen-node N]
     danus stop   <project>[/<worker>] [--force]
 
 This module is the verbs/UX only. The worker outer loop, the on-disk layout, and
@@ -34,9 +35,11 @@ from danus.core import ProgressLedger, ResearchPlanGraph
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
 
+from .control import reconcile
+
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
-    "do_list", "do_stop", "do_finalize", "build_parser", "main",
+    "do_supervise", "do_list", "do_stop", "do_finalize", "build_parser", "main",
 ]
 
 
@@ -305,6 +308,41 @@ def do_status(target: str) -> List[Dict]:
     return [worker_status(L.WorkerLayout(d)) for d in dirs]
 
 
+def do_supervise(
+    project: str,
+    *,
+    complete_node: Optional[str] = None,
+    reopen_node: Optional[str] = None,
+) -> Dict:
+    """Run one deterministic Supervisor reconciliation pass.
+
+    ``--complete-node`` / ``--reopen-node`` update only Progress Ledger node state;
+    they never revise the Research Plan. Worker process actions remain A2-7 runtime
+    work; this pass returns the required CONTINUE/REVIEW/RETASK/STOP decisions.
+    """
+    pdir = L.project_dir(project)
+    if not pdir.is_dir():
+        raise SystemExit(f"no such project: {project}")
+    if not (pdir / "plan" / "current.json").is_file():
+        raise SystemExit(f"project {project} has no Research Plan")
+    if complete_node and reopen_node:
+        raise SystemExit("choose only one of --complete-node or --reopen-node")
+
+    ledger = ProgressLedger(pdir)
+    try:
+        if complete_node:
+            ledger.set_node_state(complete_node, state="DONE", actor="supervisor")
+        elif reopen_node:
+            ledger.set_node_state(reopen_node, state="OPEN", actor="supervisor")
+        rows = [
+            worker_status(L.WorkerLayout(L.worker_dir(project, worker)))
+            for worker in L.list_workers(project)
+        ]
+        return reconcile(pdir, rows)
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(f"cannot reconcile project: {exc}") from exc
+
+
 # --------------------------------------------------------------------------- #
 # list                                                                         #
 # --------------------------------------------------------------------------- #
@@ -436,6 +474,14 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("target", help="<project> or <project>/<worker>")
     st.add_argument("--json", action="store_true")
 
+    sv = sub.add_parser("supervise", help="reconcile Plan, progress, and worker state")
+    sv.add_argument("project")
+    group = sv.add_mutually_exclusive_group()
+    group.add_argument("--complete-node", default=None,
+                       help="record Supervisor-approved node completion in Progress Ledger")
+    group.add_argument("--reopen-node", default=None,
+                       help="reopen a node in Progress Ledger without revising Plan")
+
     sp = sub.add_parser("stop", help="stop worker loop(s)")
     sp.add_argument("target", help="<project> or <project>/<worker>")
     sp.add_argument("--force", action="store_true", help="kill now (else finish current round)")
@@ -481,6 +527,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.cmd == "status":
         rows = do_status(args.target)
         print(json.dumps(rows, ensure_ascii=False, indent=2) if args.json else _fmt_status(rows))
+    elif args.cmd == "supervise":
+        r = do_supervise(
+            args.project,
+            complete_node=args.complete_node,
+            reopen_node=args.reopen_node,
+        )
+        print(json.dumps(r, ensure_ascii=False, indent=2))
     elif args.cmd == "stop":
         for r in do_stop(args.target, force=args.force):
             print(f"{r['worker']}: {r['result']}")
