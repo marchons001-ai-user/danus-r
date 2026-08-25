@@ -2,9 +2,9 @@
 """Deterministic A2-5 static audit of the current worker harness.
 
 No model, network, subprocess, or project state is used. The script measures the
-actual contracts/skills exposed by the current checkout and asks both Codex and DSH
-prompt adapters to build one synthetic kickoff prompt per role. It is intended for
-before/after A2-5 comparisons, not as runtime orchestration.
+actual role-selected contracts/skills exposed by the current checkout and asks both
+Codex and DSH prompt adapters to build one synthetic kickoff prompt per role. It is
+intended for before/after A2-5 comparisons, not runtime orchestration.
 """
 from __future__ import annotations
 
@@ -39,24 +39,22 @@ def _nbytes(path: Path | None) -> int:
     return len(path.read_bytes()) if path is not None and path.is_file() else 0
 
 
-def _skills() -> list[Path]:
-    return sorted(L.worker_skills_dir().glob("**/SKILL.md"))
+def _skills(role: str) -> list[Path]:
+    root = L.harness_skills_dir(role)
+    return [] if root is None else sorted(root.glob("**/SKILL.md"))
 
 
 def _gateway_role(role: str) -> str:
-    # A2-5a baseline: scientific roles still run through DANUS_ROLE=worker.
-    # Once a scientific role gets its own gateway surface, prefer it automatically.
+    # A2-5b changes only contract/skill harness. Scientific gateway surfaces are
+    # introduced in A2-5c; until then they still use DANUS_ROLE=worker.
     return role if role in ROLE_TOOLS else "worker"
 
 
 def main() -> None:
-    common_contract_bytes = _nbytes(L.worker_md())
-    skill_paths = _skills()
-    skill_bytes = sum(_nbytes(path) for path in skill_paths)
     charter_template = L.research_charter_template()
     charter_bytes = _nbytes(charter_template)
-
     rows = []
+
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         pdir = root / PROJECT
@@ -65,6 +63,9 @@ def main() -> None:
 
         for role in ROLES:
             scientific = role in L.SCIENTIFIC_ROLES
+            common_contract_bytes = _nbytes(L.harness_contract(role))
+            skill_paths = _skills(role)
+            skill_bytes = sum(_nbytes(path) for path in skill_paths)
             role_contract_bytes = _nbytes(L.scientific_role_md(role)) if scientific else 0
             worker = f"audit_{role}"
             with _env(DANUS_AGENTS_ROOT=str(root), CODEX_BACKEND="api"):
@@ -97,14 +98,13 @@ def main() -> None:
             f"{row['dsh_prompt']} |"
         )
 
-    print("\nInherited mathematical harness:")
-    print(f"- worker.md: {common_contract_bytes} B")
-    print(f"- worker SKILL.md files: {len(skill_paths)} files / {skill_bytes} B")
-    print(f"- combined: {common_contract_bytes + skill_bytes} B")
-    print("\nWorker skills:")
-    for path in skill_paths:
-        rel = path.relative_to(L.worker_skills_dir())
-        print(f"- {rel}: {_nbytes(path)} B")
+    legacy_skills = sorted(L.worker_skills_dir().glob("**/SKILL.md"))
+    legacy_skill_bytes = sum(_nbytes(path) for path in legacy_skills)
+    legacy_contract_bytes = _nbytes(L.worker_md())
+    print("\nLegacy mathematical harness retained:")
+    print(f"- worker.md: {legacy_contract_bytes} B")
+    print(f"- worker SKILL.md files: {len(legacy_skills)} files / {legacy_skill_bytes} B")
+    print(f"- combined: {legacy_contract_bytes + legacy_skill_bytes} B")
 
 
 if __name__ == "__main__":
