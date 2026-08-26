@@ -31,6 +31,25 @@ def _content_id(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(canon).hexdigest()[:16]
 
 
+def protocol_identity(protocol: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the content-addressed identity of old and reducer-aware protocols."""
+    identity = {
+        "question": protocol.get("question", ""),
+        "hypothesis": protocol.get("hypothesis", ""),
+        "matrix": protocol.get("matrix"),
+        "primary_metrics": protocol.get("primary_metrics", []),
+        "decision_rule": protocol.get("decision_rule", ""),
+        "author": protocol.get("author", ""),
+        "parent_protocol_id": protocol.get("parent_protocol_id"),
+        "post_hoc": bool(protocol.get("post_hoc", False)),
+        "revision_reason": protocol.get("revision_reason", ""),
+    }
+    # Omit this field for historical protocols so their existing ids remain valid.
+    if "metric_reducer" in protocol:
+        identity["metric_reducer"] = protocol.get("metric_reducer")
+    return identity
+
+
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
