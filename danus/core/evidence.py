@@ -31,6 +31,25 @@ def _content_id(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(canon).hexdigest()[:16]
 
 
+def protocol_identity(protocol: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the content-addressed identity of old and reducer-aware protocols."""
+    identity = {
+        "question": protocol.get("question", ""),
+        "hypothesis": protocol.get("hypothesis", ""),
+        "matrix": protocol.get("matrix"),
+        "primary_metrics": protocol.get("primary_metrics", []),
+        "decision_rule": protocol.get("decision_rule", ""),
+        "author": protocol.get("author", ""),
+        "parent_protocol_id": protocol.get("parent_protocol_id"),
+        "post_hoc": bool(protocol.get("post_hoc", False)),
+        "revision_reason": protocol.get("revision_reason", ""),
+    }
+    # Omit this field for historical protocols so their existing ids remain valid.
+    if "metric_reducer" in protocol:
+        identity["metric_reducer"] = protocol.get("metric_reducer")
+    return identity
+
+
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
@@ -80,6 +99,7 @@ class EvidenceStore:
         parent_protocol_id: Optional[str] = None,
         post_hoc: bool = False,
         revision_reason: str = "",
+        metric_reducer: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Write one immutable frozen protocol and return its content id.
 
@@ -87,6 +107,11 @@ class EvidenceStore:
         to an existing parent and explain why they changed. ``post_hoc`` is an
         explicit provenance statement: A2-4a records it; later workflow code will
         decide it automatically when results have already been observed.
+
+        Runnable protocols may additionally pin one metric reducer by the same
+        path/SHA-256/size reference shape used for artifacts plus a ``function``
+        name. The field is omitted entirely for historical protocols so their
+        content ids remain backward-compatible.
         """
         if not question.strip() or not hypothesis.strip() or not decision_rule.strip():
             raise ValueError("question, hypothesis, and decision_rule are required")
@@ -101,6 +126,17 @@ class EvidenceStore:
         elif post_hoc:
             raise ValueError("post_hoc protocol requires parent_protocol_id")
 
+        reducer = None
+        if metric_reducer is not None:
+            reducer = dict(metric_reducer)
+            if not str(reducer.get("path") or ""):
+                raise ValueError("metric_reducer requires path")
+            if not str(reducer.get("sha256") or ""):
+                raise ValueError("metric_reducer requires sha256")
+            if not isinstance(reducer.get("size"), int):
+                raise ValueError("metric_reducer requires integer size")
+            reducer["function"] = str(reducer.get("function") or "reduce_metrics")
+
         identity = {
             "question": question.strip(),
             "hypothesis": hypothesis.strip(),
@@ -112,6 +148,8 @@ class EvidenceStore:
             "post_hoc": bool(post_hoc),
             "revision_reason": revision_reason.strip(),
         }
+        if reducer is not None:
+            identity["metric_reducer"] = reducer
         protocol_id = _content_id(identity)
         payload = {
             "protocol_id": protocol_id,
