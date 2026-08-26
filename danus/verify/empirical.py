@@ -12,7 +12,7 @@ import hashlib
 from pathlib import Path
 from typing import Any, Dict, List
 
-from danus.core.evidence import EvidenceStore, _content_id
+from danus.core.evidence import EvidenceStore, _content_id, protocol_identity
 from danus.core.metrics import metrics_equal, reduce_metrics
 
 
@@ -22,25 +22,6 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _protocol_identity(protocol: Dict[str, Any]) -> Dict[str, Any]:
-    identity = {
-        "question": protocol.get("question", ""),
-        "hypothesis": protocol.get("hypothesis", ""),
-        "matrix": protocol.get("matrix"),
-        "primary_metrics": protocol.get("primary_metrics", []),
-        "decision_rule": protocol.get("decision_rule", ""),
-        "author": protocol.get("author", ""),
-        "parent_protocol_id": protocol.get("parent_protocol_id"),
-        "post_hoc": bool(protocol.get("post_hoc", False)),
-        "revision_reason": protocol.get("revision_reason", ""),
-    }
-    # Historical protocols did not have this field; omit it from their identity
-    # so existing content ids remain valid.
-    if "metric_reducer" in protocol:
-        identity["metric_reducer"] = protocol.get("metric_reducer")
-    return identity
 
 
 def _record_identity(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -112,7 +93,7 @@ def check_empirical_evidence(
             protocols[current] = protocol
             identity_ok = (
                 protocol.get("protocol_id") == current
-                and _content_id(_protocol_identity(protocol)) == current
+                and _content_id(protocol_identity(protocol)) == current
             )
             check(
                 f"protocol:{current}:identity",
@@ -229,7 +210,7 @@ def check_empirical_evidence(
             protocol
             and protocol.get("protocol_id") == protocol_id
             and protocol.get("status") == "frozen"
-            and _content_id(_protocol_identity(protocol)) == protocol_id
+            and _content_id(protocol_identity(protocol)) == protocol_id
         )
         if (
             record_id_ok
