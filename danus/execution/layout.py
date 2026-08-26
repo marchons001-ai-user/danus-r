@@ -29,6 +29,7 @@ ROLE_FILE = ".role"
 PID_FILE = ".pid"
 LOCK_FILE = ".pid.lock"
 STOP_FILE = ".stop"
+PAUSE_FILE = ".pause"
 STATUS_FILE = ".status.json"
 LOGS_DIR = "logs"
 DEADLINE_FILE = ".run_deadline"
@@ -187,6 +188,10 @@ class WorkerLayout:
     @property
     def stop(self) -> Path:
         return self.dir / STOP_FILE
+
+    @property
+    def pause(self) -> Path:
+        return self.dir / PAUSE_FILE
 
     @property
     def status(self) -> Path:

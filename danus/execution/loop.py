@@ -154,6 +154,14 @@ def write_status(wl: L.WorkerLayout, **fields) -> None:
     os.replace(tmp, path)
 
 
+def _read_status(wl: L.WorkerLayout) -> dict:
+    try:
+        obj = json.loads(wl.status.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
 def _deadline_passed(project_dir: Path) -> bool:
     f = project_dir / L.DEADLINE_FILE
     if not f.exists():
@@ -333,6 +341,17 @@ def main(worker_dir: str) -> int:
     max_fail = int(os.environ.get("DANUS_MAX_CONSEC_FAILURES", "5"))
     wl.logs.mkdir(parents=True, exist_ok=True)
 
+    prior_status = _read_status(wl)
+    try:
+        rnd = max(0, int(prior_status.get("round") or 0))
+    except (TypeError, ValueError):
+        rnd = 0
+    round_limit = rnd + max_rounds if max_rounds > 0 else 0
+    try:
+        context_tokens_total = max(0, int(prior_status.get("context_tokens_total") or 0))
+    except (TypeError, ValueError):
+        context_tokens_total = 0
+
     ledger = _progress_ledger(wl)
     exit_recorded = False
 
@@ -358,7 +377,8 @@ def main(worker_dir: str) -> int:
 
     signal.signal(signal.SIGTERM, _on_term)
 
-    write_status(wl, state="running", round=0, started_at=time.time())
+    write_status(wl, state="running", round=rnd, started_at=time.time(),
+                 context_tokens_total=context_tokens_total)
     if ledger is not None:
         current = ledger.current(worker, refresh_stale=True)
         if current is not None:
@@ -384,7 +404,6 @@ def main(worker_dir: str) -> int:
                 note="worker process started",
             )
 
-    rnd = 0
     consec_fail = 0
     try:
         while True:
@@ -408,7 +427,7 @@ def main(worker_dir: str) -> int:
                 write_status(wl, state="deadline")
                 _record_exit("deadline")
                 break
-            if max_rounds and rnd >= max_rounds:
+            if round_limit and rnd >= round_limit:
                 write_status(wl, state="max_rounds")
                 _record_exit("max_rounds")
                 break
@@ -429,6 +448,8 @@ def main(worker_dir: str) -> int:
             elapsed = time.time() - round_started
             trigger = None
             if scientific:
+                round_tokens = int(telemetry.get("tokens") or 0)
+                context_tokens_total += max(0, round_tokens)
                 requested = C.pop_rollover_request(wl.dir)
                 if requested:
                     trigger = str(requested.get("reason") or "context_budget")
@@ -443,11 +464,14 @@ def main(worker_dir: str) -> int:
 
                 # Do not spend a migration call when an explicit max-rounds cap
                 # says there will be no continuation session in this process.
-                if trigger and (not max_rounds or rnd < max_rounds):
+                if trigger and (not round_limit or rnd < round_limit):
                     write_status(wl, state="migrating", context_trigger=trigger)
                     migration = _run_context_migration(
                         wl, role, trigger, log_path, hard_timeout,
                     )
+                    migration_log = wl.logs / f"migration_{rnd}.log"
+                    migration_tokens = int(C.inspect_log(migration_log).get("tokens") or 0)
+                    context_tokens_total += max(0, migration_tokens)
                     C.write_checkpoint(
                         wl.dir, role=role_name, round_no=rnd, telemetry=telemetry,
                         trigger=trigger, migration=migration,
@@ -485,6 +509,7 @@ def main(worker_dir: str) -> int:
             if scientific:
                 status_fields.update({
                     "context_tokens": int(telemetry.get("tokens") or 0),
+                    "context_tokens_total": context_tokens_total,
                     "context_tool_calls": int(telemetry.get("tool_calls") or 0),
                     "context_compactions": int(telemetry.get("compactions") or 0),
                     "context_trigger": trigger,

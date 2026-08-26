@@ -6,7 +6,9 @@
     danus finalize <project> [--paper <paper_id>] [<fact_id> ...]
     danus start  <project>[/<worker>]
     danus status <project>[/<worker>] [--json]
-    danus supervise <project> [--complete-node N | --reopen-node N]
+    danus supervise <project> [--complete-node N | --reopen-node N] [--apply | --watch]
+    danus pause  <project>[/<worker>]
+    danus resume <project>[/<worker>]
     danus stop   <project>[/<worker>] [--force]
 
 This module is the verbs/UX only. The worker outer loop, the on-disk layout, and
@@ -29,9 +31,10 @@ import os
 import signal
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
-from danus.core import ProgressLedger, ResearchPlanGraph
+from danus.core import EvidenceStore, ProgressLedger, ResearchPlanGraph
+from danus.core._util import append_jsonl, utc_now
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
 
@@ -39,7 +42,8 @@ from .control import reconcile
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
-    "do_supervise", "do_list", "do_stop", "do_finalize", "build_parser", "main",
+    "do_supervise", "watch_supervisor", "do_pause", "do_resume",
+    "do_list", "do_stop", "do_finalize", "build_parser", "main",
 ]
 
 
@@ -99,6 +103,15 @@ def _read_worker_role(wl: L.WorkerLayout) -> str:
     except OSError:
         pass
     return "worker"
+
+
+def _pause_reason(wl: L.WorkerLayout) -> Optional[str]:
+    if not wl.pause.is_file():
+        return None
+    try:
+        return wl.pause.read_text(encoding="utf-8").strip() or "manual"
+    except OSError:
+        return "manual"
 
 
 # --------------------------------------------------------------------------- #
@@ -223,10 +236,12 @@ def do_finalize(project: str, fact_ids: List[str],
 # --------------------------------------------------------------------------- #
 
 def _start_one(wl: L.WorkerLayout) -> str:
-    """Returns 'started' / 'already-running' / 'locked'. Idempotent via an flock
-    on .pid.lock; clears a stale .stop before spawning."""
+    """Returns 'started' / 'already-running' / 'locked' / 'paused'. Idempotent via
+    an flock on .pid.lock; clears a stale .stop before spawning."""
     wl.dir.mkdir(parents=True, exist_ok=True)
     wl.logs.mkdir(exist_ok=True)
+    if wl.pause.exists():
+        return "paused"
     lock = open(wl.lock, "w")
     try:
         try:
@@ -268,8 +283,11 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
     now = time.time()
     last = st.get("last_round_at") or st.get("round_started_at") or st.get("updated_at")
     age = (now - last) if isinstance(last, (int, float)) else None
+    pause_reason = _pause_reason(wl)
 
-    if alive:
+    if pause_reason is not None:
+        label = "paused"
+    elif alive:
         rs = st.get("round_started_at")
         hard = int(os.environ.get("DANUS_ROUND_HARD_TIMEOUT", "14400"))
         if state == "running" and isinstance(rs, (int, float)) and (now - rs) > hard * 1.5:
@@ -293,10 +311,18 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         "worker": wl.name, "pid": pid, "alive": alive, "state": state,
         "round": st.get("round", 0), "age_s": round(age, 1) if age is not None else None,
         "last_fact_id": st.get("last_fact_id"), "label": label,
+        "paused": pause_reason is not None, "pause_reason": pause_reason,
         "assignment_id": progress.get("assignment_id") if progress else None,
         "plan_node_id": progress.get("node_id") if progress else None,
         "plan_version": progress.get("plan_version") if progress else None,
         "progress_state": progress.get("state") if progress else None,
+        "progress_outcome": progress.get("outcome") if progress else None,
+        "context_tokens": int(st.get("context_tokens") or 0),
+        "context_tokens_total": int(st.get("context_tokens_total") or 0),
+        "context_tool_calls": int(st.get("context_tool_calls") or 0),
+        "context_compactions": int(st.get("context_compactions") or 0),
+        "context_trigger": st.get("context_trigger"),
+        "terminal_outcome": st.get("terminal_outcome"),
         "progress_error": progress_error,
     }
 
@@ -308,17 +334,174 @@ def do_status(target: str) -> List[Dict]:
     return [worker_status(L.WorkerLayout(d)) for d in dirs]
 
 
+def _project_rows(project: str) -> List[Dict[str, Any]]:
+    return [
+        worker_status(L.WorkerLayout(L.worker_dir(project, worker)))
+        for worker in L.list_workers(project)
+    ]
+
+
+def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int) -> Dict[str, Any]:
+    used_tokens = sum(max(0, int(row.get("context_tokens_total") or 0)) for row in rows)
+    limit = max(0, int(token_budget))
+
+    deadline = None
+    deadline_path = pdir / L.DEADLINE_FILE
+    try:
+        deadline = float(deadline_path.read_text().strip()) if deadline_path.is_file() else None
+    except (OSError, ValueError):
+        deadline = None
+    now = time.time()
+
+    experiments = []
+    store = EvidenceStore(pdir)
+    runtime_dir = pdir / "experiment_runtime"
+    if runtime_dir.is_dir():
+        for path in sorted(runtime_dir.glob("*/checkpoint.json")):
+            try:
+                checkpoint = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(checkpoint, dict):
+                continue
+            protocol_id = str(checkpoint.get("protocol_id") or path.parent.name)
+            protocol = store.get_protocol(protocol_id) or {}
+            matrix = protocol.get("matrix") if isinstance(protocol, dict) else None
+            units = matrix.get("units") if isinstance(matrix, dict) else None
+            planned = len(units) if isinstance(units, list) else None
+            completed = checkpoint.get("completed")
+            failures = checkpoint.get("failures")
+            experiments.append({
+                "protocol_id": protocol_id,
+                "planned_units": planned,
+                "completed_units": len(completed) if isinstance(completed, dict) else 0,
+                "failures": len(failures) if isinstance(failures, list) else 0,
+                "evidence_id": checkpoint.get("evidence_id"),
+            })
+
+    return {
+        "tokens": {
+            "used": used_tokens,
+            "limit": limit,
+            "exceeded": bool(limit and used_tokens >= limit),
+        },
+        "time": {
+            "deadline": deadline,
+            "remaining_s": None if deadline is None else round(deadline - now, 1),
+            "exceeded": bool(deadline is not None and now >= deadline),
+        },
+        "context": [
+            {
+                "worker": row["worker"],
+                "tokens": row.get("context_tokens", 0),
+                "tokens_total": row.get("context_tokens_total", 0),
+                "tool_calls": row.get("context_tool_calls", 0),
+                "compactions": row.get("context_compactions", 0),
+                "rollover": row.get("context_trigger"),
+            }
+            for row in rows
+        ],
+        "experiments": experiments,
+    }
+
+
+def _apply_resource_budget(report: Dict[str, Any], rows: List[Dict[str, Any]], budget: Dict[str, Any]) -> None:
+    reason = None
+    if budget["time"]["exceeded"]:
+        reason = "resource_time_budget"
+    elif budget["tokens"]["exceeded"]:
+        reason = "resource_token_budget"
+    if not reason:
+        return
+
+    report["decisions"] = [
+        {
+            "action": "STOP",
+            "worker": row["worker"],
+            "node_id": row.get("plan_node_id") or "",
+            "assignment_id": row.get("assignment_id"),
+            "reason": reason,
+        }
+        for row in rows
+        if row.get("alive") or row.get("progress_state") in {"ASSIGNED", "RUNNING", "BLOCKED"}
+    ]
+    report["budget_stop"] = reason
+
+
+def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    pdir = L.project_dir(project)
+    ledger = ProgressLedger(pdir)
+    applied: List[Dict[str, Any]] = []
+    for decision in decisions:
+        action = decision["action"]
+        worker = decision.get("worker")
+        reason = str(decision.get("reason") or "")
+        result = "no-op"
+
+        if action == "CONTINUE":
+            result = "continued"
+        elif action == "REVIEW":
+            if worker:
+                current = ledger.current(worker, refresh_stale=True)
+                if current and current["state"] != "DONE":
+                    result = _pause_one(
+                        L.WorkerLayout(L.worker_dir(project, worker)),
+                        reason=f"review:{reason}",
+                    )
+                else:
+                    result = "pending_review"
+            else:
+                result = "pending_review"
+        elif action == "RETASK":
+            if worker:
+                result = _start_one(L.WorkerLayout(L.worker_dir(project, worker)))
+            else:
+                # A ready node has no task text or scientific role encoded in Plan.
+                # Deterministic Supervisor must not invent either.
+                result = "pending_assignment"
+        elif action == "STOP":
+            if worker:
+                wl = L.WorkerLayout(L.worker_dir(project, worker))
+                if reason.startswith("resource_"):
+                    result = _pause_one(wl, reason=f"budget:{reason}")
+                else:
+                    result = _stop_one(wl, force=True)
+            else:
+                result = "no_worker"
+
+        applied.append({**decision, "result": result})
+    return applied
+
+
+def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -> None:
+    append_jsonl(
+        pdir / "supervisor" / "events.jsonl",
+        {
+            "event": "RECONCILE",
+            "trigger": trigger,
+            "plan_version": report.get("plan_version"),
+            "decisions": report.get("decisions", []),
+            "applied": report.get("applied", []),
+            "budget": report.get("budget", {}),
+            "at": utc_now(),
+        },
+    )
+
+
 def do_supervise(
     project: str,
     *,
     complete_node: Optional[str] = None,
     reopen_node: Optional[str] = None,
+    apply: bool = False,
+    token_budget: int = 0,
+    trigger: str = "manual",
 ) -> Dict:
     """Run one deterministic Supervisor reconciliation pass.
 
     ``--complete-node`` / ``--reopen-node`` update only Progress Ledger node state;
-    they never revise the Research Plan. Worker process actions remain A2-7 runtime
-    work; this pass returns the required CONTINUE/REVIEW/RETASK/STOP decisions.
+    they never revise the Research Plan. With ``apply=True`` the existing
+    CONTINUE/REVIEW/RETASK/STOP decisions are executed as process-control actions.
     """
     pdir = L.project_dir(project)
     if not pdir.is_dir():
@@ -327,6 +510,8 @@ def do_supervise(
         raise SystemExit(f"project {project} has no Research Plan")
     if complete_node and reopen_node:
         raise SystemExit("choose only one of --complete-node or --reopen-node")
+    if token_budget < 0:
+        raise SystemExit("token budget must be >= 0")
 
     ledger = ProgressLedger(pdir)
     try:
@@ -334,13 +519,97 @@ def do_supervise(
             ledger.set_node_state(complete_node, state="DONE", actor="supervisor")
         elif reopen_node:
             ledger.set_node_state(reopen_node, state="OPEN", actor="supervisor")
-        rows = [
-            worker_status(L.WorkerLayout(L.worker_dir(project, worker)))
-            for worker in L.list_workers(project)
-        ]
-        return reconcile(pdir, rows)
+        rows = _project_rows(project)
+        report = reconcile(pdir, rows)
+        budget = _resource_snapshot(pdir, rows, token_budget)
+        report["budget"] = budget
+        _apply_resource_budget(report, rows, budget)
+        if apply:
+            report["applied"] = _apply_supervisor_decisions(project, report["decisions"])
+            _record_supervisor_event(pdir, trigger, report)
+        return report
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"cannot reconcile project: {exc}") from exc
+
+
+def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[str, Any]) -> str:
+    """Small change signature; age_s is deliberately excluded so idle time is not an event."""
+    pdir = L.project_dir(project)
+    compact_rows = [
+        {k: row.get(k) for k in (
+            "worker", "pid", "alive", "state", "round", "label", "paused", "pause_reason",
+            "assignment_id", "plan_node_id", "plan_version", "progress_state", "progress_outcome",
+            "context_tokens", "context_tokens_total", "context_tool_calls", "context_compactions",
+            "context_trigger", "terminal_outcome",
+        )}
+        for row in rows
+    ]
+
+    stamps = []
+    paths = [pdir / "plan" / "current.json", pdir / "progress" / "ledger.jsonl", pdir / L.DEADLINE_FILE]
+    paths.extend(sorted((pdir / "experiment_runtime").glob("*/checkpoint.json")))
+    for path in paths:
+        try:
+            stat = path.stat()
+            stamps.append((str(path.relative_to(pdir)), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            continue
+    return json.dumps(
+        {
+            "rows": compact_rows,
+            "stamps": stamps,
+            "experiments": budget.get("experiments", []),
+            "budget_state": {
+                "token_exceeded": bool(budget.get("tokens", {}).get("exceeded")),
+                "time_exceeded": bool(budget.get("time", {}).get("exceeded")),
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def watch_supervisor(
+    project: str,
+    *,
+    heartbeat: float = 1800.0,
+    poll: float = 1.0,
+    token_budget: int = 0,
+) -> Iterator[Dict[str, Any]]:
+    """Change-driven long-running Supervisor with a coarse heartbeat fallback."""
+    if heartbeat <= 0:
+        raise SystemExit("heartbeat must be > 0")
+    if poll <= 0:
+        raise SystemExit("poll must be > 0")
+
+    last_signature: Optional[str] = None
+    last_reconcile = 0.0
+    while True:
+        rows = _project_rows(project)
+        budget = _resource_snapshot(L.project_dir(project), rows, token_budget)
+        signature = _control_signature(project, rows, budget)
+        now = time.monotonic()
+        trigger = None
+        if signature != last_signature:
+            trigger = "event"
+        elif now - last_reconcile >= heartbeat:
+            trigger = "heartbeat"
+
+        if trigger:
+            report = do_supervise(
+                project,
+                apply=True,
+                token_budget=token_budget,
+                trigger=trigger,
+            )
+            last_reconcile = now
+            # Actions themselves change pid/pause/progress files; consume that new
+            # state now so the next poll does not immediately replay our own action.
+            rows = _project_rows(project)
+            budget = _resource_snapshot(L.project_dir(project), rows, token_budget)
+            last_signature = _control_signature(project, rows, budget)
+            yield report
+        time.sleep(poll)
 
 
 # --------------------------------------------------------------------------- #
@@ -423,6 +692,36 @@ def do_stop(target: str, force: bool = False) -> List[Dict]:
     return [{"worker": d.name, "result": _stop_one(L.WorkerLayout(d), force)} for d in dirs]
 
 
+def _pause_one(wl: L.WorkerLayout, reason: str = "manual") -> str:
+    atomic_write(wl.pause, (reason.strip() or "manual") + "\n")
+    _stop_one(wl, force=True)
+    return "paused"
+
+
+def do_pause(target: str) -> List[Dict]:
+    dirs = L.target_worker_dirs(target)
+    if not dirs:
+        raise SystemExit(f"no workers for target {target!r}")
+    return [{"worker": d.name, "result": _pause_one(L.WorkerLayout(d))} for d in dirs]
+
+
+def _resume_one(wl: L.WorkerLayout) -> str:
+    wl.pause.unlink(missing_ok=True)
+    return _start_one(wl)
+
+
+def do_resume(target: str, stagger: float = 0.2) -> List[Dict]:
+    dirs = L.target_worker_dirs(target)
+    if not dirs:
+        raise SystemExit(f"no workers for target {target!r}")
+    out = []
+    for i, wdir in enumerate(dirs):
+        if i and stagger:
+            time.sleep(stagger)
+        out.append({"worker": wdir.name, "result": _resume_one(L.WorkerLayout(wdir))})
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # argparse                                                                      #
 # --------------------------------------------------------------------------- #
@@ -474,13 +773,27 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("target", help="<project> or <project>/<worker>")
     st.add_argument("--json", action="store_true")
 
-    sv = sub.add_parser("supervise", help="reconcile Plan, progress, and worker state")
+    sv = sub.add_parser("supervise", help="reconcile Plan, progress, worker state, and budgets")
     sv.add_argument("project")
     group = sv.add_mutually_exclusive_group()
     group.add_argument("--complete-node", default=None,
                        help="record Supervisor-approved node completion in Progress Ledger")
     group.add_argument("--reopen-node", default=None,
                        help="reopen a node in Progress Ledger without revising Plan")
+    sv.add_argument("--apply", action="store_true", help="execute this one reconcile pass")
+    sv.add_argument("--watch", action="store_true", help="run continuously; implies --apply")
+    sv.add_argument("--heartbeat", type=float, default=1800.0,
+                    help="fallback reconcile interval in seconds (default 1800)")
+    sv.add_argument("--poll", type=float, default=1.0,
+                    help="control-file/liveness poll interval in seconds (default 1)")
+    sv.add_argument("--token-budget", type=int, default=0,
+                    help="project cumulative completed-session token budget; 0 disables")
+
+    pa = sub.add_parser("pause", help="pause worker loop(s) and prevent automatic restart")
+    pa.add_argument("target", help="<project> or <project>/<worker>")
+
+    rs = sub.add_parser("resume", help="clear pause and restart worker loop(s)")
+    rs.add_argument("target", help="<project> or <project>/<worker>")
 
     sp = sub.add_parser("stop", help="stop worker loop(s)")
     sp.add_argument("target", help="<project> or <project>/<worker>")
@@ -528,12 +841,31 @@ def main(argv: Optional[List[str]] = None) -> int:
         rows = do_status(args.target)
         print(json.dumps(rows, ensure_ascii=False, indent=2) if args.json else _fmt_status(rows))
     elif args.cmd == "supervise":
-        r = do_supervise(
-            args.project,
-            complete_node=args.complete_node,
-            reopen_node=args.reopen_node,
-        )
-        print(json.dumps(r, ensure_ascii=False, indent=2))
+        if args.watch:
+            if args.complete_node or args.reopen_node:
+                raise SystemExit("--watch cannot be combined with node state mutation")
+            for r in watch_supervisor(
+                args.project,
+                heartbeat=args.heartbeat,
+                poll=args.poll,
+                token_budget=args.token_budget,
+            ):
+                print(json.dumps(r, ensure_ascii=False, sort_keys=True), flush=True)
+        else:
+            r = do_supervise(
+                args.project,
+                complete_node=args.complete_node,
+                reopen_node=args.reopen_node,
+                apply=args.apply,
+                token_budget=args.token_budget,
+            )
+            print(json.dumps(r, ensure_ascii=False, indent=2))
+    elif args.cmd == "pause":
+        for r in do_pause(args.target):
+            print(f"{r['worker']}: {r['result']}")
+    elif args.cmd == "resume":
+        for r in do_resume(args.target):
+            print(f"{r['worker']}: {r['result']}")
     elif args.cmd == "stop":
         for r in do_stop(args.target, force=args.force):
             print(f"{r['worker']}: {r['result']}")

@@ -105,6 +105,15 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
             add("STOP", worker=worker, node_id=node_id, assignment_id=aid,
                 reason="dependencies_not_complete")
             continue
+        if row.get("paused"):
+            pause_reason = str(row.get("pause_reason") or "manual")
+            if pause_reason.startswith("review:"):
+                add("REVIEW", worker=worker, node_id=node_id, assignment_id=aid,
+                    reason=pause_reason.split(":", 1)[1] or "worker_paused_for_review")
+            else:
+                add("CONTINUE", worker=worker, node_id=node_id, assignment_id=aid,
+                    reason="worker_paused")
+            continue
         if state == "BLOCKED":
             reason = (
                 "assignment_needs_review"
