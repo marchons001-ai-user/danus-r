@@ -80,6 +80,7 @@ class EvidenceStore:
         parent_protocol_id: Optional[str] = None,
         post_hoc: bool = False,
         revision_reason: str = "",
+        metric_reducer: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Write one immutable frozen protocol and return its content id.
 
@@ -87,6 +88,11 @@ class EvidenceStore:
         to an existing parent and explain why they changed. ``post_hoc`` is an
         explicit provenance statement: A2-4a records it; later workflow code will
         decide it automatically when results have already been observed.
+
+        Runnable protocols may additionally pin one metric reducer by the same
+        path/SHA-256/size reference shape used for artifacts plus a ``function``
+        name. The field is omitted entirely for historical protocols so their
+        content ids remain backward-compatible.
         """
         if not question.strip() or not hypothesis.strip() or not decision_rule.strip():
             raise ValueError("question, hypothesis, and decision_rule are required")
@@ -101,6 +107,17 @@ class EvidenceStore:
         elif post_hoc:
             raise ValueError("post_hoc protocol requires parent_protocol_id")
 
+        reducer = None
+        if metric_reducer is not None:
+            reducer = dict(metric_reducer)
+            if not str(reducer.get("path") or ""):
+                raise ValueError("metric_reducer requires path")
+            if not str(reducer.get("sha256") or ""):
+                raise ValueError("metric_reducer requires sha256")
+            if not isinstance(reducer.get("size"), int):
+                raise ValueError("metric_reducer requires integer size")
+            reducer["function"] = str(reducer.get("function") or "reduce_metrics")
+
         identity = {
             "question": question.strip(),
             "hypothesis": hypothesis.strip(),
@@ -112,6 +129,8 @@ class EvidenceStore:
             "post_hoc": bool(post_hoc),
             "revision_reason": revision_reason.strip(),
         }
+        if reducer is not None:
+            identity["metric_reducer"] = reducer
         protocol_id = _content_id(identity)
         payload = {
             "protocol_id": protocol_id,
