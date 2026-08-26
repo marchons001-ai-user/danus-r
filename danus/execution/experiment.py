@@ -54,7 +54,7 @@ def _load_checkpoint(root: Path, protocol_id: str) -> Dict[str, Any]:
             "schema_version": 1,
             "protocol_id": protocol_id,
             "completed": {},
-            "last_failure": None,
+            "failures": [],
             "evidence_id": None,
         }
     try:
@@ -67,6 +67,9 @@ def _load_checkpoint(root: Path, protocol_id: str) -> Dict[str, Any]:
         raise ValueError("experiment checkpoint protocol_id mismatch")
     if not isinstance(obj.get("completed"), dict):
         raise ValueError("experiment checkpoint completed must be an object")
+    if not isinstance(obj.get("failures", []), list):
+        raise ValueError("experiment checkpoint failures must be a list")
+    obj.setdefault("failures", [])
     return obj
 
 
@@ -190,7 +193,11 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
         unit_id = unit["id"]
         if unit_id in completed:
             continue
-        log_path = logs_dir / f"{unit_id}.log"
+        attempts = sum(
+            1 for failure in checkpoint["failures"]
+            if isinstance(failure, dict) and failure.get("unit_id") == unit_id
+        ) + 1
+        log_path = logs_dir / f"{unit_id}.attempt{attempts}.log"
         with log_path.open("w", encoding="utf-8") as log:
             proc = subprocess.run(
                 unit["argv"],
@@ -200,11 +207,12 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
                 check=False,
             )
         if proc.returncode != 0:
-            checkpoint["last_failure"] = {
+            checkpoint["failures"].append({
                 "unit_id": unit_id,
+                "attempt": attempts,
                 "returncode": int(proc.returncode),
                 "log": str(log_path.relative_to(root)),
-            }
+            })
             checkpoint["updated_at"] = utc_now()
             _write_json(_checkpoint_path(root, protocol_id), checkpoint)
             raise RuntimeError(f"experiment unit {unit_id} failed with rc={proc.returncode}")
@@ -214,7 +222,6 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
             path = _resolve(root, raw_path)
             refs.append(store.artifact_ref(path))
         completed[unit_id] = refs
-        checkpoint["last_failure"] = None
         checkpoint["updated_at"] = utc_now()
         _write_json(_checkpoint_path(root, protocol_id), checkpoint)
 
@@ -232,7 +239,7 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
             "units": [unit["id"] for unit in units],
         },
         primary_metrics=primary_metrics,
-        failures=[],
+        failures=list(checkpoint["failures"]),
         deviations=[],
         artifacts=artifacts,
     )
