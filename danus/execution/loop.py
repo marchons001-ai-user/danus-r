@@ -256,7 +256,13 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
                         logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
                         return 124
                     telemetry = C.inspect_log(log_path)
-                    reason = C.budget_reason(telemetry, elapsed)
+                    # Codex reports token usage at turn.completed. Killing on that
+                    # final usage event can race a normally completed turn before the
+                    # process exits. Defer token-only rollover to the outer loop; keep
+                    # tool/compaction/time limits live.
+                    live_telemetry = dict(telemetry)
+                    live_telemetry["tokens"] = 0
+                    reason = C.budget_reason(live_telemetry, elapsed)
                     if reason:
                         _terminate_child()
                         C.write_rollover_request(wdir, reason, telemetry)
@@ -446,6 +452,11 @@ def main(worker_dir: str) -> int:
 
             telemetry = C.inspect_log(log_path) if scientific else {}
             elapsed = time.time() - round_started
+            outcome = (
+                _terminal_outcome(telemetry)
+                if scientific and rc in (0, 125)
+                else None
+            )
             trigger = None
             if scientific:
                 round_tokens = int(telemetry.get("tokens") or 0)
@@ -462,9 +473,10 @@ def main(worker_dir: str) -> int:
                     trigger=trigger,
                 )
 
-                # Do not spend a migration call when an explicit max-rounds cap
-                # says there will be no continuation session in this process.
-                if trigger and (not round_limit or rnd < round_limit):
+                # A completed assignment wins over context rollover: there is no
+                # continuation session to migrate into. Also skip migration when an
+                # explicit max-rounds cap says this process has no next round.
+                if trigger and not outcome and (not round_limit or rnd < round_limit):
                     write_status(wl, state="migrating", context_trigger=trigger)
                     migration = _run_context_migration(
                         wl, role, trigger, log_path, hard_timeout,
@@ -477,7 +489,6 @@ def main(worker_dir: str) -> int:
                         trigger=trigger, migration=migration,
                     )
 
-            outcome = _terminal_outcome(telemetry) if scientific and rc == 0 else None
             if outcome and ledger is not None:
                 current = ledger.current(worker, refresh_stale=True)
                 if current is not None and current["state"] == "STALE":
