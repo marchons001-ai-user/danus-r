@@ -24,6 +24,8 @@ class ProgressLedger:
     STATES = ("ASSIGNED", "RUNNING", "BLOCKED", "DONE", "STALE")
     UPDATE_STATES = ("RUNNING", "BLOCKED", "DONE")
     NODE_STATES = ("OPEN", "DONE")
+    TERMINAL_OUTCOMES = ("COMPLETE", "BLOCKED", "NEEDS_REVIEW")
+    RUNTIME_EVENTS = ("STARTED", "EXITED")
     _TERMINAL = {"DONE", "STALE"}
 
     def __init__(self, root: Path) -> None:
@@ -102,13 +104,27 @@ class ProgressLedger:
         state: str,
         actor: str,
         note: str = "",
+        outcome: str = "",
     ) -> Dict[str, Any]:
-        """Update one worker's current assignment without touching Research Plan."""
+        """Update one worker's current assignment without touching Research Plan.
+
+        ``outcome`` is optional runtime provenance. COMPLETE maps to DONE while
+        BLOCKED/NEEDS_REVIEW map to BLOCKED; the exact semantic outcome remains in
+        the ledger so the Supervisor can distinguish a scientific review request
+        from an external blocker without adding another assignment state.
+        """
         worker = self._required(worker, "worker")
         state = str(state).strip().upper()
         if state not in self.UPDATE_STATES:
             raise ValueError(f"state must be one of {self.UPDATE_STATES}")
         actor = self._required(actor, "actor")
+        outcome = str(outcome or "").strip().upper()
+        if outcome:
+            if outcome not in self.TERMINAL_OUTCOMES:
+                raise ValueError(f"outcome must be one of {self.TERMINAL_OUTCOMES}")
+            expected = "DONE" if outcome == "COMPLETE" else "BLOCKED"
+            if state != expected:
+                raise ValueError(f"outcome {outcome} requires state {expected}")
 
         current = self.current(worker, refresh_stale=True)
         if current is None:
@@ -119,11 +135,47 @@ class ProgressLedger:
             if state == "DONE":
                 return current
             raise ValueError(f"assignment {current['assignment_id']} is already DONE")
-        if current["state"] == state:
+        if current["state"] == state and (
+            not outcome or current.get("outcome") == outcome
+        ):
             return current
 
-        self._append_state(current, state=state, actor=actor, note=str(note).strip())
+        self._append_state(
+            current,
+            state=state,
+            actor=actor,
+            note=str(note).strip(),
+            outcome=outcome,
+        )
         return self.current(worker, refresh_stale=False) or current
+
+    def runtime_event(
+        self,
+        *,
+        worker: str,
+        kind: str,
+        note: str = "",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Append operational worker lifecycle provenance without changing state."""
+        worker = self._required(worker, "worker")
+        kind = str(kind).strip().upper()
+        if kind not in self.RUNTIME_EVENTS:
+            raise ValueError(f"runtime event must be one of {self.RUNTIME_EVENTS}")
+        current = self.current(worker, refresh_stale=True)
+        event: Dict[str, Any] = {
+            "event": "RUNTIME",
+            "kind": kind,
+            "worker": worker,
+            "assignment_id": current.get("assignment_id") if current else None,
+            "actor": "runtime",
+            "note": str(note).strip(),
+            "at": utc_now(),
+        }
+        if details:
+            event["details"] = dict(details)
+        append_jsonl(self.path, event)
+        return event
 
     def set_node_state(
         self,
@@ -266,19 +318,20 @@ class ProgressLedger:
         state: str,
         actor: str,
         note: str,
+        outcome: str = "",
     ) -> None:
-        append_jsonl(
-            self.path,
-            {
-                "event": "STATE",
-                "assignment_id": record["assignment_id"],
-                "worker": record["worker"],
-                "state": state,
-                "actor": actor,
-                "note": note,
-                "at": utc_now(),
-            },
-        )
+        event: Dict[str, Any] = {
+            "event": "STATE",
+            "assignment_id": record["assignment_id"],
+            "worker": record["worker"],
+            "state": state,
+            "actor": actor,
+            "note": note,
+            "at": utc_now(),
+        }
+        if outcome:
+            event["outcome"] = outcome
+        append_jsonl(self.path, event)
 
     def _replay_assignments(self) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
         assignments: Dict[str, Dict[str, Any]] = {}
@@ -312,6 +365,11 @@ class ProgressLedger:
                     continue
                 record = assignments[aid]
                 record["state"] = state
+                outcome = str(event.get("outcome") or "").upper()
+                if outcome:
+                    record["outcome"] = outcome
+                else:
+                    record.pop("outcome", None)
                 record["updated_at"] = event.get("at")
                 record["actor"] = event.get("actor")
                 record["note"] = str(event.get("note") or "")

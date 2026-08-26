@@ -23,9 +23,11 @@ from . import context as C
 from . import layout as L
 from . import scaffold
 from danus import codex
+from danus.core import ProgressLedger
 from danus.gateway.roles import tools_for
 
 _FACT_ID_RE = re.compile(r"(?i:fact(?:_|\s+)id)\b[\"'`\s]*[:=]?\s*[\"'`]?([0-9a-f]{16})[\"'`]?")
+_OUTCOME_RE = re.compile(r"(?im)^DANUS_OUTCOME:\s*(COMPLETE|BLOCKED|NEEDS_REVIEW)\s*$")
 
 
 # --- the per-round prompt -------------------------------------------------- #
@@ -69,7 +71,15 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
             "4. Perform only the work assigned to your role and current task; do not "
             "inherit the legacy mathematical skill loop by default.\n"
             "5. Persist useful progress in the correct knowledge layer and keep claims at "
-            "their actual evidence status."
+            "their actual evidence status.\n"
+            "6. Runtime terminal protocol: only when this assignment reaches a terminal "
+            "point, end your final response with exactly one standalone line "
+            "`DANUS_OUTCOME: COMPLETE`, `DANUS_OUTCOME: BLOCKED`, or "
+            "`DANUS_OUTCOME: NEEDS_REVIEW`. COMPLETE means the assigned task is done; "
+            "BLOCKED means an external prerequisite prevents progress; NEEDS_REVIEW means "
+            "scientific judgment/review is required. If useful work remains on this same "
+            "assignment, emit no DANUS_OUTCOME line. Never edit the Research Plan or "
+            "Progress Ledger yourself."
             f"{_scientific_context(project, role_key)}"
         )
         checkpoint = C.checkpoint_for_prompt(L.worker_dir(project, worker), role_key)
@@ -161,6 +171,17 @@ def _parse_last_fact_id(log_path: Path) -> Optional[str]:
         return None
     ids = _FACT_ID_RE.findall(text)
     return ids[-1] if ids else None
+
+
+def _terminal_outcome(telemetry: dict) -> Optional[str]:
+    """Parse only the explicit machine marker; never infer terminal state from prose."""
+    matches = _OUTCOME_RE.findall(str(telemetry.get("last_agent_message") or ""))
+    return matches[0].upper() if len(matches) == 1 else None
+
+
+def _progress_ledger(wl: L.WorkerLayout) -> Optional[ProgressLedger]:
+    path = wl.project_dir / "progress" / "ledger.jsonl"
+    return ProgressLedger(wl.project_dir) if path.is_file() else None
 
 
 # --- one round ------------------------------------------------------------- #
@@ -312,29 +333,84 @@ def main(worker_dir: str) -> int:
     max_fail = int(os.environ.get("DANUS_MAX_CONSEC_FAILURES", "5"))
     wl.logs.mkdir(parents=True, exist_ok=True)
 
+    ledger = _progress_ledger(wl)
+    exit_recorded = False
+
+    def _record_exit(reason: str, **details) -> None:
+        nonlocal exit_recorded
+        if ledger is None or exit_recorded:
+            return
+        ledger.runtime_event(
+            worker=worker,
+            kind="EXITED",
+            note=reason,
+            details=details or None,
+        )
+        exit_recorded = True
+
     def _on_term(signum, _frame):
         if _Child.proc is not None:
             _Child.proc.terminate()
         write_status(wl, state="terminated")
+        _record_exit("terminated", signal=int(signum))
         _cleanup_pid(wl)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _on_term)
 
     write_status(wl, state="running", round=0, started_at=time.time())
+    if ledger is not None:
+        current = ledger.current(worker, refresh_stale=True)
+        if current is not None:
+            ledger.runtime_event(
+                worker=worker,
+                kind="STARTED",
+                details={"pid": os.getpid(), "role": role_name},
+            )
+            if current["state"] in {"DONE", "BLOCKED", "STALE"}:
+                write_status(
+                    wl,
+                    state="stopped",
+                    terminal_outcome=current.get("outcome"),
+                    progress_state=current["state"],
+                )
+                _record_exit(f"assignment_{current['state'].lower()}")
+                _cleanup_pid(wl)
+                return 0
+            ledger.update(
+                worker=worker,
+                state="RUNNING",
+                actor="runtime",
+                note="worker process started",
+            )
+
     rnd = 0
     consec_fail = 0
     try:
         while True:
+            if ledger is not None:
+                current = ledger.current(worker, refresh_stale=True)
+                if current is not None and current["state"] in {"DONE", "BLOCKED", "STALE"}:
+                    write_status(
+                        wl,
+                        state="stopped",
+                        terminal_outcome=current.get("outcome"),
+                        progress_state=current["state"],
+                    )
+                    _record_exit(f"assignment_{current['state'].lower()}")
+                    break
             if wl.stop.exists():
                 wl.stop.unlink(missing_ok=True)
                 write_status(wl, state="stopped")
+                _record_exit("stopped")
                 break
             if _deadline_passed(project_dir):
                 write_status(wl, state="deadline")
+                _record_exit("deadline")
                 break
             if max_rounds and rnd >= max_rounds:
                 write_status(wl, state="max_rounds")
+                _record_exit("max_rounds")
                 break
 
             rnd += 1
@@ -377,9 +453,34 @@ def main(worker_dir: str) -> int:
                         trigger=trigger, migration=migration,
                     )
 
+            outcome = _terminal_outcome(telemetry) if scientific and rc == 0 else None
+            if outcome and ledger is not None:
+                current = ledger.current(worker, refresh_stale=True)
+                if current is not None and current["state"] == "STALE":
+                    write_status(
+                        wl,
+                        state="stopped",
+                        progress_state="STALE",
+                        ignored_terminal_outcome=outcome,
+                    )
+                    _record_exit("assignment_stale_after_round")
+                    break
+                if current is not None:
+                    progress_state = "DONE" if outcome == "COMPLETE" else "BLOCKED"
+                    ledger.update(
+                        worker=worker,
+                        state=progress_state,
+                        actor="runtime",
+                        note=f"agent declared {outcome}",
+                        outcome=outcome,
+                    )
+
             status_fields = {
-                "state": "idle", "round": rnd, "last_round_at": time.time(),
-                "last_rc": rc, "last_fact_id": _parse_last_fact_id(log_path),
+                "state": "stopped" if outcome else "idle",
+                "round": rnd,
+                "last_round_at": time.time(),
+                "last_rc": rc,
+                "last_fact_id": _parse_last_fact_id(log_path),
             }
             if scientific:
                 status_fields.update({
@@ -388,19 +489,29 @@ def main(worker_dir: str) -> int:
                     "context_compactions": int(telemetry.get("compactions") or 0),
                     "context_trigger": trigger,
                     "context_checkpoint": str(C._path(wl.dir, C.CHECKPOINT_NAME)),
+                    "terminal_outcome": outcome,
                 })
             write_status(wl, **status_fields)
 
+            if outcome:
+                _record_exit("terminal_outcome", outcome=outcome, returncode=rc)
+                break
             if rc == 127:
                 write_status(wl, state="error", error="codex binary not found")
+                _record_exit("codex_binary_not_found", returncode=rc)
                 return 127
             consec_fail = consec_fail + 1 if rc not in (0, 124, 125) else 0
             if max_fail and consec_fail >= max_fail:
                 write_status(wl, state="error", error=f"{consec_fail} consecutive failed rounds")
+                _record_exit("consecutive_failed_rounds", returncode=rc, count=consec_fail)
                 return 1
 
             if beat > 0:
                 time.sleep(beat)
+    except Exception as exc:
+        write_status(wl, state="error", error=str(exc))
+        _record_exit("runtime_exception", error=type(exc).__name__)
+        raise
     finally:
         _cleanup_pid(wl)
     return 0

@@ -106,8 +106,13 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
                 reason="dependencies_not_complete")
             continue
         if state == "BLOCKED":
+            reason = (
+                "assignment_needs_review"
+                if assignment.get("outcome") == "NEEDS_REVIEW"
+                else "assignment_blocked"
+            )
             add("REVIEW", worker=worker, node_id=node_id, assignment_id=aid,
-                reason="assignment_blocked")
+                reason=reason)
             continue
         if state == "DONE":
             if node_id not in completed:
