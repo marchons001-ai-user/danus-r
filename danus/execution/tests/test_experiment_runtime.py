@@ -78,7 +78,9 @@ def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
     checkpoint_path = tmp_path / "experiment_runtime" / protocol_id / "checkpoint.json"
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     assert set(checkpoint["completed"]) == {"u1"}
-    assert checkpoint["last_failure"]["unit_id"] == "u2"
+    assert checkpoint["failures"][-1]["unit_id"] == "u2"
+    assert checkpoint["failures"][-1]["attempt"] == 1
+    assert (tmp_path / checkpoint["failures"][-1]["log"]).is_file()
     assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
 
     (tmp_path / "fail_u2").unlink()
@@ -87,6 +89,7 @@ def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
     assert result["completed_units"] == 2
     assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
     assert (tmp_path / "counts" / "u2.txt").read_text() == "2"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "logs" / "u2.attempt2.log").is_file()
 
     # Completed runtime is idempotent: neither unit is run again.
     again = run_experiment(tmp_path, protocol_id)
@@ -96,6 +99,7 @@ def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
 
     record = store.get_record(result["evidence_id"])
     assert record and record["primary_metrics"] == {"mean_score": 2.0}
+    assert len(record["failures"]) == 1 and record["failures"][0]["unit_id"] == "u2"
     out = check_empirical_evidence(
         tmp_path,
         scope={"matrix": "two-unit frozen smoke"},
