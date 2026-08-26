@@ -147,12 +147,13 @@ def test_verifier_rejects_wrong_metrics_even_with_valid_record_identity(tmp_path
 
 
 def test_reducer_change_rejected_by_runtime_and_verifier(tmp_path: Path):
-    store, protocol_id = _fixture(tmp_path)
+    _, protocol_id = _fixture(tmp_path)
     result = run_experiment(tmp_path, protocol_id)
     (tmp_path / "reducer.py").write_text(REDUCER + "\n# changed\n", encoding="utf-8")
 
-    # Completed checkpoint revalidation reaches the existing Evidence Record on
-    # runtime resume, while verifier must refuse to recompute with changed code.
+    with pytest.raises(ValueError, match="metric reducer"):
+        run_experiment(tmp_path, protocol_id)
+
     out = check_empirical_evidence(
         tmp_path,
         scope={"matrix": "two-unit frozen smoke"},
@@ -160,6 +161,18 @@ def test_reducer_change_rejected_by_runtime_and_verifier(tmp_path: Path):
     )
     assert out["passed"] is False
     assert any("primary_metrics_recompute" in error and "reducer" in error for error in out["errors"])
+
+
+def test_tampered_frozen_protocol_is_never_executed(tmp_path: Path):
+    store, protocol_id = _fixture(tmp_path)
+    path = store.protocols_dir / f"{protocol_id}.json"
+    protocol = json.loads(path.read_text(encoding="utf-8"))
+    protocol["matrix"]["units"][0]["argv"] = [sys.executable, "runner.py", "u1", "raw/evil.json"]
+    path.write_text(json.dumps(protocol), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="protocol identity mismatch"):
+        run_experiment(tmp_path, protocol_id)
+    assert not (tmp_path / "counts").exists()
 
 
 def test_historical_protocol_without_reducer_keeps_identity_and_verification(tmp_path: Path):
