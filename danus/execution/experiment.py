@@ -22,8 +22,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
-from danus.core.evidence import EvidenceStore
-from danus.core.metrics import reduce_metrics
+from danus.core.evidence import EvidenceStore, _content_id, protocol_identity
+from danus.core.metrics import metrics_equal, reduce_metrics
 from danus.core._util import utc_now
 
 _UNIT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -120,6 +120,18 @@ def _refs_match(store: EvidenceStore, refs: Any) -> bool:
     return True
 
 
+def _git_commit(root: Path) -> str:
+    """Best-effort provenance only; execution never depends on git being present."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(root), capture_output=True,
+            text=True, check=False,
+        )
+    except OSError:
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
 def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experimenter") -> Dict[str, Any]:
     """Execute exactly one frozen protocol and return its immutable Evidence id."""
     root = Path(project_dir).resolve()
@@ -127,6 +139,11 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
     protocol = store.get_protocol(protocol_id)
     if protocol is None:
         raise ValueError(f"unknown protocol_id: {protocol_id}")
+    if (
+        protocol.get("protocol_id") != protocol_id
+        or _content_id(protocol_identity(protocol)) != protocol_id
+    ):
+        raise ValueError("frozen protocol identity mismatch")
     if protocol.get("status") != "frozen":
         raise ValueError("Experiment Runtime accepts frozen protocols only")
     if not isinstance(protocol.get("metric_reducer"), dict):
@@ -152,10 +169,16 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
         record = store.get_record(str(evidence_id))
         if record is None or record.get("protocol_id") != protocol_id:
             raise ValueError("checkpoint references missing or mismatched Evidence Record")
+        artifacts = [ref for unit in units for ref in completed.get(unit["id"], [])]
+        if record.get("artifacts") != artifacts:
+            raise ValueError("completed Evidence artifacts do not match checkpoint")
+        recomputed = reduce_metrics(root, protocol, artifacts)
+        if not metrics_equal(record.get("primary_metrics"), recomputed):
+            raise ValueError("completed Evidence primary_metrics do not match raw artifacts")
         return {
             "protocol_id": protocol_id,
             "evidence_id": str(evidence_id),
-            "primary_metrics": record.get("primary_metrics", {}),
+            "primary_metrics": recomputed,
             "completed_units": len(completed),
         }
 
@@ -202,6 +225,7 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
     evidence_id = store.add_record(
         protocol_id=protocol_id,
         author=author,
+        code_commit=_git_commit(root),
         matrix_coverage={
             "planned": len(units),
             "completed": len(completed),
