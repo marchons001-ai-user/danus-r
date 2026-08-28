@@ -8,9 +8,11 @@ another network request.
 from __future__ import annotations
 
 import json
-import os
+import queue
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -91,61 +93,105 @@ def _failure(message: str) -> Dict[str, Any]:
     }
 
 
-def read_codex_quota(*, codex_bin: Optional[str] = None, timeout: float = 15.0) -> Dict[str, Any]:
-    """Perform one read-only ``account/rateLimits/read`` app-server exchange."""
-    binary = codex_bin or _openai_codex_bin()
-    messages = [
-        {
-            "method": "initialize",
-            "id": 1,
-            "params": {"clientInfo": {"name": "danus-r", "version": "0.1.0"}},
-        },
-        {"method": "initialized"},
-        {"method": "account/rateLimits/read", "id": 2},
-    ]
-    wire = "".join(json.dumps(message, separators=(",", ":")) + "\n" for message in messages)
-    try:
-        proc = subprocess.run(
-            [binary, "app-server", "--listen", "stdio://"],
-            input=wire,
-            text=True,
-            capture_output=True,
-            timeout=max(0.1, float(timeout)),
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return _failure("Codex quota read timed out")
-    except OSError as exc:
-        return _failure(f"Codex app-server unavailable: {exc.__class__.__name__}")
+def _send(proc: subprocess.Popen, message: Dict[str, Any]) -> None:
+    if proc.stdin is None:
+        raise OSError("Codex app-server stdin unavailable")
+    proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+    proc.stdin.flush()
 
-    response = None
-    init_error = None
-    for line in proc.stdout.splitlines():
+
+def _wait_response(lines: "queue.Queue[Optional[str]]", request_id: int, deadline: float) -> Optional[Dict[str, Any]]:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        try:
+            line = lines.get(timeout=remaining)
+        except queue.Empty as exc:
+            raise TimeoutError from exc
+        if line is None:
+            return None
         try:
             message = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(message, dict):
-            continue
-        if message.get("id") == 1 and isinstance(message.get("error"), dict):
-            init_error = str(message["error"].get("message") or "initialize failed")
-        if message.get("id") == 2:
-            response = message
-            break
+        if isinstance(message, dict) and message.get("id") == request_id:
+            return message
 
-    if response is None:
-        if init_error:
-            return _failure(f"Codex app-server initialize failed: {init_error}")
-        return _failure(f"Codex quota response missing (app-server rc={proc.returncode})")
-    if isinstance(response.get("error"), dict):
-        return _failure(str(response["error"].get("message") or "Codex quota read failed"))
-    result = response.get("result")
-    if not isinstance(result, dict):
-        return _failure("Codex quota response has no result object")
+
+def read_codex_quota(*, codex_bin: Optional[str] = None, timeout: float = 15.0) -> Dict[str, Any]:
+    """Perform one read-only ``account/rateLimits/read`` app-server exchange."""
+    binary = codex_bin or _openai_codex_bin()
+    timeout = max(0.1, float(timeout))
     try:
-        return normalize_rate_limits(result)
-    except ValueError as exc:
-        return _failure(str(exc))
+        proc = subprocess.Popen(
+            [binary, "app-server", "--listen", "stdio://"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as exc:
+        return _failure(f"Codex app-server unavailable: {exc.__class__.__name__}")
+
+    lines: "queue.Queue[Optional[str]]" = queue.Queue()
+
+    def _read_stdout() -> None:
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=_read_stdout, daemon=True).start()
+    deadline = time.monotonic() + timeout
+    try:
+        _send(proc, {
+            "method": "initialize",
+            "id": 1,
+            "params": {"clientInfo": {"name": "danus-r", "version": "0.1.0"}},
+        })
+        init = _wait_response(lines, 1, deadline)
+        if init is None:
+            return _failure(f"Codex app-server initialize response missing (rc={proc.poll()})")
+        if isinstance(init.get("error"), dict):
+            message = str(init["error"].get("message") or "initialize failed")
+            return _failure(f"Codex app-server initialize failed: {message}")
+
+        _send(proc, {"method": "initialized"})
+        _send(proc, {"method": "account/rateLimits/read", "id": 2})
+        response = _wait_response(lines, 2, deadline)
+        if response is None:
+            return _failure(f"Codex quota response missing (app-server rc={proc.poll()})")
+        if isinstance(response.get("error"), dict):
+            return _failure(str(response["error"].get("message") or "Codex quota read failed"))
+        result = response.get("result")
+        if not isinstance(result, dict):
+            return _failure("Codex quota response has no result object")
+        try:
+            return normalize_rate_limits(result)
+        except ValueError as exc:
+            return _failure(str(exc))
+    except TimeoutError:
+        return _failure("Codex quota read timed out")
+    except (BrokenPipeError, OSError) as exc:
+        return _failure(f"Codex app-server I/O failed: {exc.__class__.__name__}")
+    finally:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 
 def quota_path(project_dir: Path) -> Path:
