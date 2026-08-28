@@ -52,8 +52,20 @@ def _window(snapshot: Dict[str, Any], duration_mins: int) -> Optional[Dict[str, 
     return None
 
 
+def _reported_durations(snapshot: Dict[str, Any]) -> list[int]:
+    durations: list[int] = []
+    for key in ("primary", "secondary"):
+        raw = snapshot.get(key)
+        if not isinstance(raw, dict):
+            continue
+        value = raw.get("windowDurationMins")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0 and value not in durations:
+            durations.append(value)
+    return durations
+
+
 def normalize_rate_limits(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize only the Codex 5h/weekly windows; do not guess bucket semantics."""
+    """Normalize Codex quota without inventing windows the backend did not report."""
     bucket = None
     source_bucket = None
     by_id = result.get("rateLimitsByLimitId")
@@ -66,18 +78,32 @@ def normalize_rate_limits(result: Dict[str, Any]) -> Dict[str, Any]:
     if bucket is None:
         raise ValueError("Codex rate-limit response has no codex bucket")
 
+    five_hour = _window(bucket, _FIVE_HOURS_MINS)
+    weekly = _window(bucket, _WEEKLY_MINS)
+    reset_credits = result.get("rateLimitResetCredits")
+    available_count = reset_credits.get("availableCount") if isinstance(reset_credits, dict) else None
+    if isinstance(available_count, bool) or not isinstance(available_count, int):
+        available_count = None
+
     return {
         "schema_version": 1,
         "source": "codex_app_server",
         "source_bucket": source_bucket,
         "observed_at": utc_now(),
+        # Endpoint/account telemetry is available even when one named window is absent.
         "available": True,
         "limit_id": bucket.get("limitId"),
         "plan_type": bucket.get("planType"),
         "rate_limit_reached_type": bucket.get("rateLimitReachedType"),
+        "window_available": {
+            "5h": five_hour is not None,
+            "weekly": weekly is not None,
+        },
+        "reported_window_durations_mins": _reported_durations(bucket),
+        "reset_credits_available": available_count,
         "windows": {
-            "5h": _window(bucket, _FIVE_HOURS_MINS),
-            "weekly": _window(bucket, _WEEKLY_MINS),
+            "5h": five_hour,
+            "weekly": weekly,
         },
     }
 
@@ -89,6 +115,9 @@ def _failure(message: str) -> Dict[str, Any]:
         "observed_at": utc_now(),
         "available": False,
         "error": message,
+        "window_available": {"5h": False, "weekly": False},
+        "reported_window_durations_mins": [],
+        "reset_credits_available": None,
         "windows": {"5h": None, "weekly": None},
     }
 
