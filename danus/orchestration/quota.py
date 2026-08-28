@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional
 
 from danus.core._util import utc_now
 from danus.execution import context as C
+from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write
 
 _FIVE_HOURS_MINS = 300
@@ -244,13 +245,12 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
-def _round_logs(project_dir: Path) -> list[Path]:
-    """All Danus worker round logs sharing this control-project root."""
-    return list(Path(project_dir).parent.glob("*/workers/*/logs/round_*.log"))
+def _round_logs() -> list[Path]:
+    """All worker round logs under the existing Danus project root."""
+    return list(L.agents_root().glob("*/workers/*/logs/round_*.log"))
 
 
 def _local_five_hour_proxy(
-    project_dir: Path,
     official: Dict[str, Any],
     previous: Optional[Dict[str, Any]],
     *,
@@ -265,13 +265,19 @@ def _local_five_hour_proxy(
     """
     now = float(time.time() if now is None else now)
     cutoff = now - _FIVE_HOURS_SECONDS
-    paths = _round_logs(project_dir)
+    paths = _round_logs()
 
     prior_proxy = previous.get("five_hour_proxy") if isinstance(previous, dict) else None
     if not isinstance(prior_proxy, dict):
         prior_proxy = {}
     prior_since = _epoch(prior_proxy.get("observed_since"))
-    oldest = min((p.stat().st_mtime for p in paths), default=now)
+    mtimes: list[float] = []
+    for path in paths:
+        try:
+            mtimes.append(path.stat().st_mtime)
+        except OSError:
+            pass
+    oldest = min(mtimes, default=now)
     observed_since = min(x for x in (now, oldest, prior_since) if x is not None)
     coverage = max(0, min(_FIVE_HOURS_SECONDS, int(now - observed_since)))
     window_complete = coverage >= _FIVE_HOURS_SECONDS
@@ -290,6 +296,17 @@ def _local_five_hour_proxy(
     if not isinstance(prior_cal, dict):
         prior_cal = {}
     same_reset = weekly_reset is not None and prior_cal.get("weekly_reset_at") == weekly_reset
+    prior_weekly = previous.get("windows", {}).get("weekly") if isinstance(previous, dict) and isinstance(previous.get("windows"), dict) else None
+    prior_weekly_used = prior_weekly.get("used_percent") if isinstance(prior_weekly, dict) else None
+    if (
+        same_reset
+        and isinstance(prior_weekly_used, (int, float))
+        and not isinstance(prior_weekly_used, bool)
+        and weekly_used is not None
+        and float(weekly_used) < float(prior_weekly_used)
+    ):
+        same_reset = False
+
     tokens_per_pct = prior_cal.get("tokens_per_weekly_percent") if same_reset else None
     if isinstance(tokens_per_pct, bool) or not isinstance(tokens_per_pct, (int, float)) or tokens_per_pct <= 0:
         tokens_per_pct = None
@@ -389,7 +406,7 @@ def refresh_quota(
     """Read once, attach the local five-hour proxy, and atomically persist."""
     previous = load_quota(project_dir)
     snapshot = read_codex_quota(codex_bin=codex_bin, timeout=timeout)
-    snapshot["five_hour_proxy"] = _local_five_hour_proxy(project_dir, snapshot, previous)
+    snapshot["five_hour_proxy"] = _local_five_hour_proxy(snapshot, previous)
     atomic_write(
         quota_path(project_dir),
         json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
