@@ -30,6 +30,7 @@ from danus.execution.scaffold import atomic_write
 _FIVE_HOURS_MINS = 300
 _FIVE_HOURS_SECONDS = _FIVE_HOURS_MINS * 60
 _WEEKLY_MINS = 7 * 24 * 60
+_CALIBRATION_MAX_AGE_SECONDS = 6 * 60 * 60
 
 
 def _openai_codex_bin() -> str:
@@ -99,7 +100,6 @@ def normalize_rate_limits(result: Dict[str, Any]) -> Dict[str, Any]:
         "source": "codex_app_server",
         "source_bucket": source_bucket,
         "observed_at": utc_now(),
-        # Endpoint/account telemetry is available even when one named window is absent.
         "available": True,
         "limit_id": bucket.get("limitId"),
         "plan_type": bucket.get("planType"),
@@ -256,12 +256,12 @@ def _local_five_hour_proxy(
     *,
     now: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Build a rolling five-hour Danus activity proxy from existing A2-7g logs.
+    """Rolling 5h Danus activity with short-lived online weekly calibration.
 
-    ``pace_pressure_percent`` is calibrated from an observed change in the official
-    weekly percentage. 100 means the recent five-hour burn rate equals the average
-    rate that would consume 100% of a seven-day budget in seven days. It may exceed
-    100 and is deliberately not named remaining/used quota.
+    Calibration uses only the latest positive official-weekly delta interval and is
+    replaced on every new measurable delta. It expires after six hours and is
+    invalidated by weekly reset/decrease or account limit-regime changes. This is a
+    local pressure proxy, never an OpenAI 5h remaining-quota estimate.
     """
     now = float(time.time() if now is None else now)
     cutoff = now - _FIVE_HOURS_SECONDS
@@ -270,6 +270,10 @@ def _local_five_hour_proxy(
     prior_proxy = previous.get("five_hour_proxy") if isinstance(previous, dict) else None
     if not isinstance(prior_proxy, dict):
         prior_proxy = {}
+    prior_cal = prior_proxy.get("calibration")
+    if not isinstance(prior_cal, dict):
+        prior_cal = {}
+
     prior_since = _epoch(prior_proxy.get("observed_since"))
     mtimes: list[float] = []
     for path in paths:
@@ -292,36 +296,56 @@ def _local_five_hour_proxy(
     if isinstance(weekly_reset, bool) or not isinstance(weekly_reset, int):
         weekly_reset = None
 
-    prior_cal = prior_proxy.get("calibration")
-    if not isinstance(prior_cal, dict):
-        prior_cal = {}
-    same_reset = weekly_reset is not None and prior_cal.get("weekly_reset_at") == weekly_reset
-    prior_weekly = previous.get("windows", {}).get("weekly") if isinstance(previous, dict) and isinstance(previous.get("windows"), dict) else None
-    prior_weekly_used = prior_weekly.get("used_percent") if isinstance(prior_weekly, dict) else None
-    if (
-        same_reset
-        and isinstance(prior_weekly_used, (int, float))
-        and not isinstance(prior_weekly_used, bool)
-        and weekly_used is not None
-        and float(weekly_used) < float(prior_weekly_used)
-    ):
-        same_reset = False
+    official_ok = weekly_used is not None and weekly_reset is not None
+    plan_type = official.get("plan_type")
+    limit_id = official.get("limit_id")
+    prior_reset = prior_cal.get("weekly_reset_at")
+    prior_plan = prior_cal.get("plan_type")
+    prior_limit = prior_cal.get("limit_id")
+    same_regime = bool(
+        official_ok
+        and prior_reset == weekly_reset
+        and prior_plan == plan_type
+        and prior_limit == limit_id
+    )
 
-    tokens_per_pct = prior_cal.get("tokens_per_weekly_percent") if same_reset else None
+    recalibration_reason = None
+    if official_ok and prior_cal:
+        if prior_reset != weekly_reset:
+            recalibration_reason = "weekly_reset_changed"
+        elif prior_plan != plan_type:
+            recalibration_reason = "plan_changed"
+        elif prior_limit != limit_id:
+            recalibration_reason = "limit_changed"
+
+    tokens_per_pct = prior_cal.get("tokens_per_weekly_percent") if same_regime else None
+    calibrated_at = _epoch(prior_cal.get("calibrated_at")) if same_regime else None
     if isinstance(tokens_per_pct, bool) or not isinstance(tokens_per_pct, (int, float)) or tokens_per_pct <= 0:
         tokens_per_pct = None
+    if tokens_per_pct is not None and (
+        calibrated_at is None or now - calibrated_at > _CALIBRATION_MAX_AGE_SECONDS
+    ):
+        tokens_per_pct = None
+        calibrated_at = None
+        recalibration_reason = "calibration_expired"
 
-    anchor_at = _epoch(prior_cal.get("anchor_observed_at")) if same_reset else None
-    anchor_used = prior_cal.get("anchor_weekly_used_percent") if same_reset else None
+    anchor_at = _epoch(prior_cal.get("anchor_observed_at")) if same_regime else None
+    anchor_used = prior_cal.get("anchor_weekly_used_percent") if same_regime else None
     if isinstance(anchor_used, bool) or not isinstance(anchor_used, (int, float)):
         anchor_used = None
+    if anchor_at is not None and now - anchor_at > _CALIBRATION_MAX_AGE_SECONDS:
+        anchor_at = None
+        anchor_used = None
+        tokens_per_pct = None
+        calibrated_at = None
+        recalibration_reason = "calibration_expired"
 
-    if weekly_used is not None and weekly_reset is not None and anchor_at is None:
+    if official_ok and anchor_at is None:
         anchor_at = now
         anchor_used = float(weekly_used)
 
     scan_start = cutoff
-    if tokens_per_pct is None and anchor_at is not None:
+    if anchor_at is not None:
         scan_start = min(scan_start, anchor_at)
 
     five_hour_tokens = 0
@@ -341,37 +365,89 @@ def _local_five_hour_proxy(
         if mtime >= cutoff:
             five_hour_tokens += tokens
             five_hour_rounds += 1
-        if tokens_per_pct is None and anchor_at is not None and mtime >= anchor_at:
+        if anchor_at is not None and mtime >= anchor_at:
             calibration_tokens += tokens
 
     calibration_status = "unavailable"
-    if weekly_used is not None and weekly_reset is not None:
+    if not official_ok:
+        if prior_cal:
+            calibration_status = "waiting_for_official"
+            # Preserve a still-fresh calibration across transient sensor failure,
+            # but never use it for a ready/hard-control proxy while official data
+            # is unavailable.
+            prior_value = prior_cal.get("tokens_per_weekly_percent")
+            prior_time = _epoch(prior_cal.get("calibrated_at"))
+            if (
+                isinstance(prior_value, (int, float))
+                and not isinstance(prior_value, bool)
+                and prior_value > 0
+                and prior_time is not None
+                and now - prior_time <= _CALIBRATION_MAX_AGE_SECONDS
+            ):
+                tokens_per_pct = float(prior_value)
+                calibrated_at = prior_time
+            anchor_at = _epoch(prior_cal.get("anchor_observed_at"))
+            anchor_used = prior_cal.get("anchor_weekly_used_percent")
+            weekly_reset = prior_cal.get("weekly_reset_at")
+            plan_type = prior_cal.get("plan_type")
+            limit_id = prior_cal.get("limit_id")
+    else:
+        if not same_regime and prior_cal:
+            tokens_per_pct = None
+            calibrated_at = None
+            anchor_at = now
+            anchor_used = float(weekly_used)
+            calibration_tokens = 0
+
         calibration_status = "ready" if tokens_per_pct is not None else "waiting_for_weekly_delta"
-        if tokens_per_pct is None and anchor_at is not None and anchor_used is not None:
+        if anchor_at is not None and anchor_used is not None:
             delta_pct = float(weekly_used) - float(anchor_used)
             if delta_pct < 0:
+                tokens_per_pct = None
+                calibrated_at = None
                 anchor_at = now
                 anchor_used = float(weekly_used)
                 calibration_tokens = 0
-            elif delta_pct > 0 and calibration_tokens > 0:
-                tokens_per_pct = calibration_tokens / delta_pct
-                calibration_status = "ready"
-            elif delta_pct > 0 and calibration_tokens == 0:
-                # Quota moved without Danus Codex activity: treat it as external
-                # account usage and start a fresh calibration interval.
+                calibration_status = "waiting_for_weekly_delta"
+                recalibration_reason = "weekly_decreased"
+            elif delta_pct > 0:
+                if calibration_tokens > 0:
+                    # Latest measurable interval wins: fast adaptation to account
+                    # quota/denominator changes, with no long-memory averaging.
+                    tokens_per_pct = calibration_tokens / delta_pct
+                    calibrated_at = now
+                    calibration_status = "ready"
+                    recalibration_reason = "online_update"
+                else:
+                    # The account meter moved without attributable Danus Codex
+                    # activity. Treat this as external usage/regime uncertainty.
+                    tokens_per_pct = None
+                    calibrated_at = None
+                    calibration_status = "waiting_for_weekly_delta"
+                    recalibration_reason = "external_usage"
                 anchor_at = now
                 anchor_used = float(weekly_used)
+                calibration_tokens = 0
 
     weekly_equivalent = None
     pace_pressure = None
-    if window_complete and tokens_per_pct is not None:
+    if window_complete and calibration_status == "ready" and tokens_per_pct is not None:
         weekly_equivalent = five_hour_tokens / tokens_per_pct
         sustainable_five_hour_pct = 100.0 * _FIVE_HOURS_MINS / _WEEKLY_MINS
         pace_pressure = 100.0 * weekly_equivalent / sustainable_five_hour_pct
 
-    status = "warming_up"
-    if window_complete:
-        status = "ready" if pace_pressure is not None else "uncalibrated"
+    if not window_complete:
+        status = "warming_up"
+    elif calibration_status == "ready" and pace_pressure is not None:
+        status = "ready"
+    elif calibration_status == "waiting_for_official":
+        status = "stale"
+    else:
+        status = "uncalibrated"
+
+    calibration_age = None
+    if calibrated_at is not None:
+        calibration_age = max(0, int(now - calibrated_at))
 
     return {
         "source": "danus_structured_round_logs",
@@ -388,9 +464,16 @@ def _local_five_hour_proxy(
         "pace_pressure_percent": round(pace_pressure, 1) if pace_pressure is not None else None,
         "calibration": {
             "status": calibration_status,
+            "method": "latest_positive_weekly_delta",
+            "max_age_seconds": _CALIBRATION_MAX_AGE_SECONDS,
+            "age_seconds": calibration_age,
+            "recalibration_reason": recalibration_reason,
             "weekly_reset_at": weekly_reset,
+            "plan_type": plan_type,
+            "limit_id": limit_id,
             "anchor_observed_at": _iso(anchor_at) if anchor_at is not None else None,
             "anchor_weekly_used_percent": anchor_used,
+            "calibrated_at": _iso(calibrated_at) if calibrated_at is not None else None,
             "tokens_per_weekly_percent": round(tokens_per_pct, 3) if tokens_per_pct is not None else None,
         },
     }
