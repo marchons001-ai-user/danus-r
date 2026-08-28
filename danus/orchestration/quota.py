@@ -4,9 +4,15 @@ This module observes quota only. It never changes worker state, scheduling, mode
 selection, or experiment scope. Snapshots are persisted under the Danus control
 project so a restarted Supervisor can inspect the last observation without making
 another network request.
+
+When Codex does not expose its historical 5-hour bucket, the persisted snapshot
+also carries a clearly-labelled local proxy. The proxy reuses A2-7g structured
+round telemetry and measures Danus Codex activity over a rolling five-hour window.
+It is never presented as an OpenAI quota percentage.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import queue
 import shutil
@@ -17,9 +23,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from danus.core._util import utc_now
+from danus.execution import context as C
 from danus.execution.scaffold import atomic_write
 
 _FIVE_HOURS_MINS = 300
+_FIVE_HOURS_SECONDS = _FIVE_HOURS_MINS * 60
 _WEEKLY_MINS = 7 * 24 * 60
 
 
@@ -223,6 +231,154 @@ def read_codex_quota(*, codex_bin: Optional[str] = None, timeout: float = 15.0) 
                 proc.kill()
 
 
+def _epoch(value: Any) -> Optional[float]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _round_logs(project_dir: Path) -> list[Path]:
+    """All Danus worker round logs sharing this control-project root."""
+    return list(Path(project_dir).parent.glob("*/workers/*/logs/round_*.log"))
+
+
+def _local_five_hour_proxy(
+    project_dir: Path,
+    official: Dict[str, Any],
+    previous: Optional[Dict[str, Any]],
+    *,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Build a rolling five-hour Danus activity proxy from existing A2-7g logs.
+
+    ``pace_pressure_percent`` is calibrated from an observed change in the official
+    weekly percentage. 100 means the recent five-hour burn rate equals the average
+    rate that would consume 100% of a seven-day budget in seven days. It may exceed
+    100 and is deliberately not named remaining/used quota.
+    """
+    now = float(time.time() if now is None else now)
+    cutoff = now - _FIVE_HOURS_SECONDS
+    paths = _round_logs(project_dir)
+
+    prior_proxy = previous.get("five_hour_proxy") if isinstance(previous, dict) else None
+    if not isinstance(prior_proxy, dict):
+        prior_proxy = {}
+    prior_since = _epoch(prior_proxy.get("observed_since"))
+    oldest = min((p.stat().st_mtime for p in paths), default=now)
+    observed_since = min(x for x in (now, oldest, prior_since) if x is not None)
+    coverage = max(0, min(_FIVE_HOURS_SECONDS, int(now - observed_since)))
+    window_complete = coverage >= _FIVE_HOURS_SECONDS
+
+    weekly = official.get("windows", {}).get("weekly") if isinstance(official.get("windows"), dict) else None
+    if not isinstance(weekly, dict):
+        weekly = None
+    weekly_used = weekly.get("used_percent") if weekly else None
+    weekly_reset = weekly.get("resets_at") if weekly else None
+    if isinstance(weekly_used, bool) or not isinstance(weekly_used, (int, float)):
+        weekly_used = None
+    if isinstance(weekly_reset, bool) or not isinstance(weekly_reset, int):
+        weekly_reset = None
+
+    prior_cal = prior_proxy.get("calibration")
+    if not isinstance(prior_cal, dict):
+        prior_cal = {}
+    same_reset = weekly_reset is not None and prior_cal.get("weekly_reset_at") == weekly_reset
+    tokens_per_pct = prior_cal.get("tokens_per_weekly_percent") if same_reset else None
+    if isinstance(tokens_per_pct, bool) or not isinstance(tokens_per_pct, (int, float)) or tokens_per_pct <= 0:
+        tokens_per_pct = None
+
+    anchor_at = _epoch(prior_cal.get("anchor_observed_at")) if same_reset else None
+    anchor_used = prior_cal.get("anchor_weekly_used_percent") if same_reset else None
+    if isinstance(anchor_used, bool) or not isinstance(anchor_used, (int, float)):
+        anchor_used = None
+
+    if weekly_used is not None and weekly_reset is not None and anchor_at is None:
+        anchor_at = now
+        anchor_used = float(weekly_used)
+
+    scan_start = cutoff
+    if tokens_per_pct is None and anchor_at is not None:
+        scan_start = min(scan_start, anchor_at)
+
+    five_hour_tokens = 0
+    five_hour_rounds = 0
+    calibration_tokens = 0
+    for path in paths:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < scan_start:
+            continue
+        telemetry = C.inspect_log(path)
+        if not telemetry.get("structured"):
+            continue
+        tokens = max(0, int(telemetry.get("uncached_tokens") or 0))
+        if mtime >= cutoff:
+            five_hour_tokens += tokens
+            five_hour_rounds += 1
+        if tokens_per_pct is None and anchor_at is not None and mtime >= anchor_at:
+            calibration_tokens += tokens
+
+    calibration_status = "unavailable"
+    if weekly_used is not None and weekly_reset is not None:
+        calibration_status = "ready" if tokens_per_pct is not None else "waiting_for_weekly_delta"
+        if tokens_per_pct is None and anchor_at is not None and anchor_used is not None:
+            delta_pct = float(weekly_used) - float(anchor_used)
+            if delta_pct < 0:
+                anchor_at = now
+                anchor_used = float(weekly_used)
+                calibration_tokens = 0
+            elif delta_pct > 0 and calibration_tokens > 0:
+                tokens_per_pct = calibration_tokens / delta_pct
+                calibration_status = "ready"
+            elif delta_pct > 0 and calibration_tokens == 0:
+                # Quota moved without Danus Codex activity: treat it as external
+                # account usage and start a fresh calibration interval.
+                anchor_at = now
+                anchor_used = float(weekly_used)
+
+    weekly_equivalent = None
+    pace_pressure = None
+    if window_complete and tokens_per_pct is not None:
+        weekly_equivalent = five_hour_tokens / tokens_per_pct
+        sustainable_five_hour_pct = 100.0 * _FIVE_HOURS_MINS / _WEEKLY_MINS
+        pace_pressure = 100.0 * weekly_equivalent / sustainable_five_hour_pct
+
+    status = "warming_up"
+    if window_complete:
+        status = "ready" if pace_pressure is not None else "uncalibrated"
+
+    return {
+        "source": "danus_structured_round_logs",
+        "scope": "danus_codex_only",
+        "approximate": True,
+        "window_duration_mins": _FIVE_HOURS_MINS,
+        "status": status,
+        "observed_since": _iso(observed_since),
+        "coverage_seconds": coverage,
+        "window_complete": window_complete,
+        "uncached_tokens": five_hour_tokens,
+        "rounds": five_hour_rounds,
+        "weekly_equivalent_percent": round(weekly_equivalent, 3) if weekly_equivalent is not None else None,
+        "pace_pressure_percent": round(pace_pressure, 1) if pace_pressure is not None else None,
+        "calibration": {
+            "status": calibration_status,
+            "weekly_reset_at": weekly_reset,
+            "anchor_observed_at": _iso(anchor_at) if anchor_at is not None else None,
+            "anchor_weekly_used_percent": anchor_used,
+            "tokens_per_weekly_percent": round(tokens_per_pct, 3) if tokens_per_pct is not None else None,
+        },
+    }
+
+
 def quota_path(project_dir: Path) -> Path:
     return Path(project_dir) / "supervisor" / "quota.json"
 
@@ -230,8 +386,10 @@ def quota_path(project_dir: Path) -> Path:
 def refresh_quota(
     project_dir: Path, *, codex_bin: Optional[str] = None, timeout: float = 15.0
 ) -> Dict[str, Any]:
-    """Read once and atomically persist the observation, including failures."""
+    """Read once, attach the local five-hour proxy, and atomically persist."""
+    previous = load_quota(project_dir)
     snapshot = read_codex_quota(codex_bin=codex_bin, timeout=timeout)
+    snapshot["five_hour_proxy"] = _local_five_hour_proxy(project_dir, snapshot, previous)
     atomic_write(
         quota_path(project_dir),
         json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
