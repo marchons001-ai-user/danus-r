@@ -15,6 +15,14 @@ Work only in the assigned project/workspace and through the stores and tools exp
 to your role. Do not inspect another worker's private local memory unless the
 runtime explicitly provides it as shared context.
 
+When the worker home contains a Danus-managed `workspace/` link, treat that linked
+directory as the project's scientific read/write workspace. Source code, experiment
+configs, generated scientific outputs, and project edits belong there; Danus control
+state (`TASK.md`, local memory, Plan/Progress/Evidence/Fact state, checkpoints, and
+runtime logs) remains outside it. Paths declared as project `readonly_inputs` are
+source/reference inputs only and must never be modified. This boundary is workflow
+policy, not a substitute for OS filesystem permissions.
+
 The Research Plan is controlled shared state. Never edit `plan/current.json`,
 `plan/revisions/`, or `plan/changes/` directly. Use only the plan-change tool exposed
 to your role; the gateway deliberately separates proposal, review, and commit

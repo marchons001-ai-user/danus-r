@@ -56,8 +56,9 @@ def sync_worker_harness(wl: "L.WorkerLayout", role_name: str) -> None:
 
     Legacy mathematical workers retain ``worker.md`` + the full mathematical
     skill bundle. Researcher/Reviewer use ``scientific_worker.md`` with no default
-    skills; Experimenter uses the same spine plus only Ponytail. Only Danus-managed
-    symlinks are removed; a real user-owned skills directory is never deleted.
+    skills; Experimenter uses the same spine plus its dedicated small skill bundle.
+    Only Danus-managed symlinks are removed; a real user-owned skills directory is
+    never deleted.
     """
     symlink(L.harness_contract(role_name), wl.dir / "AGENTS.md")
     skills_link = wl.dir / ".agents" / "skills"
@@ -68,6 +69,20 @@ def sync_worker_harness(wl: "L.WorkerLayout", role_name: str) -> None:
         return
     skills_link.parent.mkdir(parents=True, exist_ok=True)
     symlink(skills, skills_link)
+
+
+def sync_worker_workspace(wl: "L.WorkerLayout") -> None:
+    """Expose a bound scientific workspace without placing Danus control files in it."""
+    workspace = L.scientific_workspace(wl.project_dir)
+    if workspace == wl.project_dir.resolve():
+        if wl.workspace.is_symlink():
+            wl.workspace.unlink()
+        return
+    if not workspace.is_dir():
+        raise ValueError(f"scientific workspace missing: {workspace}")
+    if wl.workspace.exists() and not wl.workspace.is_symlink():
+        raise ValueError(f"worker workspace path is not Danus-managed: {wl.workspace}")
+    symlink(workspace, wl.workspace)
 
 
 def gateway_role(role_name: str) -> str:
@@ -123,9 +138,56 @@ def write_codex_config(wl: "L.WorkerLayout", role_name: str = "worker") -> None:
 # do_new — scaffold a project                                                #
 # --------------------------------------------------------------------------- #
 
-def do_new(project: str, roles: str = "high:3,xhigh:4",
-           model: Optional[str] = None) -> Dict:
+def _is_within(path: Path, root: Path) -> bool:
+    path = path.resolve()
+    root = root.resolve()
+    return path == root or root in path.parents
+
+
+def _binding_paths(
+    project_root: Path,
+    workspace: Optional[str],
+    readonly_inputs: Optional[List[str]],
+) -> tuple[Optional[Path], List[Path]]:
+    if workspace is None:
+        if readonly_inputs:
+            raise SystemExit("read-only inputs require a scientific workspace")
+        return None, []
+    work = Path(workspace).expanduser().resolve()
+    if not work.is_dir():
+        raise SystemExit(f"workspace is not a directory: {work}")
+    control = Path(project_root).resolve()
+    if _is_within(work, control) or _is_within(control, work):
+        raise SystemExit("scientific workspace must be separate from the Danus control project")
+
+    inputs: List[Path] = []
+    for raw in readonly_inputs or []:
+        path = Path(raw).expanduser().resolve()
+        if not path.exists():
+            raise SystemExit(f"read-only input does not exist: {path}")
+        if _is_within(work, path) or (path.is_dir() and _is_within(path, work)):
+            raise SystemExit("scientific workspace and read-only inputs must not overlap")
+        inputs.append(path)
+    return work, inputs
+
+
+def do_new(
+    project: str,
+    roles: str = "high:3,xhigh:4",
+    model: Optional[str] = None,
+    workspace: Optional[str] = None,
+    readonly_inputs: Optional[List[str]] = None,
+) -> Dict:
     """Scaffold a project dir + one worker home per effort-roster entry.
+
+    A scientific workspace binding is optional and immutable for this project
+    scaffold. The control project keeps Plan/Progress/Evidence/checkpoints; workers
+    see the scientific files through ``workspace/``. Declared read-only inputs are
+    policy/provenance boundaries, not an OS sandbox.
+
+    ``danus new`` can supply the binding through ``DANUS_SCIENTIFIC_WORKSPACE`` and
+    an ``os.pathsep``-separated ``DANUS_READONLY_INPUTS`` value. Explicit function
+    arguments take precedence. The resolved paths are then persisted in project.json.
 
     Workers start as the legacy ``ROLE=worker``. Changing the scientific ROLE in
     ``.role`` takes effect on the next loop start.
@@ -136,6 +198,13 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
     role_pairs = L.parse_roles(roles)
     model = model or _default_model()
 
+    if workspace is None:
+        workspace = os.environ.get("DANUS_SCIENTIFIC_WORKSPACE") or None
+    if readonly_inputs is None:
+        raw_inputs = os.environ.get("DANUS_READONLY_INPUTS", "")
+        readonly_inputs = [x for x in raw_inputs.split(os.pathsep) if x] if raw_inputs else []
+    work, ro_inputs = _binding_paths(pdir, workspace, readonly_inputs)
+
     L.workers_dir(project).mkdir(parents=True, exist_ok=True)
     (pdir / "global_memory").mkdir(exist_ok=True)
     (pdir / "fact_graph").mkdir(exist_ok=True)
@@ -144,6 +213,12 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
         L.research_charter_template().read_text(encoding="utf-8"),
     )
 
+    meta = {"name": project, "model": model, "roles": roles}
+    if work is not None:
+        meta["workspace"] = str(work)
+        meta["readonly_inputs"] = [str(path) for path in ro_inputs]
+    atomic_write(pdir / L.PROJECT_META_FILE, json.dumps(meta, ensure_ascii=False, indent=2))
+
     created: List[str] = []
     for worker, effort in role_pairs:
         wl = L.WorkerLayout(L.worker_dir(project, worker))
@@ -151,6 +226,7 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
         wl.logs.mkdir(exist_ok=True)
         (wl.dir / ".agents").mkdir(exist_ok=True)
         sync_worker_harness(wl, "worker")
+        sync_worker_workspace(wl)
 
         write_codex_config(wl, "worker")
         atomic_write(wl.task, _TASK_PLACEHOLDER)
@@ -162,9 +238,14 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
                      json.dumps({"worker": worker, "state": "created", "round": 0}, indent=2))
         created.append(worker)
 
-    meta = {"name": project, "model": model, "roles": roles, "workers": created}
-    atomic_write(pdir / "project.json", json.dumps(meta, ensure_ascii=False, indent=2))
-    return {"project_dir": str(pdir), "workers": created}
+    meta["workers"] = created
+    atomic_write(pdir / L.PROJECT_META_FILE, json.dumps(meta, ensure_ascii=False, indent=2))
+    return {
+        "project_dir": str(pdir),
+        "workspace": str(work) if work is not None else None,
+        "readonly_inputs": [str(path) for path in ro_inputs],
+        "workers": created,
+    }
 
 
 # --------------------------------------------------------------------------- #

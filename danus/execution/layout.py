@@ -7,18 +7,19 @@ verbs). Every path/name is derived here so the two halves can never drift.
 Legacy mathematical workers use ``worker.md`` + ``agents/skills/worker``.
 Scientific workers use the small ``scientific_worker.md`` spine plus their injected
 role contract and Research Charter. Researcher/Reviewer have no default skills;
-the Experimenter gets only the small Ponytail cleanup skill.
+the Experimenter gets only its small dedicated skill bundle.
 
 Everything reads env at CALL time (not import time) to match core/gateway/verify.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # --------------------------------------------------------------------------- #
 # per-worker / per-project control-file names                                  #
@@ -34,6 +35,8 @@ STATUS_FILE = ".status.json"
 LOGS_DIR = "logs"
 DEADLINE_FILE = ".run_deadline"
 RESEARCH_CHARTER_FILE = "RESEARCH_CHARTER.md"
+PROJECT_META_FILE = "project.json"
+WORKSPACE_LINK = "workspace"
 
 SCIENTIFIC_ROLES = frozenset({"researcher", "reviewer", "experimenter"})
 
@@ -116,6 +119,37 @@ def research_charter_template() -> Path:
 
 def project_dir(project: str) -> Path:
     return agents_root() / project
+
+
+def project_metadata(project_root: Path) -> Dict[str, Any]:
+    """Read project metadata. Historical ad-hoc test projects may have no file."""
+    path = Path(project_root) / PROJECT_META_FILE
+    if not path.is_file():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid project metadata: {path}") from exc
+    if not isinstance(obj, dict):
+        raise ValueError(f"invalid project metadata: {path}")
+    return obj
+
+
+def scientific_workspace(project_root: Path) -> Path:
+    """Execution/read-write root for scientific files; unbound projects use control root."""
+    root = Path(project_root).resolve()
+    raw = project_metadata(root).get("workspace")
+    return Path(str(raw)).resolve() if raw else root
+
+
+def readonly_inputs(project_root: Path) -> List[Path]:
+    """Declared read-only source/input roots for a bound project."""
+    raw = project_metadata(Path(project_root)).get("readonly_inputs", [])
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(x, str) and x for x in raw):
+        raise ValueError("project readonly_inputs must be a list of paths")
+    return [Path(x).resolve() for x in raw]
 
 
 def research_charter(project: str) -> Path:
@@ -208,6 +242,10 @@ class WorkerLayout:
     @property
     def codex_config(self) -> Path:
         return self.dir / ".codex" / "config.toml"
+
+    @property
+    def workspace(self) -> Path:
+        return self.dir / WORKSPACE_LINK
 
 
 # --------------------------------------------------------------------------- #

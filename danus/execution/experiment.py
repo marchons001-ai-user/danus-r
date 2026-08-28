@@ -11,6 +11,9 @@ its command succeeds and every declared artifact has been hashed. On restart,
 completed units are skipped after their artifact references are revalidated. The
 shared metric reducer in ``danus.core.metrics`` computes final primary metrics and
 the immutable Evidence Record.
+
+For a workspace-bound project, control state remains under the Danus project root
+while unit commands and relative scientific paths resolve from the bound workspace.
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ from typing import Any, Dict, List
 from danus.core.evidence import EvidenceStore, _content_id, protocol_identity
 from danus.core.metrics import metrics_equal, reduce_metrics
 from danus.core._util import utc_now
+from danus.execution import layout as L
 
 _UNIT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -127,26 +131,40 @@ def _resolve(root: Path, raw: str) -> Path:
     return path if path.is_absolute() else Path(root) / path
 
 
-def _refs_match(store: EvidenceStore, refs: Any) -> bool:
+def _refs_match(store: EvidenceStore, refs: Any, *, path_root: Path | None = None) -> bool:
     if not isinstance(refs, list) or not refs:
         return False
+    base = Path(path_root) if path_root is not None else store.root
     for ref in refs:
         if not isinstance(ref, dict) or not str(ref.get("path") or ""):
             return False
-        path = _resolve(store.root, str(ref["path"]))
+        path = _resolve(base, str(ref["path"]))
         try:
             current = store.artifact_ref(path)
         except ValueError:
             return False
-        if current != ref:
+        if current.get("sha256") != ref.get("sha256") or current.get("size") != ref.get("size"):
             return False
     return True
 
 
-def _validate_inputs(store: EvidenceStore, unit: Dict[str, Any]) -> None:
+def _validate_inputs(store: EvidenceStore, unit: Dict[str, Any], workspace: Path) -> None:
     refs = unit.get("inputs") or []
-    if refs and not _refs_match(store, refs):
+    if refs and not _refs_match(store, refs, path_root=workspace):
         raise ValueError(f"frozen unit input changed: {unit['id']}")
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    path = path.resolve()
+    root = root.resolve()
+    return path == root or (root.is_dir() and root in path.parents)
+
+
+def _validate_artifact_paths(workspace: Path, readonly: List[Path], unit: Dict[str, Any]) -> None:
+    for raw in unit["artifacts"]:
+        path = _resolve(workspace, raw).resolve()
+        if any(_is_within(path, root) for root in readonly):
+            raise ValueError(f"unit {unit['id']} artifact is inside read-only input: {path}")
 
 
 def _git_commit(root: Path) -> str:
@@ -182,6 +200,10 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
 
 def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict[str, Any]:
     root = Path(project_dir).resolve()
+    workspace = L.scientific_workspace(root)
+    if not workspace.is_dir():
+        raise ValueError(f"scientific workspace missing: {workspace}")
+    readonly = L.readonly_inputs(root)
     store = EvidenceStore(root)
     protocol = store.get_protocol(protocol_id)
     if protocol is None:
@@ -198,7 +220,8 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
 
     units = _units(protocol)
     for unit in units:
-        _validate_inputs(store, unit)
+        _validate_inputs(store, unit, workspace)
+        _validate_artifact_paths(workspace, readonly, unit)
 
     checkpoint = _load_checkpoint(root, protocol_id)
     completed = checkpoint["completed"]
@@ -239,7 +262,7 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
         unit_id = unit["id"]
         if unit_id in completed:
             continue
-        _validate_inputs(store, unit)
+        _validate_inputs(store, unit, workspace)
         attempts = sum(
             1 for failure in checkpoint["failures"]
             if isinstance(failure, dict) and failure.get("unit_id") == unit_id
@@ -248,14 +271,14 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
         with log_path.open("w", encoding="utf-8") as log:
             proc = subprocess.run(
                 unit["argv"],
-                cwd=str(root),
+                cwd=str(workspace),
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 check=False,
             )
         # Do not accept a safe point if its frozen code/config/input changed while
         # the unit was executing; the output may no longer represent this protocol.
-        _validate_inputs(store, unit)
+        _validate_inputs(store, unit, workspace)
         if proc.returncode != 0:
             checkpoint["failures"].append({
                 "unit_id": unit_id,
@@ -269,7 +292,7 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
 
         refs = []
         for raw_path in unit["artifacts"]:
-            path = _resolve(root, raw_path)
+            path = _resolve(workspace, raw_path)
             refs.append(store.artifact_ref(path))
         completed[unit_id] = refs
         checkpoint["updated_at"] = utc_now()
@@ -282,7 +305,7 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
     evidence_id = store.add_record(
         protocol_id=protocol_id,
         author=author,
-        code_commit=_git_commit(root),
+        code_commit=_git_commit(workspace),
         matrix_coverage={
             "planned": len(units),
             "completed": len(completed),
