@@ -1,9 +1,14 @@
 """Small, file-first Agent checkpoint and context-budget helpers.
 
-Scientific worker rounds remain ordinary subprocesses.  This module only extracts
+Scientific worker rounds remain ordinary subprocesses. This module only extracts
 structured telemetry when a backend provides it, writes bounded recoverable state,
-and validates model-produced migration data.  It has no scheduler, database, or
+and validates model-produced migration data. It has no scheduler, database, or
 LLM call of its own.
+
+Codex ``turn.completed`` reports cumulative turn usage, not exact context-window
+occupancy. The legacy ``tokens`` field therefore remains total input+output usage
+for compatibility, while ``uncached_tokens`` is the smaller input-minus-cache plus
+output signal used by the context token guard when the structured fields exist.
 """
 from __future__ import annotations
 
@@ -21,9 +26,10 @@ CHECKPOINT_NAME = "agent_checkpoint.json"
 MIGRATION_NAME = "context_migration.json"
 ROLLOVER_NAME = ".context_rollover.json"
 
-# Conservative defaults for one scientific reasoning session.  Operators can
-# override the four limits without introducing a separate config format.  Zero
-# disables that signal.
+# Conservative defaults for one scientific reasoning session. Operators can
+# override the four limits without introducing a separate config format. Zero
+# disables that signal. The token limit is a conservative usage-growth proxy,
+# not an exact Codex context-window occupancy measurement.
 _DEFAULT_TOKENS = 60_000
 _DEFAULT_TOOL_CALLS = 64
 _DEFAULT_COMPACTIONS = 2
@@ -41,6 +47,13 @@ _MIGRATION_FIELDS = (
     "open_questions",
     "next_action",
     "files_that_matter",
+)
+_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
 )
 
 
@@ -65,13 +78,22 @@ def inspect_log(path: Path) -> Dict[str, Any]:
     """Extract only machine-readable Codex JSONL telemetry when available.
 
     DSH currently has no equivalent event stream, so it degrades to runtime-only
-    lifecycle control.  The historical final ``tokens used`` line is accepted as
-    a fallback total, but no natural-language tool/compaction guessing is done.
+    lifecycle control. Codex usage fields are preserved separately because
+    ``input_tokens`` includes cached input and is cumulative across model calls in
+    one exec turn; it must not be mistaken for exact context-window occupancy.
+    The historical final ``tokens used`` line is accepted as a fallback total, but
+    no natural-language tool/compaction guessing is done.
     """
     out: Dict[str, Any] = {
         "structured": False,
         "thread_id": None,
         "tokens": 0,
+        "uncached_tokens": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
         "tool_calls": 0,
         "compactions": 0,
         "last_agent_message": "",
@@ -83,6 +105,7 @@ def inspect_log(path: Path) -> Dict[str, Any]:
 
     tools = set()
     compactions = set()
+    structured_usage = False
     for line in text.splitlines():
         try:
             event = json.loads(line)
@@ -100,7 +123,12 @@ def inspect_log(path: Path) -> Dict[str, Any]:
                 inp = usage.get("input_tokens")
                 output = usage.get("output_tokens")
                 if isinstance(inp, int) and isinstance(output, int):
-                    out["tokens"] = max(out["tokens"], inp + output)
+                    structured_usage = True
+                    for key in _USAGE_FIELDS:
+                        value = usage.get(key)
+                        if isinstance(value, int):
+                            out[key] = max(out[key], max(0, value))
+                    out["tokens"] = max(out["tokens"], max(0, inp) + max(0, output))
         elif etype.startswith("item."):
             item = event.get("item")
             if not isinstance(item, dict):
@@ -118,11 +146,15 @@ def inspect_log(path: Path) -> Dict[str, Any]:
 
     out["tool_calls"] = len(tools)
     out["compactions"] = len(compactions)
+    if structured_usage:
+        uncached_input = max(0, out["input_tokens"] - out["cached_input_tokens"])
+        out["uncached_tokens"] = uncached_input + out["output_tokens"]
     if not out["tokens"]:
         matches = _TOKEN_LINE_RE.findall(text)
         if matches:
             try:
                 out["tokens"] = int(matches[-1].replace(",", ""))
+                out["uncached_tokens"] = out["tokens"]
             except ValueError:
                 pass
     if not out["last_agent_message"] and text:
@@ -132,8 +164,17 @@ def inspect_log(path: Path) -> Dict[str, Any]:
 
 def budget_reason(telemetry: Dict[str, Any], elapsed_s: float) -> Optional[str]:
     cap = limits()
+    total_tokens = int(telemetry.get("tokens") or 0)
+    if "uncached_tokens" in telemetry:
+        # ``run_round`` deliberately zeros legacy ``tokens`` while a process is
+        # still alive to avoid the turn.completed/process-exit race. Taking the
+        # smaller signal preserves that boundary while using uncached usage after
+        # normal completion.
+        token_value = min(total_tokens, int(telemetry.get("uncached_tokens") or 0))
+    else:
+        token_value = total_tokens
     values = {
-        "tokens": int(telemetry.get("tokens") or 0),
+        "tokens": max(0, token_value),
         "tool_calls": int(telemetry.get("tool_calls") or 0),
         "compactions": int(telemetry.get("compactions") or 0),
         "seconds": int(max(0.0, elapsed_s)),
@@ -184,6 +225,15 @@ def write_checkpoint(
     """Persist bounded runtime-owned recovery state after a scientific round."""
     wdir = Path(worker_dir)
     assignment = _assignment(wdir)
+    telemetry_out = {
+        "tokens": int(telemetry.get("tokens") or 0),
+        "uncached_tokens": int(telemetry.get("uncached_tokens") or 0),
+        "tool_calls": int(telemetry.get("tool_calls") or 0),
+        "compactions": int(telemetry.get("compactions") or 0),
+        "structured": bool(telemetry.get("structured")),
+    }
+    for key in _USAGE_FIELDS:
+        telemetry_out[key] = int(telemetry.get(key) or 0)
     payload: Dict[str, Any] = {
         "schema_version": 1,
         "worker": wdir.name,
@@ -195,12 +245,7 @@ def write_checkpoint(
         "round": int(round_no),
         "created_at": utc_now(),
         "trigger": trigger,
-        "telemetry": {
-            "tokens": int(telemetry.get("tokens") or 0),
-            "tool_calls": int(telemetry.get("tool_calls") or 0),
-            "compactions": int(telemetry.get("compactions") or 0),
-            "structured": bool(telemetry.get("structured")),
-        },
+        "telemetry": telemetry_out,
         "last_agent_message": str(telemetry.get("last_agent_message") or "")[-8000:],
         "migration": migration,
     }
