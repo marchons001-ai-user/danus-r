@@ -187,6 +187,15 @@ def _terminal_outcome(telemetry: dict) -> Optional[str]:
     return matches[0].upper() if len(matches) == 1 else None
 
 
+def _dsh_quota_exhausted(log_path: Path) -> bool:
+    """Recognize only DSH headless's stable machine code, never human error prose."""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(line.startswith("dsh: QUOTA:") for line in text.splitlines())
+
+
 def _progress_ledger(wl: L.WorkerLayout) -> Optional[ProgressLedger]:
     path = wl.project_dir / "progress" / "ledger.jsonl"
     return ProgressLedger(wl.project_dir) if path.is_file() else None
@@ -333,8 +342,18 @@ def main(worker_dir: str) -> int:
     role = _read_role(wl)
     role_name = role.get("ROLE", "worker")
     scientific = (role_name or "").strip().lower() in L.SCIENTIFIC_ROLES
-    if role.get("BACKEND"):
-        os.environ["CODEX_BACKEND"] = role["BACKEND"]
+    prior_status = _read_status(wl)
+    backend = str(role.get("BACKEND") or "").strip().lower()
+    auto_reviewer = backend == "auto" and str(role_name).strip().lower() == "reviewer"
+    if backend:
+        if auto_reviewer:
+            selected = str(prior_status.get("reviewer_backend_selected") or "dsh").lower()
+            os.environ["CODEX_BACKEND"] = selected if selected in {"chatgpt", "dsh"} else "dsh"
+            selected_model = str(prior_status.get("reviewer_model_selected") or "").strip()
+            if selected_model:
+                role["MODEL"] = selected_model
+        else:
+            os.environ["CODEX_BACKEND"] = backend
 
     # The role can change between starts. Rewire only Danus-managed harness links
     # and the matching gateway surface before Codex/DSH enters the worker home.
@@ -347,7 +366,6 @@ def main(worker_dir: str) -> int:
     max_fail = int(os.environ.get("DANUS_MAX_CONSEC_FAILURES", "5"))
     wl.logs.mkdir(parents=True, exist_ok=True)
 
-    prior_status = _read_status(wl)
     try:
         rnd = max(0, int(prior_status.get("round") or 0))
     except (TypeError, ValueError):
@@ -450,6 +468,18 @@ def main(worker_dir: str) -> int:
             else:
                 rc = run_round(wl, role, prompt, log_path, hard_timeout)
 
+            dsh_quota = bool(
+                auto_reviewer
+                and os.environ.get("CODEX_BACKEND") == "dsh"
+                and rc != 0
+                and _dsh_quota_exhausted(log_path)
+            )
+            quota_assignment_id = None
+            if dsh_quota and ledger is not None:
+                current = ledger.current(worker, refresh_stale=True)
+                if current is not None:
+                    quota_assignment_id = current.get("assignment_id")
+
             telemetry = C.inspect_log(log_path) if scientific else {}
             elapsed = time.time() - round_started
             outcome = (
@@ -465,18 +495,21 @@ def main(worker_dir: str) -> int:
                 if requested:
                     trigger = str(requested.get("reason") or "context_budget")
                 elif rc == 0:
-                    # Token usage is normally only final in Codex exec JSON, so
-                    # this catches an expensive completed turn before the next one.
                     trigger = C.budget_reason(telemetry, elapsed)
                 C.write_checkpoint(
                     wl.dir, role=role_name, round_no=rnd, telemetry=telemetry,
                     trigger=trigger,
                 )
 
-                # A completed assignment wins over context rollover: there is no
-                # continuation session to migrate into. Also skip migration when an
-                # explicit max-rounds cap says this process has no next round.
-                if trigger and not outcome and (not round_limit or rnd < round_limit):
+                # A completed assignment, pending control stop, or DSH quota failure
+                # wins over context rollover: none may start another model turn.
+                if (
+                    trigger
+                    and not outcome
+                    and not dsh_quota
+                    and not wl.stop.exists()
+                    and (not round_limit or rnd < round_limit)
+                ):
                     write_status(wl, state="migrating", context_trigger=trigger)
                     migration = _run_context_migration(
                         wl, role, trigger, log_path, hard_timeout,
@@ -511,7 +544,7 @@ def main(worker_dir: str) -> int:
                     )
 
             status_fields = {
-                "state": "stopped" if outcome else "idle",
+                "state": "stopped" if outcome or dsh_quota else "idle",
                 "round": rnd,
                 "last_round_at": time.time(),
                 "last_rc": rc,
@@ -527,8 +560,20 @@ def main(worker_dir: str) -> int:
                     "context_checkpoint": str(C._path(wl.dir, C.CHECKPOINT_NAME)),
                     "terminal_outcome": outcome,
                 })
+            if dsh_quota:
+                status_fields.update({
+                    "reviewer_dsh_quota_exhausted": True,
+                    "reviewer_dsh_quota_assignment_id": quota_assignment_id,
+                })
             write_status(wl, **status_fields)
 
+            if dsh_quota:
+                _record_exit(
+                    "dsh_quota_exhausted",
+                    assignment_id=quota_assignment_id,
+                    returncode=rc,
+                )
+                break
             if outcome:
                 _record_exit("terminal_outcome", outcome=outcome, returncode=rc)
                 break

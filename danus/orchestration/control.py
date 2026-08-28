@@ -120,6 +120,38 @@ def quota_policy(snapshot: Optional[Dict[str, Any]], *, now: Optional[float] = N
     return base
 
 
+def reviewer_cost_policy(
+    quota: Dict[str, Any],
+    *,
+    dsh_available: bool,
+    dsh_quota_exhausted: bool = False,
+) -> Dict[str, Any]:
+    """Choose the backend for an explicitly auto-managed Reviewer.
+
+    Reviewer heterogeneity is intentional: DSH/DeepSeek is the primary backend.
+    Terra is a fallback only after the current Reviewer assignment receives DSH's
+    explicit provider-neutral ``QUOTA`` failure. Missing DSH provisioning, transient
+    rate limits, auth failures, and other errors do not silently consume Terra.
+    """
+    state = str(quota.get("state") or "UNKNOWN").upper()
+    codex_blocked = bool(quota.get("block_new_codex_rounds"))
+    if dsh_quota_exhausted:
+        backend = "chatgpt"
+        reason = "dsh_quota_exhausted_fallback_terra"
+    else:
+        backend = "dsh"
+        reason = "dsh_primary" if dsh_available else "dsh_primary_unavailable"
+    return {
+        "policy": "dsh_first_terra_fallback",
+        "quota_state": state,
+        "codex_blocked": codex_blocked,
+        "dsh_available": bool(dsh_available),
+        "dsh_quota_exhausted": bool(dsh_quota_exhausted),
+        "selected_backend": backend,
+        "reason": reason,
+    }
+
+
 def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Return the current ready frontier and deterministic control decisions."""
     root = Path(project_dir)

@@ -39,9 +39,11 @@ from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
 
 from . import quota as Q
-from .control import quota_policy, reconcile
+from .control import quota_policy, reconcile, reviewer_cost_policy
 
 _QUOTA_REFRESH_SECONDS = 5 * 60
+_REVIEWER_TERRA_MODEL = "gpt-5.6-terra"
+_REVIEWER_DSH_DEFAULT_MODEL = "deepseek-v4-flash"
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
@@ -93,33 +95,162 @@ def _read_status(wl: L.WorkerLayout) -> Dict:
         return {}
 
 
-def _read_worker_role(wl: L.WorkerLayout) -> str:
+def _role_value(wl: L.WorkerLayout, key: str) -> str:
     if not wl.role.is_file():
-        return "worker"
+        return ""
     try:
         for line in wl.role.read_text(encoding="utf-8").splitlines():
             if "=" not in line:
                 continue
-            key, value = line.split("=", 1)
-            if key.strip() == "ROLE" and value.strip():
-                return value.strip().lower()
+            name, value = line.split("=", 1)
+            if name.strip() == key:
+                return value.strip()
     except OSError:
         pass
-    return "worker"
+    return ""
+
+
+def _read_worker_role(wl: L.WorkerLayout) -> str:
+    return (_role_value(wl, "ROLE") or "worker").lower()
+
+
+def _auto_reviewer(wl: L.WorkerLayout) -> bool:
+    return _read_worker_role(wl) == "reviewer" and _role_value(wl, "BACKEND").lower() == "auto"
+
+
+def _selected_worker_backend(wl: L.WorkerLayout) -> str:
+    backend = _role_value(wl, "BACKEND").lower()
+    if backend == "dsh":
+        return "dsh"
+    if backend == "auto" and _read_worker_role(wl) == "reviewer":
+        selected = str(_read_status(wl).get("reviewer_backend_selected") or "dsh").lower()
+        return selected if selected in {"chatgpt", "dsh"} else "dsh"
+    return "chatgpt"
 
 
 def _uses_openai_codex(wl: L.WorkerLayout) -> bool:
-    """Quota pressure never gates a worker explicitly bound to DSH."""
+    """Quota pressure never gates a worker currently bound to DSH."""
+    return _selected_worker_backend(wl) != "dsh"
+
+
+def _dsh_available() -> bool:
+    path = os.environ.get("DANUS_DSH_BIN")
+    return bool(path and Path(path).is_file())
+
+
+def _current_assignment_id(wl: L.WorkerLayout) -> Optional[str]:
+    path = wl.project_dir / "progress" / "ledger.jsonl"
+    if not path.is_file():
+        return None
     try:
-        for line in wl.role.read_text(encoding="utf-8").splitlines():
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key.strip() == "BACKEND":
-                return value.strip().lower() != "dsh"
-    except OSError:
-        pass
-    return True
+        current = ProgressLedger(wl.project_dir).current(wl.name, refresh_stale=True)
+    except (FileNotFoundError, ValueError):
+        return None
+    value = current.get("assignment_id") if current else None
+    return str(value) if value else None
+
+
+def _dsh_quota_for_assignment(wl: L.WorkerLayout, assignment_id: Optional[str]) -> bool:
+    if not assignment_id:
+        return False
+    status = _read_status(wl)
+    return bool(status.get("reviewer_dsh_quota_exhausted")) and str(
+        status.get("reviewer_dsh_quota_assignment_id") or ""
+    ) == assignment_id
+
+
+def _reviewer_model(wl: L.WorkerLayout, backend: str) -> str:
+    if backend == "chatgpt":
+        return _REVIEWER_TERRA_MODEL
+    model = _role_value(wl, "MODEL")
+    if model.lower().startswith(("deepseek", "ds-", "dsh-")):
+        return model
+    return _REVIEWER_DSH_DEFAULT_MODEL
+
+
+def _persist_reviewer_backend(
+    wl: L.WorkerLayout,
+    decision: Dict[str, Any],
+    *,
+    assignment_id: Optional[str],
+) -> None:
+    status = _read_status(wl)
+    backend = decision["selected_backend"]
+    status.update({
+        "reviewer_backend_selected": backend,
+        "reviewer_model_selected": _reviewer_model(wl, backend),
+        "reviewer_backend_reason": decision["reason"],
+        "reviewer_backend_policy": decision["policy"],
+        "reviewer_backend_quota_state": decision["quota_state"],
+        "reviewer_backend_selected_at": utc_now(),
+    })
+    if backend == "dsh":
+        status.pop("reviewer_dsh_quota_exhausted", None)
+        status.pop("reviewer_dsh_quota_assignment_id", None)
+    atomic_write(wl.status, json.dumps(status, ensure_ascii=False, indent=2) + "\n")
+
+
+def _reviewer_cost_rows(
+    project: str,
+    rows: List[Dict[str, Any]],
+    quota: Dict[str, Any],
+    *,
+    apply: bool,
+) -> List[Dict[str, Any]]:
+    available = _dsh_available()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        wl = L.WorkerLayout(L.worker_dir(project, row["worker"]))
+        if not _auto_reviewer(wl):
+            continue
+        assignment_id = str(row.get("assignment_id") or "") or None
+        exhausted = _dsh_quota_for_assignment(wl, assignment_id)
+        desired = reviewer_cost_policy(
+            quota,
+            dsh_available=available,
+            dsh_quota_exhausted=exhausted,
+        )
+        desired_model = _reviewer_model(wl, desired["selected_backend"])
+        current = _selected_worker_backend(wl)
+        current_model = str(
+            _read_status(wl).get("reviewer_model_selected") or _reviewer_model(wl, current)
+        )
+        selected = current if row.get("alive") else desired["selected_backend"]
+        selected_model = current_model if row.get("alive") else desired_model
+        if row.get("alive"):
+            switching = current != desired["selected_backend"] or current_model != desired_model
+            result = "switch-planned" if switching else "active-unchanged"
+            if apply and switching:
+                wl.stop.touch()
+                result = "switch-at-round-boundary"
+        else:
+            result = "planned"
+            if apply:
+                _persist_reviewer_backend(wl, desired, assignment_id=assignment_id)
+                result = "selected"
+        out.append({
+            "worker": row["worker"],
+            **desired,
+            "selected_backend": selected,
+            "selected_model": selected_model,
+            "desired_backend": desired["selected_backend"],
+            "desired_model": desired_model,
+            "assignment_id": assignment_id,
+            "result": result,
+        })
+    return out
+
+
+def _prepare_reviewer_backend(wl: L.WorkerLayout) -> None:
+    if not _auto_reviewer(wl):
+        return
+    assignment_id = _current_assignment_id(wl)
+    decision = reviewer_cost_policy(
+        quota_policy(Q.load_quota(wl.project_dir)),
+        dsh_available=_dsh_available(),
+        dsh_quota_exhausted=_dsh_quota_for_assignment(wl, assignment_id),
+    )
+    _persist_reviewer_backend(wl, decision, assignment_id=assignment_id)
 
 
 def _pause_reason(wl: L.WorkerLayout) -> Optional[str]:
@@ -267,6 +398,7 @@ def _start_one(wl: L.WorkerLayout) -> str:
             return "locked"
         if _alive(_read_pid(wl)):
             return "already-running"
+        _prepare_reviewer_backend(wl)
         wl.stop.unlink(missing_ok=True)
         pid = spawn_loop(wl.dir)
         atomic_write(wl.pid, str(pid))
@@ -340,6 +472,11 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         "context_compactions": int(st.get("context_compactions") or 0),
         "context_trigger": st.get("context_trigger"),
         "terminal_outcome": st.get("terminal_outcome"),
+        "reviewer_backend_selected": st.get("reviewer_backend_selected"),
+        "reviewer_model_selected": st.get("reviewer_model_selected"),
+        "reviewer_backend_reason": st.get("reviewer_backend_reason"),
+        "reviewer_dsh_quota_exhausted": st.get("reviewer_dsh_quota_exhausted"),
+        "reviewer_dsh_quota_assignment_id": st.get("reviewer_dsh_quota_assignment_id"),
         "progress_error": progress_error,
     }
 
@@ -459,6 +596,9 @@ def _apply_quota_gate(project: str, rows: List[Dict[str, Any]], policy: Dict[str
 
         if block:
             if not _uses_openai_codex(wl):
+                if quota_owned:
+                    wl.pause.unlink(missing_ok=True)
+                    applied.append({"worker": row["worker"], "result": "quota-cleared-non-codex"})
                 continue
             if pause_reason and not quota_owned:
                 continue
@@ -538,6 +678,8 @@ def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -
             "budget": report.get("budget", {}),
             "quota_policy": report.get("quota_policy", {}),
             "quota_applied": report.get("quota_applied", []),
+            "reviewer_cost_policy": report.get("reviewer_cost_policy", []),
+            "reviewer_cost_applied": report.get("reviewer_cost_applied", []),
             "at": utc_now(),
         },
     )
@@ -581,7 +723,9 @@ def do_supervise(
         _apply_resource_budget(report, rows, budget)
         policy = quota_policy(Q.load_quota(pdir))
         report["quota_policy"] = policy
+        report["reviewer_cost_policy"] = _reviewer_cost_rows(project, rows, policy, apply=False)
         if apply:
+            report["reviewer_cost_applied"] = _reviewer_cost_rows(project, rows, policy, apply=True)
             report["quota_applied"] = _apply_quota_gate(project, rows, policy)
             report["applied"] = _apply_supervisor_decisions(project, report["decisions"])
             _record_supervisor_event(pdir, trigger, report)
@@ -598,7 +742,8 @@ def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[st
             "worker", "pid", "alive", "state", "round", "label", "paused", "pause_reason",
             "assignment_id", "plan_node_id", "plan_version", "progress_state", "progress_outcome",
             "context_tokens", "context_tokens_total", "context_tool_calls", "context_compactions",
-            "context_trigger", "terminal_outcome",
+            "context_trigger", "terminal_outcome", "reviewer_backend_selected", "reviewer_model_selected",
+            "reviewer_backend_reason", "reviewer_dsh_quota_exhausted", "reviewer_dsh_quota_assignment_id",
         )}
         for row in rows
     ]
