@@ -128,10 +128,11 @@ def test_legacy_bucket_is_supported_without_guessing_unknown_window():
     assert got["windows"]["weekly"] is None
 
 
-def test_five_hour_proxy_first_observation_has_no_fake_percent(tmp_path: Path):
+def test_five_hour_proxy_first_observation_has_no_fake_percent(tmp_path: Path, monkeypatch):
+    root = tmp_path / "projects"
+    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
     now = 100_000.0
-    project = tmp_path / "projects" / "P"
-    proxy = Q._local_five_hour_proxy(project, _weekly(0, 200_000), None, now=now)
+    proxy = Q._local_five_hour_proxy(_weekly(0, 200_000), None, now=now)
 
     assert proxy["status"] == "warming_up"
     assert proxy["window_complete"] is False
@@ -145,9 +146,11 @@ def test_five_hour_proxy_first_observation_has_no_fake_percent(tmp_path: Path):
     assert proxy["calibration"]["tokens_per_weekly_percent"] is None
 
 
-def test_five_hour_proxy_backfills_existing_logs_but_stays_uncalibrated(tmp_path: Path):
+def test_five_hour_proxy_backfills_existing_logs_but_stays_uncalibrated(tmp_path: Path, monkeypatch):
+    root = tmp_path / "projects"
+    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
     now = 100_000.0
-    project = tmp_path / "projects" / "P"
+    project = root / "P"
     old = project / "workers" / "w" / "logs" / "round_1.log"
     old.parent.mkdir(parents=True, exist_ok=True)
     old.write_text("legacy or DSH log\n", encoding="utf-8")
@@ -157,7 +160,7 @@ def test_five_hour_proxy_backfills_existing_logs_but_stays_uncalibrated(tmp_path
         inp=1_000, cached=200, output=200, mtime=now - 60,
     )
 
-    proxy = Q._local_five_hour_proxy(project, _weekly(0, 200_000), None, now=now)
+    proxy = Q._local_five_hour_proxy(_weekly(0, 200_000), None, now=now)
 
     assert proxy["window_complete"] is True
     assert proxy["status"] == "uncalibrated"
@@ -166,24 +169,26 @@ def test_five_hour_proxy_backfills_existing_logs_but_stays_uncalibrated(tmp_path
     assert proxy["pace_pressure_percent"] is None
 
 
-def test_five_hour_proxy_calibrates_from_real_weekly_delta(tmp_path: Path):
+def test_five_hour_proxy_calibrates_from_real_weekly_delta(tmp_path: Path, monkeypatch):
+    root = tmp_path / "projects"
+    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
     now = 100_000.0
-    project = tmp_path / "projects" / "P"
+    project = root / "P"
     old = project / "workers" / "w" / "logs" / "round_0.log"
     old.parent.mkdir(parents=True, exist_ok=True)
     old.write_text("older runtime history\n", encoding="utf-8")
     os.utime(old, (now - 20_000, now - 20_000))
 
-    first = Q._local_five_hour_proxy(project, _weekly(10, 200_000), None, now=now)
+    first = Q._local_five_hour_proxy(_weekly(10, 200_000), None, now=now)
     assert first["status"] == "uncalibrated"
 
     _structured_round(
         project / "workers" / "w" / "logs" / "round_1.log",
         inp=1_000, cached=200, output=200, mtime=now + 100,
     )
-    previous = {"five_hour_proxy": first}
+    previous = {"five_hour_proxy": first, "windows": _weekly(10, 200_000)["windows"]}
     second = Q._local_five_hour_proxy(
-        project, _weekly(12, 200_000), previous, now=now + 200,
+        _weekly(12, 200_000), previous, now=now + 200,
     )
 
     assert second["status"] == "ready"
@@ -194,7 +199,32 @@ def test_five_hour_proxy_calibrates_from_real_weekly_delta(tmp_path: Path):
     assert second["pace_pressure_percent"] == 67.2
 
 
-def test_read_and_persist_official_app_server_shape(tmp_path: Path):
+def test_five_hour_proxy_reanchors_if_weekly_usage_drops(tmp_path: Path, monkeypatch):
+    root = tmp_path / "projects"
+    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
+    previous = {
+        "windows": _weekly(20, 200_000)["windows"],
+        "five_hour_proxy": {
+            "observed_since": Q._iso(50_000),
+            "calibration": {
+                "status": "ready",
+                "weekly_reset_at": 200_000,
+                "anchor_observed_at": Q._iso(90_000),
+                "anchor_weekly_used_percent": 10.0,
+                "tokens_per_weekly_percent": 500.0,
+            },
+        },
+    }
+    proxy = Q._local_five_hour_proxy(_weekly(5, 200_000), previous, now=100_000)
+
+    assert proxy["calibration"]["status"] == "waiting_for_weekly_delta"
+    assert proxy["calibration"]["anchor_weekly_used_percent"] == 5.0
+    assert proxy["calibration"]["tokens_per_weekly_percent"] is None
+    assert proxy["pace_pressure_percent"] is None
+
+
+def test_read_and_persist_official_app_server_shape(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(tmp_path / "projects"))
     fake = tmp_path / "fake-codex"
     fake.write_text(
         """#!/usr/bin/env python3
@@ -236,7 +266,8 @@ for line in sys.stdin:
     assert Q.quota_path(project) == project / "supervisor" / "quota.json"
 
 
-def test_sensor_failure_is_persisted_and_never_raises(tmp_path: Path):
+def test_sensor_failure_is_persisted_and_never_raises(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(tmp_path / "projects"))
     project = tmp_path / "P"
     got = Q.refresh_quota(project, codex_bin=str(tmp_path / "missing-codex"), timeout=1)
     assert got["available"] is False
