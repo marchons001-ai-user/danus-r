@@ -29,6 +29,7 @@ def test_normalize_prefers_codex_bucket_and_matches_window_duration():
                 "secondary": _window(40, 300, 1000),
             },
         },
+        "rateLimitResetCredits": {"availableCount": 2},
     }
 
     got = Q.normalize_rate_limits(result)
@@ -36,6 +37,9 @@ def test_normalize_prefers_codex_bucket_and_matches_window_duration():
     assert got["source_bucket"] == "rateLimitsByLimitId.codex"
     assert got["limit_id"] == "codex"
     assert got["plan_type"] == "plus"
+    assert got["window_available"] == {"5h": True, "weekly": True}
+    assert got["reported_window_durations_mins"] == [10080, 300]
+    assert got["reset_credits_available"] == 2
     assert got["windows"]["5h"] == {
         "used_percent": 40,
         "remaining_percent": 60,
@@ -50,6 +54,37 @@ def test_normalize_prefers_codex_bucket_and_matches_window_duration():
     }
 
 
+def test_real_plus_shape_can_report_weekly_without_five_hour_window():
+    got = Q.normalize_rate_limits({
+        "rateLimits": {
+            "limitId": "codex",
+            "primary": _window(0, 10080, 1788486960),
+            "secondary": None,
+            "planType": "plus",
+        },
+        "rateLimitsByLimitId": {
+            "codex": {
+                "limitId": "codex",
+                "primary": _window(0, 10080, 1788486960),
+                "secondary": None,
+                "planType": "plus",
+            }
+        },
+        "rateLimitResetCredits": {"availableCount": 1},
+    })
+    assert got["available"] is True
+    assert got["window_available"] == {"5h": False, "weekly": True}
+    assert got["reported_window_durations_mins"] == [10080]
+    assert got["reset_credits_available"] == 1
+    assert got["windows"]["5h"] is None
+    assert got["windows"]["weekly"] == {
+        "used_percent": 0,
+        "remaining_percent": 100,
+        "window_duration_mins": 10080,
+        "resets_at": 1788486960,
+    }
+
+
 def test_legacy_bucket_is_supported_without_guessing_unknown_window():
     got = Q.normalize_rate_limits({
         "rateLimits": {
@@ -59,6 +94,8 @@ def test_legacy_bucket_is_supported_without_guessing_unknown_window():
         }
     })
     assert got["source_bucket"] == "rateLimits"
+    assert got["window_available"] == {"5h": True, "weekly": False}
+    assert got["reported_window_durations_mins"] == [300, 1440]
     assert got["windows"]["5h"]["remaining_percent"] == 88
     assert got["windows"]["weekly"] is None
 
@@ -83,7 +120,8 @@ for line in sys.stdin:
             "limitId": "codex", "planType": "plus",
             "primary": {"usedPercent": 35, "windowDurationMins": 300, "resetsAt": 111},
             "secondary": {"usedPercent": 70, "windowDurationMins": 10080, "resetsAt": 222}
-          }}
+          }},
+          "rateLimitResetCredits": {"availableCount": 3}
         }}), flush=True)
 """,
         encoding="utf-8",
@@ -93,6 +131,8 @@ for line in sys.stdin:
 
     got = Q.refresh_quota(project, codex_bin=str(fake), timeout=2)
     assert got["available"] is True
+    assert got["window_available"] == {"5h": True, "weekly": True}
+    assert got["reset_credits_available"] == 3
     assert got["windows"]["5h"]["remaining_percent"] == 65
     assert got["windows"]["weekly"]["remaining_percent"] == 30
     saved = Q.load_quota(project)
@@ -104,6 +144,9 @@ def test_sensor_failure_is_persisted_and_never_raises(tmp_path: Path):
     project = tmp_path / "P"
     got = Q.refresh_quota(project, codex_bin=str(tmp_path / "missing-codex"), timeout=1)
     assert got["available"] is False
+    assert got["window_available"] == {"5h": False, "weekly": False}
+    assert got["reported_window_durations_mins"] == []
+    assert got["reset_credits_available"] is None
     assert got["windows"] == {"5h": None, "weekly": None}
     assert Q.load_quota(project) == got
 
