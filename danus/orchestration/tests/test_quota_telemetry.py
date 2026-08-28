@@ -1,8 +1,6 @@
 """A2-7j Codex quota sensor tests. Offline; no OpenAI/model calls."""
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 
 from danus.orchestration import quota as Q
@@ -70,19 +68,23 @@ def test_read_and_persist_official_app_server_shape(tmp_path: Path):
     fake.write_text(
         """#!/usr/bin/env python3
 import json, sys
-messages = [json.loads(line) for line in sys.stdin if line.strip()]
-assert messages[0]["method"] == "initialize"
-assert messages[0]["params"]["clientInfo"]["name"] == "danus-r"
-assert messages[1] == {"method": "initialized"}
-assert messages[2]["method"] == "account/rateLimits/read"
-print(json.dumps({"id": 1, "result": {"userAgent": "fake"}}))
-print(json.dumps({"id": 2, "result": {
-  "rateLimitsByLimitId": {"codex": {
-    "limitId": "codex", "planType": "plus",
-    "primary": {"usedPercent": 35, "windowDurationMins": 300, "resetsAt": 111},
-    "secondary": {"usedPercent": 70, "windowDurationMins": 10080, "resetsAt": 222}
-  }}
-}}))
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    message = json.loads(line)
+    if message["method"] == "initialize":
+        assert message["params"]["clientInfo"]["name"] == "danus-r"
+        print(json.dumps({"id": 1, "result": {"userAgent": "fake"}}), flush=True)
+    elif message["method"] == "initialized":
+        pass
+    elif message["method"] == "account/rateLimits/read":
+        print(json.dumps({"id": 2, "result": {
+          "rateLimitsByLimitId": {"codex": {
+            "limitId": "codex", "planType": "plus",
+            "primary": {"usedPercent": 35, "windowDurationMins": 300, "resetsAt": 111},
+            "secondary": {"usedPercent": 70, "windowDurationMins": 10080, "resetsAt": 222}
+          }}
+        }}), flush=True)
 """,
         encoding="utf-8",
     )
