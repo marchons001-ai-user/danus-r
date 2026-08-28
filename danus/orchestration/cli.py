@@ -38,7 +38,10 @@ from danus.core._util import append_jsonl, utc_now
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
 
-from .control import reconcile
+from . import quota as Q
+from .control import quota_policy, reconcile
+
+_QUOTA_REFRESH_SECONDS = 5 * 60
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
@@ -103,6 +106,20 @@ def _read_worker_role(wl: L.WorkerLayout) -> str:
     except OSError:
         pass
     return "worker"
+
+
+def _uses_openai_codex(wl: L.WorkerLayout) -> bool:
+    """Quota pressure never gates a worker explicitly bound to DSH."""
+    try:
+        for line in wl.role.read_text(encoding="utf-8").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == "BACKEND":
+                return value.strip().lower() != "dsh"
+    except OSError:
+        pass
+    return True
 
 
 def _pause_reason(wl: L.WorkerLayout) -> Optional[str]:
@@ -428,6 +445,42 @@ def _apply_resource_budget(report: Dict[str, Any], rows: List[Dict[str, Any]], b
     report["budget_stop"] = reason
 
 
+def _apply_quota_gate(project: str, rows: List[Dict[str, Any]], policy: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Persist/clear only quota-owned pauses; active rounds are never signalled."""
+    block = bool(policy.get("block_new_codex_rounds"))
+    state = str(policy.get("state") or "UNKNOWN").lower()
+    reason = str(policy.get("reason") or "quota")
+    applied: List[Dict[str, Any]] = []
+
+    for row in rows:
+        wl = L.WorkerLayout(L.worker_dir(project, row["worker"]))
+        pause_reason = _pause_reason(wl)
+        quota_owned = bool(pause_reason and pause_reason.startswith("quota:"))
+
+        if block:
+            if not _uses_openai_codex(wl):
+                continue
+            if pause_reason and not quota_owned:
+                continue
+            if not quota_owned:
+                atomic_write(wl.pause, f"quota:{state}:{reason}\n")
+            # .stop is already the worker loop's safe round boundary: it is checked
+            # before the next model round. Do not SIGTERM an active round for quota.
+            if row.get("alive"):
+                wl.stop.touch()
+            applied.append({"worker": row["worker"], "result": "pause-at-round-boundary"})
+            continue
+
+        if quota_owned:
+            wl.pause.unlink(missing_ok=True)
+            result = "quota-cleared"
+            if not row.get("alive") and row.get("progress_state") in {"ASSIGNED", "RUNNING"}:
+                result = _start_one(wl)
+            applied.append({"worker": row["worker"], "result": result})
+
+    return applied
+
+
 def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     pdir = L.project_dir(project)
     ledger = ProgressLedger(pdir)
@@ -483,6 +536,8 @@ def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -
             "decisions": report.get("decisions", []),
             "applied": report.get("applied", []),
             "budget": report.get("budget", {}),
+            "quota_policy": report.get("quota_policy", {}),
+            "quota_applied": report.get("quota_applied", []),
             "at": utc_now(),
         },
     )
@@ -524,7 +579,10 @@ def do_supervise(
         budget = _resource_snapshot(pdir, rows, token_budget)
         report["budget"] = budget
         _apply_resource_budget(report, rows, budget)
+        policy = quota_policy(Q.load_quota(pdir))
+        report["quota_policy"] = policy
         if apply:
+            report["quota_applied"] = _apply_quota_gate(project, rows, policy)
             report["applied"] = _apply_supervisor_decisions(project, report["decisions"])
             _record_supervisor_event(pdir, trigger, report)
         return report
@@ -546,7 +604,8 @@ def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[st
     ]
 
     stamps = []
-    paths = [pdir / "plan" / "current.json", pdir / "progress" / "ledger.jsonl", pdir / L.DEADLINE_FILE]
+    paths = [pdir / "plan" / "current.json", pdir / "progress" / "ledger.jsonl",
+             pdir / L.DEADLINE_FILE, Q.quota_path(pdir)]
     paths.extend(sorted((pdir / "experiment_runtime").glob("*/checkpoint.json")))
     for path in paths:
         try:
@@ -576,22 +635,34 @@ def watch_supervisor(
     poll: float = 1.0,
     token_budget: int = 0,
 ) -> Iterator[Dict[str, Any]]:
-    """Change-driven long-running Supervisor with a coarse heartbeat fallback."""
+    """Change-driven long-running Supervisor with quota refresh at safe boundaries."""
     if heartbeat <= 0:
         raise SystemExit("heartbeat must be > 0")
     if poll <= 0:
         raise SystemExit("poll must be > 0")
 
+    pdir = L.project_dir(project)
     last_signature: Optional[str] = None
     last_reconcile = 0.0
+    last_quota_refresh: Optional[float] = None
     while True:
-        rows = _project_rows(project)
-        budget = _resource_snapshot(L.project_dir(project), rows, token_budget)
-        signature = _control_signature(project, rows, budget)
         now = time.monotonic()
+        quota_due = (
+            last_quota_refresh is None
+            or now - last_quota_refresh >= _QUOTA_REFRESH_SECONDS
+        )
+        if quota_due:
+            Q.refresh_quota(pdir)
+            last_quota_refresh = now
+
+        rows = _project_rows(project)
+        budget = _resource_snapshot(pdir, rows, token_budget)
+        signature = _control_signature(project, rows, budget)
         trigger = None
         if signature != last_signature:
             trigger = "event"
+        elif quota_due:
+            trigger = "quota"
         elif now - last_reconcile >= heartbeat:
             trigger = "heartbeat"
 
@@ -603,10 +674,10 @@ def watch_supervisor(
                 trigger=trigger,
             )
             last_reconcile = now
-            # Actions themselves change pid/pause/progress files; consume that new
-            # state now so the next poll does not immediately replay our own action.
+            # Actions themselves change pid/pause/progress/quota files; consume that
+            # new state now so the next poll does not replay our own action.
             rows = _project_rows(project)
-            budget = _resource_snapshot(L.project_dir(project), rows, token_budget)
+            budget = _resource_snapshot(pdir, rows, token_budget)
             last_signature = _control_signature(project, rows, budget)
             yield report
         time.sleep(poll)

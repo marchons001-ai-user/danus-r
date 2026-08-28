@@ -223,12 +223,14 @@ def test_control_signature_changes_when_deadline_crosses(tmp_path: Path, monkeyp
         ctx.__exit__(None, None, None)
 
 
-def test_watch_reconciles_on_change_then_heartbeat(tmp_path: Path, monkeypatch):
+def test_watch_reconciles_on_change_then_quota_refresh(tmp_path: Path, monkeypatch):
     ctx, pdir, _ = _project(tmp_path)
     try:
-        times = iter([0.0, 2000.0])
+        times = iter([0.0, 301.0])
         monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
         monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+        refreshes = []
+        monkeypatch.setattr(cli.Q, "refresh_quota", lambda path: refreshes.append(Path(path)) or {})
 
         gen = cli.watch_supervisor("P", heartbeat=1800.0, poll=1.0)
         next(gen)
@@ -237,7 +239,8 @@ def test_watch_reconciles_on_change_then_heartbeat(tmp_path: Path, monkeypatch):
             json.loads(line)
             for line in (pdir / "supervisor" / "events.jsonl").read_text(encoding="utf-8").splitlines()
         ]
-        assert [event["trigger"] for event in events[-2:]] == ["event", "heartbeat"]
+        assert [event["trigger"] for event in events[-2:]] == ["event", "quota"]
+        assert refreshes == [pdir, pdir]
     finally:
         ctx.__exit__(None, None, None)
 

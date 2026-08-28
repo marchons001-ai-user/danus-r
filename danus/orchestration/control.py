@@ -8,10 +8,116 @@ progress action, not an automatic consequence of one worker reporting DONE.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Optional
 
 from danus.core import ProgressLedger, ResearchPlanGraph
+
+_FIVE_HOURS_SECONDS = 5 * 60 * 60
+_QUOTA_SNAPSHOT_MAX_AGE_SECONDS = 15 * 60
+
+
+def _snapshot_age(snapshot: Dict[str, Any], now: float) -> Optional[float]:
+    raw = snapshot.get("observed_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return max(0.0, now - datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def quota_policy(snapshot: Optional[Dict[str, Any]], *, now: Optional[float] = None) -> Dict[str, Any]:
+    """Turn quota telemetry into a small fail-open safe-boundary policy.
+
+    No fixed quota size is assumed. When the local 5h proxy is ready, its recent
+    weekly-equivalent burn is projected only until the current official weekly
+    reset. Pressure means that continuing at that recent pace would exhaust the
+    currently reported weekly remainder before reset.
+    """
+    now = float(time.time() if now is None else now)
+    base = {
+        "state": "UNKNOWN",
+        "reason": "telemetry_unavailable",
+        "block_new_codex_rounds": False,
+        "weekly_remaining_percent": None,
+        "weekly_reset_at": None,
+        "five_hour_proxy_status": None,
+        "projected_weekly_burn_to_reset": None,
+        "snapshot_age_seconds": None,
+    }
+    if not isinstance(snapshot, dict) or not snapshot.get("available"):
+        return base
+
+    age = _snapshot_age(snapshot, now)
+    base["snapshot_age_seconds"] = None if age is None else round(age, 1)
+    if age is None or age > _QUOTA_SNAPSHOT_MAX_AGE_SECONDS:
+        base["reason"] = "telemetry_stale"
+        return base
+
+    windows = snapshot.get("windows")
+    weekly = windows.get("weekly") if isinstance(windows, dict) else None
+    if not isinstance(weekly, dict):
+        base["reason"] = "weekly_unavailable"
+        return base
+
+    remaining = weekly.get("remaining_percent")
+    reset_at = weekly.get("resets_at")
+    if isinstance(remaining, bool) or not isinstance(remaining, (int, float)):
+        base["reason"] = "weekly_remaining_unavailable"
+        return base
+    if isinstance(reset_at, bool) or not isinstance(reset_at, int):
+        base["reason"] = "weekly_reset_unavailable"
+        return base
+
+    remaining = max(0.0, min(100.0, float(remaining)))
+    base["weekly_remaining_percent"] = remaining
+    base["weekly_reset_at"] = reset_at
+
+    five = windows.get("5h") if isinstance(windows, dict) else None
+    five_remaining = five.get("remaining_percent") if isinstance(five, dict) else None
+    if snapshot.get("rate_limit_reached_type") or remaining <= 0 or (
+        isinstance(five_remaining, (int, float))
+        and not isinstance(five_remaining, bool)
+        and float(five_remaining) <= 0
+    ):
+        base.update({
+            "state": "EXHAUSTED",
+            "reason": "official_limit_reached",
+            "block_new_codex_rounds": True,
+        })
+        return base
+
+    proxy = snapshot.get("five_hour_proxy")
+    proxy_status = proxy.get("status") if isinstance(proxy, dict) else None
+    base["five_hour_proxy_status"] = proxy_status
+    if proxy_status != "ready":
+        base["reason"] = "short_window_not_ready"
+        return base
+
+    weekly_equivalent = proxy.get("weekly_equivalent_percent")
+    if isinstance(weekly_equivalent, bool) or not isinstance(weekly_equivalent, (int, float)):
+        base["reason"] = "short_window_rate_unavailable"
+        return base
+    weekly_equivalent = max(0.0, float(weekly_equivalent))
+
+    remaining_seconds = max(0.0, float(reset_at) - now)
+    projected = weekly_equivalent * (remaining_seconds / _FIVE_HOURS_SECONDS)
+    base["projected_weekly_burn_to_reset"] = round(projected, 3)
+    if projected > remaining:
+        base.update({
+            "state": "PRESSURE",
+            "reason": "recent_pace_exhausts_before_weekly_reset",
+            "block_new_codex_rounds": True,
+        })
+    else:
+        base.update({
+            "state": "NORMAL",
+            "reason": "recent_pace_within_weekly_headroom",
+        })
+    return base
 
 
 def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -43,9 +149,6 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         if parent in active_children and active_route(node_id):
             active_children[parent].append(node_id)
 
-    # A recorded DONE remains effective only while its route is active and every
-    # active child is also complete. Progressive expansion therefore reopens the
-    # parent for dependency purposes without rewriting the old ledger event.
     completed = set(ledger.completed_nodes())
     changed = True
     while changed:
