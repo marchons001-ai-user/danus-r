@@ -4,7 +4,7 @@ A runnable protocol uses ``matrix.units``. Each unit is one smallest restartable
 work item::
 
     {"id": "case-1", "argv": ["python", "run.py", "case-1"],
-     "artifacts": ["runs/case-1.json"]}
+     "artifacts": ["runs/case-1.json"], "inputs": [{...content ref...}]}
 
 The runtime never invents or expands this matrix. A unit is checkpointed only after
 its command succeeds and every declared artifact has been hashed. On restart,
@@ -15,6 +15,7 @@ the immutable Evidence Record.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -73,6 +74,17 @@ def _load_checkpoint(root: Path, protocol_id: str) -> Dict[str, Any]:
     return obj
 
 
+def _content_ref(raw: Any, unit_id: str) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError(f"unit {unit_id} input reference must be an object")
+    path = str(raw.get("path") or "")
+    digest = str(raw.get("sha256") or "")
+    size = raw.get("size")
+    if not path or not digest or not isinstance(size, int):
+        raise ValueError(f"unit {unit_id} input reference requires path/sha256/size")
+    return {"path": path, "sha256": digest, "size": size}
+
+
 def _units(protocol: Dict[str, Any]) -> List[Dict[str, Any]]:
     matrix = protocol.get("matrix")
     if not isinstance(matrix, dict) or not isinstance(matrix.get("units"), list):
@@ -85,6 +97,7 @@ def _units(protocol: Dict[str, Any]) -> List[Dict[str, Any]]:
         unit_id = str(raw.get("id") or "")
         argv = raw.get("argv")
         artifacts = raw.get("artifacts")
+        inputs = raw.get("inputs", [])
         if not _UNIT_ID_RE.match(unit_id):
             raise ValueError(f"invalid experiment unit id: {unit_id!r}")
         if unit_id in seen:
@@ -95,8 +108,15 @@ def _units(protocol: Dict[str, Any]) -> List[Dict[str, Any]]:
             isinstance(x, str) and x for x in artifacts
         ):
             raise ValueError(f"unit {unit_id} requires declared artifact paths")
+        if not isinstance(inputs, list):
+            raise ValueError(f"unit {unit_id} inputs must be a list")
         seen.add(unit_id)
-        out.append({"id": unit_id, "argv": list(argv), "artifacts": list(artifacts)})
+        out.append({
+            "id": unit_id,
+            "argv": list(argv),
+            "artifacts": list(artifacts),
+            "inputs": [_content_ref(ref, unit_id) for ref in inputs],
+        })
     if not out:
         raise ValueError("runnable protocol requires at least one matrix unit")
     return out
@@ -123,6 +143,12 @@ def _refs_match(store: EvidenceStore, refs: Any) -> bool:
     return True
 
 
+def _validate_inputs(store: EvidenceStore, unit: Dict[str, Any]) -> None:
+    refs = unit.get("inputs") or []
+    if refs and not _refs_match(store, refs):
+        raise ValueError(f"frozen unit input changed: {unit['id']}")
+
+
 def _git_commit(root: Path) -> str:
     """Best-effort provenance only; execution never depends on git being present."""
     try:
@@ -136,7 +162,25 @@ def _git_commit(root: Path) -> str:
 
 
 def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experimenter") -> Dict[str, Any]:
-    """Execute exactly one frozen protocol and return its immutable Evidence id."""
+    """Execute exactly one frozen protocol; one protocol has one live executor."""
+    root = Path(project_dir).resolve()
+    runtime_dir = _runtime_dir(root, protocol_id)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    lock = (runtime_dir / ".lock").open("w")
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(f"experiment protocol already running: {protocol_id}") from exc
+        return _run_experiment(root, protocol_id, author=author)
+    finally:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        finally:
+            lock.close()
+
+
+def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict[str, Any]:
     root = Path(project_dir).resolve()
     store = EvidenceStore(root)
     protocol = store.get_protocol(protocol_id)
@@ -153,6 +197,9 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
         raise ValueError("runnable protocol requires metric_reducer")
 
     units = _units(protocol)
+    for unit in units:
+        _validate_inputs(store, unit)
+
     checkpoint = _load_checkpoint(root, protocol_id)
     completed = checkpoint["completed"]
 
@@ -185,14 +232,14 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
             "completed_units": len(completed),
         }
 
-    runtime_dir = _runtime_dir(root, protocol_id)
-    logs_dir = runtime_dir / "logs"
+    logs_dir = _runtime_dir(root, protocol_id) / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     for unit in units:
         unit_id = unit["id"]
         if unit_id in completed:
             continue
+        _validate_inputs(store, unit)
         attempts = sum(
             1 for failure in checkpoint["failures"]
             if isinstance(failure, dict) and failure.get("unit_id") == unit_id
@@ -206,6 +253,9 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
                 stderr=subprocess.STDOUT,
                 check=False,
             )
+        # Do not accept a safe point if its frozen code/config/input changed while
+        # the unit was executing; the output may no longer represent this protocol.
+        _validate_inputs(store, unit)
         if proc.returncode != 0:
             checkpoint["failures"].append({
                 "unit_id": unit_id,
