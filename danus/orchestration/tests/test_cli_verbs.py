@@ -147,19 +147,20 @@ def test_stop_one_force_sigkill_fallback(tmp: Path):
         proc = subprocess.Popen([sys.executable, "-c", prog], start_new_session=True)
         wl.pid.write_text(str(proc.pid))
         try:
-            # wait until the child has installed its SIGTERM-ignoring handler
-            end = time.time() + 10
-            while time.time() < end and not ready.exists():
+            # Duration/deadline assertions must use a monotonic clock: WSL/host
+            # wall-clock synchronization can move time.time() backwards mid-test.
+            end = time.monotonic() + 10
+            while time.monotonic() < end and not ready.exists():
                 time.sleep(0.02)
             assert ready.exists(), "child never signalled readiness"
             assert cli._alive(proc.pid) is True
-            t0 = time.time()
+            t0 = time.monotonic()
             res = cli._stop_one(wl, force=True)       # SIGTERM ignored -> SIGKILL fallback
             assert res == "killed"
-            assert time.time() - t0 >= 4.5, "should have waited the full SIGTERM grace"
+            assert time.monotonic() - t0 >= 4.5, "should have waited the full SIGTERM grace"
             # confirm it's really gone
-            end = time.time() + 5
-            while time.time() < end and cli._alive(proc.pid):
+            end = time.monotonic() + 5
+            while time.monotonic() < end and cli._alive(proc.pid):
                 time.sleep(0.05)
             assert cli._alive(proc.pid) is False
             assert not wl.pid.exists()
