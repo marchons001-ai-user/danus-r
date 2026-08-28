@@ -38,7 +38,9 @@ def test_role_harness_selection():
     assert L.harness_skills_dir("reviewer") is None
     experimenter_skills = L.harness_skills_dir("experimenter")
     assert experimenter_skills is not None and experimenter_skills.is_dir()
-    assert [p.parent.name for p in experimenter_skills.glob("**/SKILL.md")] == ["ponytail"]
+    assert sorted(p.parent.name for p in experimenter_skills.glob("**/SKILL.md")) == [
+        "ponytail", "scientific-performance",
+    ]
     assert L.scientific_worker_md().is_file()
 
 
@@ -113,7 +115,10 @@ def test_scientific_dsh_prompt_excludes_legacy_math_harness(tmp: Path):
 
     assert "# Ponytail" not in researcher
     assert "# Ponytail" not in reviewer
+    assert "# Scientific Performance" not in researcher
+    assert "# Scientific Performance" not in reviewer
     assert "# Ponytail" in experimenter
+    assert "# Scientific Performance" in experimenter
 
     fact_submit_note = "fact_submit -> mcp__danus__fact_submit"
     arxiv_note = "search_arxiv_theorems -> mcp__danus__search_arxiv_theorems"
