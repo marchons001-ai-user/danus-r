@@ -44,6 +44,7 @@ from .control import quota_policy, reconcile, reviewer_cost_policy
 _QUOTA_REFRESH_SECONDS = 5 * 60
 _REVIEWER_TERRA_MODEL = "gpt-5.6-terra"
 _REVIEWER_DSH_DEFAULT_MODEL = "deepseek-v4-flash"
+_TOKEN_USAGE_SEMANTICS = "completed_turn_usage_not_context_window"
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
@@ -203,7 +204,11 @@ def _reviewer_cost_rows(
         wl = L.WorkerLayout(L.worker_dir(project, row["worker"]))
         if not _auto_reviewer(wl):
             continue
+        if row.get("progress_state") in {"DONE", "BLOCKED", "STALE"}:
+            continue
         assignment_id = str(row.get("assignment_id") or "") or None
+        if not assignment_id:
+            continue
         exhausted = _dsh_quota_for_assignment(wl, assignment_id)
         desired = reviewer_cost_policy(
             quota,
@@ -456,6 +461,16 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         except (FileNotFoundError, ValueError) as exc:
             progress_error = str(exc)
 
+    # Codex exposes completed-turn usage; DSH headless currently does not expose a
+    # stable usage stream. An auto Reviewer may also have mixed DSH/Terra history,
+    # so its cumulative total is conservatively incomplete even during fallback.
+    usage_available = _selected_worker_backend(wl) != "dsh" and "context_tokens" in st
+    usage_complete = usage_available and not _auto_reviewer(wl)
+    round_usage_tokens = int(st.get("context_tokens") or 0) if usage_available else None
+    usage_tokens_total = int(st.get("context_tokens_total") or 0) if usage_complete else None
+    usage_tool_calls = int(st.get("context_tool_calls") or 0) if usage_available else None
+    usage_compactions = int(st.get("context_compactions") or 0) if usage_available else None
+
     return {
         "worker": wl.name, "pid": pid, "alive": alive, "state": state,
         "round": st.get("round", 0), "age_s": round(age, 1) if age is not None else None,
@@ -466,10 +481,19 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         "plan_version": progress.get("plan_version") if progress else None,
         "progress_state": progress.get("state") if progress else None,
         "progress_outcome": progress.get("outcome") if progress else None,
-        "context_tokens": int(st.get("context_tokens") or 0),
-        "context_tokens_total": int(st.get("context_tokens_total") or 0),
-        "context_tool_calls": int(st.get("context_tool_calls") or 0),
-        "context_compactions": int(st.get("context_compactions") or 0),
+        "round_usage_tokens": round_usage_tokens,
+        "usage_tokens_total": usage_tokens_total,
+        "usage_tool_calls": usage_tool_calls,
+        "usage_compactions": usage_compactions,
+        "usage_available": usage_available,
+        "usage_complete": usage_complete,
+        "token_semantics": _TOKEN_USAGE_SEMANTICS,
+        # Compatibility aliases. They intentionally become null when usage is
+        # unknown rather than claiming that DSH used zero tokens/tool calls.
+        "context_tokens": round_usage_tokens,
+        "context_tokens_total": usage_tokens_total,
+        "context_tool_calls": usage_tool_calls,
+        "context_compactions": usage_compactions,
         "context_trigger": st.get("context_trigger"),
         "terminal_outcome": st.get("terminal_outcome"),
         "reviewer_backend_selected": st.get("reviewer_backend_selected"),
@@ -496,8 +520,24 @@ def _project_rows(project: str) -> List[Dict[str, Any]]:
 
 
 def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int) -> Dict[str, Any]:
-    used_tokens = sum(max(0, int(row.get("context_tokens_total") or 0)) for row in rows)
+    known_totals = [
+        max(0, int(row["usage_tokens_total"]))
+        for row in rows
+        if row.get("usage_complete") and row.get("usage_tokens_total") is not None
+    ]
+    used_tokens = sum(known_totals)
+    unknown_workers = sorted(
+        str(row.get("worker") or "")
+        for row in rows
+        if not row.get("usage_complete")
+    )
     limit = max(0, int(token_budget))
+    if limit and used_tokens >= limit:
+        token_exceeded: Optional[bool] = True
+    elif limit and unknown_workers:
+        token_exceeded = None
+    else:
+        token_exceeded = False
 
     deadline = None
     deadline_path = pdir / L.DEADLINE_FILE
@@ -537,7 +577,11 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
         "tokens": {
             "used": used_tokens,
             "limit": limit,
-            "exceeded": bool(limit and used_tokens >= limit),
+            "exceeded": token_exceeded,
+            "complete": not unknown_workers,
+            "used_is_lower_bound": bool(unknown_workers),
+            "unknown_workers": unknown_workers,
+            "semantics": _TOKEN_USAGE_SEMANTICS,
         },
         "time": {
             "deadline": deadline,
@@ -547,11 +591,17 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
         "context": [
             {
                 "worker": row["worker"],
-                "tokens": row.get("context_tokens", 0),
-                "tokens_total": row.get("context_tokens_total", 0),
-                "tool_calls": row.get("context_tool_calls", 0),
-                "compactions": row.get("context_compactions", 0),
+                "round_usage_tokens": row.get("round_usage_tokens"),
+                "usage_tokens_total": row.get("usage_tokens_total"),
+                "usage_available": row.get("usage_available", False),
+                "usage_complete": row.get("usage_complete", False),
+                "token_semantics": row.get("token_semantics", _TOKEN_USAGE_SEMANTICS),
+                "tool_calls": row.get("usage_tool_calls"),
+                "compactions": row.get("usage_compactions"),
                 "rollover": row.get("context_trigger"),
+                # Compatibility aliases for existing consumers.
+                "tokens": row.get("round_usage_tokens"),
+                "tokens_total": row.get("usage_tokens_total"),
             }
             for row in rows
         ],
@@ -563,7 +613,7 @@ def _apply_resource_budget(report: Dict[str, Any], rows: List[Dict[str, Any]], b
     reason = None
     if budget["time"]["exceeded"]:
         reason = "resource_time_budget"
-    elif budget["tokens"]["exceeded"]:
+    elif budget["tokens"]["exceeded"] is True:
         reason = "resource_token_budget"
     if not reason:
         return
@@ -672,6 +722,7 @@ def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -
         {
             "event": "RECONCILE",
             "trigger": trigger,
+            "project_state": report.get("project_state"),
             "plan_version": report.get("plan_version"),
             "plan_changes": report.get("plan_changes", []),
             "decisions": report.get("decisions", []),
@@ -719,15 +770,21 @@ def do_supervise(
             ledger.set_node_state(reopen_node, state="OPEN", actor="supervisor")
         rows = _project_rows(project)
         report = reconcile(pdir, rows)
+        complete = report.get("project_state") == "COMPLETE"
         budget = _resource_snapshot(pdir, rows, token_budget)
         report["budget"] = budget
-        _apply_resource_budget(report, rows, budget)
+        if not complete:
+            _apply_resource_budget(report, rows, budget)
         policy = quota_policy(Q.load_quota(pdir))
         report["quota_policy"] = policy
-        report["reviewer_cost_policy"] = _reviewer_cost_rows(project, rows, policy, apply=False)
+        report["reviewer_cost_policy"] = (
+            [] if complete else _reviewer_cost_rows(project, rows, policy, apply=False)
+        )
         if apply:
-            report["reviewer_cost_applied"] = _reviewer_cost_rows(project, rows, policy, apply=True)
-            report["quota_applied"] = _apply_quota_gate(project, rows, policy)
+            report["reviewer_cost_applied"] = (
+                [] if complete else _reviewer_cost_rows(project, rows, policy, apply=True)
+            )
+            report["quota_applied"] = [] if complete else _apply_quota_gate(project, rows, policy)
             report["applied"] = _apply_supervisor_decisions(project, report["decisions"])
             _record_supervisor_event(pdir, trigger, report)
         return report
@@ -742,9 +799,10 @@ def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[st
         {k: row.get(k) for k in (
             "worker", "pid", "alive", "state", "round", "label", "paused", "pause_reason",
             "assignment_id", "plan_node_id", "plan_version", "progress_state", "progress_outcome",
-            "context_tokens", "context_tokens_total", "context_tool_calls", "context_compactions",
-            "context_trigger", "terminal_outcome", "reviewer_backend_selected", "reviewer_model_selected",
-            "reviewer_backend_reason", "reviewer_dsh_quota_exhausted", "reviewer_dsh_quota_assignment_id",
+            "round_usage_tokens", "usage_tokens_total", "usage_available", "usage_complete",
+            "usage_tool_calls", "usage_compactions", "context_trigger", "terminal_outcome",
+            "reviewer_backend_selected", "reviewer_model_selected", "reviewer_backend_reason",
+            "reviewer_dsh_quota_exhausted", "reviewer_dsh_quota_assignment_id",
         )}
         for row in rows
     ]
@@ -766,7 +824,8 @@ def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[st
             "stamps": stamps,
             "experiments": budget.get("experiments", []),
             "budget_state": {
-                "token_exceeded": bool(budget.get("tokens", {}).get("exceeded")),
+                "token_exceeded": budget.get("tokens", {}).get("exceeded"),
+                "token_complete": bool(budget.get("tokens", {}).get("complete")),
                 "time_exceeded": bool(budget.get("time", {}).get("exceeded")),
             },
         },
@@ -827,6 +886,8 @@ def watch_supervisor(
             budget = _resource_snapshot(pdir, rows, token_budget)
             last_signature = _control_signature(project, rows, budget)
             yield report
+            if report.get("project_state") == "COMPLETE" and not report.get("decisions"):
+                return
         time.sleep(poll)
 
 
