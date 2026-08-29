@@ -463,13 +463,35 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
 
     # Codex exposes completed-turn usage; DSH headless currently does not expose a
     # stable usage stream. An auto Reviewer may also have mixed DSH/Terra history,
-    # so its cumulative total is conservatively incomplete even during fallback.
-    usage_available = _selected_worker_backend(wl) != "dsh" and "context_tokens" in st
-    usage_complete = usage_available and not _auto_reviewer(wl)
-    round_usage_tokens = int(st.get("context_tokens") or 0) if usage_available else None
-    usage_tokens_total = int(st.get("context_tokens_total") or 0) if usage_complete else None
-    usage_tool_calls = int(st.get("context_tool_calls") or 0) if usage_available else None
-    usage_compactions = int(st.get("context_compactions") or 0) if usage_available else None
+    # so its cumulative total is conservatively incomplete after it has run.
+    backend = _selected_worker_backend(wl)
+    round_no = int(st.get("round") or 0)
+    usage_available = backend != "dsh" and any(
+        key in st for key in ("context_tokens", "context_tokens_total", "context_tool_calls")
+    )
+    usage_complete = round_no == 0 or (
+        backend != "dsh" and not _auto_reviewer(wl) and "context_tokens_total" in st
+    )
+    round_usage_tokens = (
+        int(st.get("context_tokens") or 0)
+        if backend != "dsh" and "context_tokens" in st
+        else None
+    )
+    usage_tokens_total = (
+        0 if round_no == 0
+        else int(st.get("context_tokens_total") or 0) if usage_complete
+        else None
+    )
+    usage_tool_calls = (
+        int(st.get("context_tool_calls") or 0)
+        if backend != "dsh" and "context_tool_calls" in st
+        else None
+    )
+    usage_compactions = (
+        int(st.get("context_compactions") or 0)
+        if backend != "dsh" and "context_compactions" in st
+        else None
+    )
 
     return {
         "worker": wl.name, "pid": pid, "alive": alive, "state": state,
@@ -573,16 +595,17 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
                 "evidence_id": checkpoint.get("evidence_id"),
             })
 
-    return {
-        "tokens": {
-            "used": used_tokens,
-            "limit": limit,
-            "exceeded": token_exceeded,
-            "complete": not unknown_workers,
-            "used_is_lower_bound": bool(unknown_workers),
+    tokens = {"used": used_tokens, "limit": limit, "exceeded": token_exceeded}
+    if unknown_workers:
+        tokens.update({
+            "complete": False,
+            "used_is_lower_bound": True,
             "unknown_workers": unknown_workers,
             "semantics": _TOKEN_USAGE_SEMANTICS,
-        },
+        })
+
+    return {
+        "tokens": tokens,
         "time": {
             "deadline": deadline,
             "remaining_s": None if deadline is None else round(deadline - now, 1),
@@ -825,7 +848,7 @@ def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[st
             "experiments": budget.get("experiments", []),
             "budget_state": {
                 "token_exceeded": budget.get("tokens", {}).get("exceeded"),
-                "token_complete": bool(budget.get("tokens", {}).get("complete")),
+                "token_complete": bool(budget.get("tokens", {}).get("complete", True)),
                 "time_exceeded": bool(budget.get("time", {}).get("exceeded")),
             },
         },
