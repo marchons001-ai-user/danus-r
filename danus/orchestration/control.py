@@ -14,6 +14,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from danus.core import ProgressLedger, ResearchPlanGraph
+from danus.execution import layout as L
 
 _FIVE_HOURS_SECONDS = 5 * 60 * 60
 _QUOTA_SNAPSHOT_MAX_AGE_SECONDS = 15 * 60
@@ -208,8 +209,8 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         and not blocked_dependencies(node_id)
     )
     complete = plan.get("root_id") in completed and not frontier and not pending_plan_changes
-    paused = bool(worker_rows) and all(bool(row.get("paused")) for row in worker_rows)
-    project_state = "COMPLETE" if complete else "PAUSED" if paused else "RUNNING"
+    project_paused = (root / L.PAUSE_FILE).is_file()
+    project_state = "COMPLETE" if complete else "PAUSED" if project_paused else "RUNNING"
 
     decisions: List[Dict[str, Any]] = []
 
