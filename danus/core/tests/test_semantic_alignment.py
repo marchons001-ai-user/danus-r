@@ -42,6 +42,15 @@ def test_material_assignment_requires_approved_exact_contract(tmp_path):
     contract = _submit(ledger, version)
 
     assert contract["status"] == "PROPOSED"
+    reviewer_assignment = ledger.assign(
+        worker="reviewer",
+        role="reviewer",
+        node_id="root",
+        plan_version=version,
+        task="Review the pending implementation contract.",
+    )
+    assert "implementation_contract_id" not in reviewer_assignment
+
     with pytest.raises(ValueError, match="requires APPROVE"):
         ledger.assign(
             worker="experimenter",
