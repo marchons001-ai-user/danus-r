@@ -28,6 +28,22 @@ The Research Plan is controlled shared state. Never edit `plan/current.json`,
 to your role; the gateway deliberately separates proposal, review, and commit
 authority.
 
+## Pre-code semantic alignment
+
+Material implementation changes require an Implementation Contract before code is
+assigned. This is for changes where misunderstanding the intended semantics can
+produce internally consistent but directionally wrong code, including backend or
+routing policy, role authority, a frozen experiment protocol, or core architecture.
+Routine local implementation and low-impact fixes do not need this extra gate.
+
+The Researcher uses `implementation_submit_contract` to state the goal, invariants
+that must survive, forbidden behavior, and acceptance conditions. The Reviewer uses
+`implementation_review_contract` and returns exactly `APPROVE`, `REVISE`, or
+`REJECT`. Only `APPROVE` permits the exact reviewed task to be assigned. The
+Experimenter must not reinterpret or broaden an approved contract; if the contract
+is wrong or incomplete, stop and return it for review instead of silently fixing the
+semantics in code.
+
 ## Resume, do not restart
 
 At the start of a round:
