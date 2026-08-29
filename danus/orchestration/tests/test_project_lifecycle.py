@@ -38,15 +38,17 @@ def test_project_pause_is_durable_and_quiescent(tmp_path: Path):
     try:
         result = cli.do_pause("P")
         assert {row["result"] for row in result} == {"paused"}
+        assert (pdir / L.PAUSE_FILE).read_text(encoding="utf-8").strip() == "manual"
 
+        # Project pause is separate from worker-specific pause state.
         rows = cli.do_status("P")
-        assert rows and all(row["paused"] for row in rows)
+        assert rows and not any(row["paused"] for row in rows)
         first = reconcile(pdir, rows)
         assert first["project_state"] == "PAUSED"
         assert first["decisions"] == []
 
-        # A fresh read represents a new Supervisor process: no in-memory lifecycle
-        # state is needed; the existing per-worker pause markers are the durable fact.
+        # A fresh read represents a new Supervisor process: the project-root pause
+        # marker survives without any in-memory lifecycle state.
         second = reconcile(pdir, cli.do_status("P"))
         assert second["project_state"] == "PAUSED"
         assert second["decisions"] == []
@@ -54,23 +56,38 @@ def test_project_pause_is_durable_and_quiescent(tmp_path: Path):
         ctx.__exit__(None, None, None)
 
 
-def test_project_resume_restores_running_without_new_state_store(tmp_path: Path, monkeypatch):
+def test_worker_pause_does_not_pause_whole_project(tmp_path: Path):
     ctx, pdir = _project(tmp_path)
     try:
-        cli.do_pause("P")
-        monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
-        result = cli.do_resume("P", stagger=0)
-        assert {row["result"] for row in result} == {"started"}
-
-        rows = cli.do_status("P")
-        assert rows and not any(row["paused"] for row in rows)
-        report = reconcile(pdir, rows)
+        cli.do_pause("P/low")
+        assert L.WorkerLayout(L.worker_dir("P", "low")).pause.is_file()
+        assert not (pdir / L.PAUSE_FILE).exists()
+        report = reconcile(pdir, cli.do_status("P"))
         assert report["project_state"] == "RUNNING"
     finally:
         ctx.__exit__(None, None, None)
 
 
-def test_complete_has_priority_over_pause_markers(tmp_path: Path):
+def test_project_resume_restores_running_without_erasing_worker_pause(tmp_path: Path, monkeypatch):
+    ctx, pdir = _project(tmp_path)
+    try:
+        cli.do_pause("P")
+        low = L.WorkerLayout(L.worker_dir("P", "low"))
+        low.pause.write_text("manual\n", encoding="utf-8")
+
+        monkeypatch.setattr(cli, "_start_one", lambda wl: "paused" if wl.pause.exists() else "started")
+        result = {row["worker"]: row["result"] for row in cli.do_resume("P", stagger=0)}
+        assert result == {"low": "paused", "low2": "started"}
+        assert not (pdir / L.PAUSE_FILE).exists()
+        assert low.pause.is_file()
+
+        report = reconcile(pdir, cli.do_status("P"))
+        assert report["project_state"] == "RUNNING"
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def test_complete_has_priority_over_project_pause(tmp_path: Path):
     ctx, pdir = _project(tmp_path)
     try:
         cli.do_pause("P")
