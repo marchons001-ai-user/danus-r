@@ -225,7 +225,11 @@ class ProgressLedger:
         if node["state"] != "ACTIVE":
             raise ValueError(f"plan node {node_id} is not ACTIVE")
 
-        implementation_contract = self._active_implementation_contract(node_id)
+        implementation_contract = (
+            self._active_implementation_contract(node_id)
+            if role.lower() == "experimenter"
+            else None
+        )
         if implementation_contract is not None:
             status = implementation_contract["status"]
             if status != "APPROVE":
