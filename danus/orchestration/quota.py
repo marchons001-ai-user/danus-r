@@ -302,16 +302,28 @@ def _local_five_hour_proxy(
     prior_reset = prior_cal.get("weekly_reset_at")
     prior_plan = prior_cal.get("plan_type")
     prior_limit = prior_cal.get("limit_id")
+    prior_anchor_used = prior_cal.get("anchor_weekly_used_percent")
+    if isinstance(prior_anchor_used, bool) or not isinstance(prior_anchor_used, (int, float)):
+        prior_anchor_used = None
+    else:
+        prior_anchor_used = float(prior_anchor_used)
+
+    # Live Plus telemetry can move resetsAt while weekly usedPercent is still 0.
+    # At that point the weekly window has no consumed state to preserve, and the
+    # first positive usage can also be the moment resetsAt becomes fixed. Treat
+    # such zero-anchor drift as the same regime so the first measurable delta is
+    # not discarded. Once the anchor is positive, reset-time changes are material.
+    reset_compatible = prior_reset == weekly_reset or prior_anchor_used == 0.0
     same_regime = bool(
         official_ok
-        and prior_reset == weekly_reset
+        and reset_compatible
         and prior_plan == plan_type
         and prior_limit == limit_id
     )
 
     recalibration_reason = None
     if official_ok and prior_cal:
-        if prior_reset != weekly_reset:
+        if prior_reset != weekly_reset and prior_anchor_used != 0.0:
             recalibration_reason = "weekly_reset_changed"
         elif prior_plan != plan_type:
             recalibration_reason = "plan_changed"
