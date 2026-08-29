@@ -207,6 +207,11 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         and not active_children[node_id]
         and not blocked_dependencies(node_id)
     )
+    project_state = (
+        "COMPLETE"
+        if plan.get("root_id") in completed and not frontier and not pending_plan_changes
+        else "RUNNING"
+    )
 
     decisions: List[Dict[str, Any]] = []
 
@@ -328,7 +333,19 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
             str(d["assignment_id"] or ""),
         )
     )
+    if project_state == "COMPLETE":
+        alive_workers = {
+            str(row.get("worker") or "")
+            for row in worker_rows
+            if row.get("alive")
+        }
+        decisions = [
+            decision
+            for decision in decisions
+            if decision["action"] == "STOP" and decision.get("worker") in alive_workers
+        ]
     return {
+        "project_state": project_state,
         "plan_version": plan["plan_version"],
         "plan_changes": pending_plan_changes,
         "frontier": frontier,
