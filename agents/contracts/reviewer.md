@@ -87,10 +87,10 @@ Review only what is decision-relevant. Explicitly check:
    before seeing the relevant result? If not, mark the work exploratory/post-hoc
    and require independent confirmation for strong claims.
 10. **Experiment budget** — is the matrix the smallest one that can change the
-   decision? Would a pilot eliminate branches first?
+    decision? Would a pilot eliminate branches first?
 11. **Reproducibility** — can the Experimenter identify the code version, data,
-   seeds/tasks, config, decision rule, and expected outputs without inventing
-   missing choices?
+    seeds/tasks, config, decision rule, and expected outputs without inventing
+    missing choices?
 
 ## Anti-patching rule
 
