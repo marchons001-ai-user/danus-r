@@ -267,6 +267,10 @@ def _pause_reason(wl: L.WorkerLayout) -> Optional[str]:
         return "manual"
 
 
+def _project_pause(project: str) -> Path:
+    return L.project_dir(project) / L.PAUSE_FILE
+
+
 # --------------------------------------------------------------------------- #
 # assign                                                                       #
 # --------------------------------------------------------------------------- #
@@ -389,10 +393,11 @@ def do_finalize(project: str, fact_ids: List[str],
 # --------------------------------------------------------------------------- #
 
 def _start_one(wl: L.WorkerLayout) -> str:
-    """Returns 'started' / 'already-running' / 'locked' / 'paused'. Idempotent via
-    an flock on .pid.lock; clears a stale .stop before spawning."""
+    """Start one worker unless worker/project pause state blocks it."""
     wl.dir.mkdir(parents=True, exist_ok=True)
     wl.logs.mkdir(exist_ok=True)
+    if (wl.project_dir / L.PAUSE_FILE).is_file():
+        return "project-paused"
     if wl.pause.exists():
         return "paused"
     lock = open(wl.lock, "w")
@@ -793,21 +798,21 @@ def do_supervise(
             ledger.set_node_state(reopen_node, state="OPEN", actor="supervisor")
         rows = _project_rows(project)
         report = reconcile(pdir, rows)
-        complete = report.get("project_state") == "COMPLETE"
+        quiescent = report.get("project_state") in {"PAUSED", "COMPLETE"}
         budget = _resource_snapshot(pdir, rows, token_budget)
         report["budget"] = budget
-        if not complete:
+        if not quiescent:
             _apply_resource_budget(report, rows, budget)
         policy = quota_policy(Q.load_quota(pdir))
         report["quota_policy"] = policy
         report["reviewer_cost_policy"] = (
-            [] if complete else _reviewer_cost_rows(project, rows, policy, apply=False)
+            [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=False)
         )
         if apply:
             report["reviewer_cost_applied"] = (
-                [] if complete else _reviewer_cost_rows(project, rows, policy, apply=True)
+                [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=True)
             )
-            report["quota_applied"] = [] if complete else _apply_quota_gate(project, rows, policy)
+            report["quota_applied"] = [] if quiescent else _apply_quota_gate(project, rows, policy)
             report["applied"] = _apply_supervisor_decisions(project, report["decisions"])
             _record_supervisor_event(pdir, trigger, report)
         return report
@@ -832,7 +837,7 @@ def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[st
 
     stamps = []
     paths = [pdir / "plan" / "current.json", pdir / "progress" / "ledger.jsonl",
-             pdir / L.DEADLINE_FILE, Q.quota_path(pdir)]
+             pdir / L.PAUSE_FILE, pdir / L.DEADLINE_FILE, Q.quota_path(pdir)]
     paths.extend(sorted((pdir / "plan" / "changes").glob("*.json")))
     paths.extend(sorted((pdir / "experiment_runtime").glob("*/checkpoint.json")))
     for path in paths:
@@ -1001,10 +1006,25 @@ def _pause_one(wl: L.WorkerLayout, reason: str = "manual") -> str:
 
 
 def do_pause(target: str) -> List[Dict]:
+    project, worker = L.resolve_target(target)
     dirs = L.target_worker_dirs(target)
     if not dirs:
         raise SystemExit(f"no workers for target {target!r}")
-    return [{"worker": d.name, "result": _pause_one(L.WorkerLayout(d))} for d in dirs]
+    if worker:
+        wl = L.WorkerLayout(dirs[0])
+        return [{"worker": wl.name, "result": _pause_one(wl)}]
+
+    atomic_write(_project_pause(project), "manual\n")
+    out = []
+    for wdir in dirs:
+        wl = L.WorkerLayout(wdir)
+        result = _stop_one(wl, force=False)
+        if result == "not-running":
+            result = "paused"
+        elif result == "stopping (graceful)":
+            result = "pausing"
+        out.append({"worker": wl.name, "result": result})
+    return out
 
 
 def _resume_one(wl: L.WorkerLayout) -> str:
@@ -1013,14 +1033,21 @@ def _resume_one(wl: L.WorkerLayout) -> str:
 
 
 def do_resume(target: str, stagger: float = 0.2) -> List[Dict]:
+    project, worker = L.resolve_target(target)
     dirs = L.target_worker_dirs(target)
     if not dirs:
         raise SystemExit(f"no workers for target {target!r}")
+    if worker:
+        wl = L.WorkerLayout(dirs[0])
+        return [{"worker": wl.name, "result": _resume_one(wl)}]
+
+    _project_pause(project).unlink(missing_ok=True)
     out = []
     for i, wdir in enumerate(dirs):
         if i and stagger:
             time.sleep(stagger)
-        out.append({"worker": wdir.name, "result": _resume_one(L.WorkerLayout(wdir))})
+        wl = L.WorkerLayout(wdir)
+        out.append({"worker": wl.name, "result": _start_one(wl)})
     return out
 
 
