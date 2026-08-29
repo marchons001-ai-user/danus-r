@@ -37,6 +37,11 @@ originate from the Researcher, be approved by the Reviewer, and still match its
 edit `plan/current.json` or revision files directly, and never reinterpret an old
 node id; retire or supersede old routes through an explicit reviewed revision.
 
+Treat `plan_pending_changes` as the governance queue: route PROPOSED changes to the
+Reviewer and commit APPROVED current-base changes only when the revision is
+unambiguous. If multiple approved changes compete for the same route, do not choose
+by file/order; return the ambiguity to the Reviewer or escalate it.
+
 ## What you monitor
 
 Prefer shared, compact state over private reasoning traces. Read the project goal,

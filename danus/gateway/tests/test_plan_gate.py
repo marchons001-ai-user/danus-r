@@ -37,6 +37,11 @@ def test_plan_change_gate_round_trip_is_offline(tmp_path):
                 {"op": "add_node", "node_id": "branch", "title": "Branch", "parent": "root"}
             ],
         )
+        pending = server.plan_pending_changes()
+
+    assert pending["count"] == 1
+    assert pending["changes"][0]["change_id"] == proposed["change_id"]
+    assert pending["changes"][0]["status"] == "PROPOSED"
 
     with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="reviewer"):
         reviewed = server.plan_review_change(
@@ -44,9 +49,13 @@ def test_plan_change_gate_round_trip_is_offline(tmp_path):
             approve=True,
             rationale="Route-level change is necessary and bounded.",
         )
+        approved = server.plan_pending_changes()
+
+    assert approved["changes"][0]["status"] == "APPROVED"
 
     with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="supervisor"):
         committed = server.plan_commit_change(proposed["change_id"])
+        assert server.plan_pending_changes()["count"] == 0
 
     assert proposed["status"] == "PROPOSED"
     assert reviewed["status"] == "APPROVED"
@@ -56,16 +65,19 @@ def test_plan_change_gate_round_trip_is_offline(tmp_path):
 
 
 def test_plan_change_authority_is_role_gated():
+    assert "plan_pending_changes" in tools_for("researcher")
     assert "plan_propose_change" in tools_for("researcher")
     assert "plan_review_change" not in tools_for("researcher")
     assert "plan_commit_change" not in tools_for("researcher")
 
+    assert "plan_pending_changes" in tools_for("reviewer")
     assert "plan_review_change" in tools_for("reviewer")
     assert "plan_propose_change" not in tools_for("reviewer")
     assert "plan_commit_change" not in tools_for("reviewer")
 
     assert not any(name.startswith("plan_") for name in tools_for("experimenter"))
 
+    assert "plan_pending_changes" in tools_for("main")
     assert "plan_commit_change" in tools_for("main")
     assert "plan_propose_change" not in tools_for("main")
     assert "plan_review_change" not in tools_for("main")

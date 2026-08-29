@@ -164,6 +164,7 @@ def test_supervise_cli_reconciles_and_records_node_completion(tmp_path: Path):
 
         report = cli.do_supervise("P")
         assert report["frontier"] == ["root"]
+        assert report["plan_changes"] == []
         assert _decision(report, action="RETASK", reason="ready_node_unassigned")
 
         done = cli.do_supervise("P", complete_node="root")
@@ -172,3 +173,28 @@ def test_supervise_cli_reconciles_and_records_node_completion(tmp_path: Path):
 
         args = cli.build_parser().parse_args(["supervise", "P", "--reopen-node", "root"])
         assert args.cmd == "supervise" and args.reopen_node == "root"
+
+
+def test_supervisor_sees_plan_change_and_signature_changes_immediately(tmp_path: Path):
+    with _agents_root(tmp_path / "projects"):
+        cli.do_new("P", roles="high:1")
+        pdir = tmp_path / "projects" / "P"
+        plan = ResearchPlanGraph.create(pdir, node_id="root", title="Root")
+        rows = cli._project_rows("P")
+        budget = cli._resource_snapshot(pdir, rows, 0)
+        before = cli._control_signature("P", rows, budget)
+
+        change_id = plan.propose_change(
+            base_plan_version=1,
+            proposer="researcher",
+            reason="A new route is materially required.",
+            operations=[
+                {"op": "add_node", "node_id": "branch", "title": "Branch", "parent": "root"}
+            ],
+        )
+
+        after = cli._control_signature("P", rows, budget)
+        assert after != before
+        report = cli.do_supervise("P")
+        assert [item["change_id"] for item in report["plan_changes"]] == [change_id]
+        assert report["plan_changes"][0]["status"] == "PROPOSED"

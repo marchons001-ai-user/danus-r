@@ -673,6 +673,7 @@ def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -
             "event": "RECONCILE",
             "trigger": trigger,
             "plan_version": report.get("plan_version"),
+            "plan_changes": report.get("plan_changes", []),
             "decisions": report.get("decisions", []),
             "applied": report.get("applied", []),
             "budget": report.get("budget", {}),
@@ -751,6 +752,7 @@ def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[st
     stamps = []
     paths = [pdir / "plan" / "current.json", pdir / "progress" / "ledger.jsonl",
              pdir / L.DEADLINE_FILE, Q.quota_path(pdir)]
+    paths.extend(sorted((pdir / "plan" / "changes").glob("*.json")))
     paths.extend(sorted((pdir / "experiment_runtime").glob("*/checkpoint.json")))
     for path in paths:
         try:

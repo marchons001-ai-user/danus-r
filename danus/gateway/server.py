@@ -396,6 +396,12 @@ def fact_revoke(
 # research-plan change gate                                                   #
 # --------------------------------------------------------------------------- #
 
+def plan_pending_changes(project: Optional[str] = None) -> Dict[str, Any]:
+    """Return current-base proposed/approved revisions; stale requests are retired."""
+    changes = _pg(project).pending_changes()
+    return {"changes": changes, "count": len(changes)}
+
+
 def plan_propose_change(
     base_plan_version: int,
     reason: str,
@@ -457,6 +463,7 @@ _TOOLS = {
     "fact_submit": fact_submit,
     "fact_search": fact_search,
     "fact_revoke": fact_revoke,
+    "plan_pending_changes": plan_pending_changes,
     "plan_propose_change": plan_propose_change,
     "plan_review_change": plan_review_change,
     "plan_commit_change": plan_commit_change,

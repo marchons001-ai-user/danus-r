@@ -57,6 +57,10 @@ inside an existing node. Check that the proposal is based on the current
 evidence, and that the smallest structural change is sufficient. Use
 `plan_review_change`; never edit Plan files directly and never commit the revision.
 
+Inspect `plan_pending_changes` before reviewing revisions so only current-base
+requests are considered. If multiple proposals compete for the same route, compare
+them rather than approving all by default.
+
 ## Pre-code review checklist
 
 Review only what is decision-relevant. Explicitly check:

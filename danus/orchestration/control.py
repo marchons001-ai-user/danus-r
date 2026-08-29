@@ -155,7 +155,9 @@ def reviewer_cost_policy(
 def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Return the current ready frontier and deterministic control decisions."""
     root = Path(project_dir)
-    plan = ResearchPlanGraph(root).snapshot()
+    graph = ResearchPlanGraph(root)
+    plan = graph.snapshot()
+    pending_plan_changes = graph.pending_changes()
     ledger = ProgressLedger(root)
     current_assignments = ledger.snapshot(refresh_stale=True)
     all_assignments = ledger.assignments()
@@ -328,6 +330,7 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
     )
     return {
         "plan_version": plan["plan_version"],
+        "plan_changes": pending_plan_changes,
         "frontier": frontier,
         "completed_nodes": sorted(completed),
         "decisions": decisions,

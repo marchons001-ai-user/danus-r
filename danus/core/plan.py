@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ._util import utc_now
+from .evidence import EvidenceStore
 
 
 class ResearchPlanGraph:
@@ -115,13 +116,22 @@ class ResearchPlanGraph:
         proposer = self._required(proposer, "proposer")
         reason = self._required(reason, "reason")
         refs = self._clean_refs(evidence_refs or [])
-        if post_hoc and not refs:
-            raise ValueError("post_hoc plan change requires evidence_refs")
+        if post_hoc:
+            if not refs:
+                raise ValueError("post_hoc plan change requires evidence_refs")
+            store = EvidenceStore(self.root)
+            missing = [ref for ref in refs if store.get_record(ref) is None]
+            if missing:
+                raise ValueError(
+                    "post_hoc plan change has unknown evidence_refs: " + ", ".join(missing)
+                )
         ops = self._normalize_operations(operations)
 
         candidate = copy.deepcopy(current)
         self._apply_operations(candidate, ops)
         self._validate(candidate)
+        if candidate["nodes"] == current["nodes"]:
+            raise ValueError("plan change has no structural effect")
 
         identity = {
             "base_plan_version": base,
@@ -164,6 +174,24 @@ class ResearchPlanGraph:
         if record.get("status") not in self._CHANGE_STATUSES:
             raise ValueError(f"invalid change status for {cid}")
         return record
+
+    def pending_changes(self) -> List[Dict[str, Any]]:
+        """Return current-base proposals/approvals and retire stale pending records."""
+        current_version = self.snapshot()["plan_version"]
+        pending: List[Dict[str, Any]] = []
+        if not self.changes_dir.is_dir():
+            return pending
+        for path in sorted(self.changes_dir.glob("*.json")):
+            record = self.get_change(path.stem)
+            if record["status"] not in {"PROPOSED", "APPROVED"}:
+                continue
+            if record["base_plan_version"] != current_version:
+                record["status"] = "STALE"
+                self._write_json(path, record)
+                continue
+            pending.append(record)
+        pending.sort(key=lambda item: (str(item.get("created_at") or ""), item["change_id"]))
+        return pending
 
     def review_change(
         self,
