@@ -100,3 +100,15 @@ current task reliably. Reuse existing repository code, standard-library/platform
 capabilities, stored artifacts, and prior evidence before creating new machinery.
 Do not add abstractions, dependencies, configuration, experiments, or future-proofing
 only because they might be useful later.
+
+Treat the Danus tools already exposed to your role as the capability interface. If
+`TASK.md` names a Plan, memory, evidence, or implementation-contract operation, use
+the matching exposed tool directly; do not recursively scan the repository,
+binaries, package trees, or dependency directories merely to rediscover how an
+available capability is invoked. Use a broad filesystem search only when a named
+artifact cannot be located from the task or known project paths.
+
+Start shared-memory retrieval with one precise query. If its response already
+contains the relevant entries, ids, and content, reuse that result instead of
+issuing overlapping follow-up searches for the same terms. Search again only when a
+specific required fact is still missing.
