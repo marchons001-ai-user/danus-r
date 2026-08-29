@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import json
 import queue
 import shutil
+import statistics
 import subprocess
 import threading
 import time
@@ -31,6 +32,26 @@ _FIVE_HOURS_MINS = 300
 _FIVE_HOURS_SECONDS = _FIVE_HOURS_MINS * 60
 _WEEKLY_MINS = 7 * 24 * 60
 _CALIBRATION_MAX_AGE_SECONDS = 6 * 60 * 60
+_CALIBRATION_SAMPLES = 3
+
+# OpenAI Codex credit rate card, credits per 1M tokens:
+# (uncached input, cached input, output). These weights normalize model mix; they
+# are not a claim that included ChatGPT limits are themselves fixed credit pools.
+_CREDIT_RATES = {
+    "gpt-5.6": (100.0, 10.0, 500.0),
+    "gpt-5.6-sol": (100.0, 10.0, 500.0),
+    "gpt-5.6-terra": (50.0, 5.0, 300.0),
+    "gpt-5.6-luna": (5.0, 0.5, 30.0),
+    "gpt-5.5": (125.0, 12.5, 750.0),
+    "gpt-5.4": (62.5, 6.25, 375.0),
+    "gpt-5.4-mini": (18.75, 1.875, 113.0),
+}
+
+# Low-confidence Plus prior from recent community measurements. It exists only
+# to make the local proxy useful before the coarse official weekly meter moves.
+# Supervisor hard control still requires proxy status == "ready", never "estimated".
+_PLUS_PRIOR_WEEKLY_CREDITS = 1500.0
+_PLUS_PRIOR_FIVE_HOUR_CREDITS = 240.0
 
 
 def _openai_codex_bin() -> str:
@@ -250,18 +271,67 @@ def _round_logs() -> list[Path]:
     return list(L.agents_root().glob("*/workers/*/logs/round_*.log"))
 
 
+def _round_model(path: Path, mtime: float) -> Optional[str]:
+    """Current worker model for a round, only when the role file predates it.
+
+    Danus historically did not persist model id inside each round log. If .role was
+    edited after a round, attributing that old log to the new model would be worse
+    than dropping it, so old pre-edit rounds are excluded from credit accounting.
+    """
+    role = path.parent.parent / ".role"
+    try:
+        if role.stat().st_mtime > mtime:
+            return None
+        for line in role.read_text(encoding="utf-8").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == "MODEL":
+                model = value.strip().lower()
+                return model or None
+    except OSError:
+        return None
+    return None
+
+
+def _weighted_credits(telemetry: Dict[str, Any], model: Optional[str]) -> Optional[float]:
+    """Approximate Codex credits from existing structured token telemetry."""
+    rates = _CREDIT_RATES.get(str(model or "").lower())
+    if rates is None:
+        return None
+    inp = max(0, int(telemetry.get("input_tokens") or 0))
+    cached = max(0, min(inp, int(telemetry.get("cached_input_tokens") or 0)))
+    output = max(0, int(telemetry.get("output_tokens") or 0))
+    uncached = max(0, inp - cached)
+    return (
+        uncached * rates[0]
+        + cached * rates[1]
+        + output * rates[2]
+    ) / 1_000_000.0
+
+
+def _valid_samples(value: Any) -> list[float]:
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value[-_CALIBRATION_SAMPLES:]:
+        if isinstance(item, (int, float)) and not isinstance(item, bool) and item > 0:
+            out.append(float(item))
+    return out
+
+
 def _local_five_hour_proxy(
     official: Dict[str, Any],
     previous: Optional[Dict[str, Any]],
     *,
     now: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Rolling 5h Danus activity with short-lived online weekly calibration.
+    """Rolling 5h Danus activity with model-weighted online weekly calibration.
 
-    Calibration uses only the latest positive official-weekly delta interval and is
-    replaced on every new measurable delta. It expires after six hours and is
-    invalidated by weekly reset/decrease or account limit-regime changes. This is a
-    local pressure proxy, never an OpenAI 5h remaining-quota estimate.
+    Structured token usage is converted to the public Codex credit rate card when
+    the worker model is known. A Plus community prior supplies a low-confidence
+    estimate until the coarse official weekly meter moves; only empirical
+    calibration is marked ready and may influence Supervisor hard control.
     """
     now = float(time.time() if now is None else now)
     cutoff = now - _FIVE_HOURS_SECONDS
@@ -309,10 +379,7 @@ def _local_five_hour_proxy(
         prior_anchor_used = float(prior_anchor_used)
 
     # Live Plus telemetry can move resetsAt while weekly usedPercent is still 0.
-    # At that point the weekly window has no consumed state to preserve, and the
-    # first positive usage can also be the moment resetsAt becomes fixed. Treat
-    # such zero-anchor drift as the same regime so the first measurable delta is
-    # not discarded. Once the anchor is positive, reset-time changes are material.
+    # Preserve that zero anchor so the first measurable delta remains attributable.
     reset_compatible = prior_reset == weekly_reset or prior_anchor_used == 0.0
     same_regime = bool(
         official_ok
@@ -331,14 +398,18 @@ def _local_five_hour_proxy(
             recalibration_reason = "limit_changed"
 
     tokens_per_pct = prior_cal.get("tokens_per_weekly_percent") if same_regime else None
+    credits_per_pct = prior_cal.get("credits_per_weekly_percent") if same_regime else None
     calibrated_at = _epoch(prior_cal.get("calibrated_at")) if same_regime else None
+    samples = _valid_samples(prior_cal.get("credit_samples")) if same_regime else []
     if isinstance(tokens_per_pct, bool) or not isinstance(tokens_per_pct, (int, float)) or tokens_per_pct <= 0:
         tokens_per_pct = None
-    if tokens_per_pct is not None and (
-        calibrated_at is None or now - calibrated_at > _CALIBRATION_MAX_AGE_SECONDS
-    ):
+    if isinstance(credits_per_pct, bool) or not isinstance(credits_per_pct, (int, float)) or credits_per_pct <= 0:
+        credits_per_pct = None
+    if calibrated_at is not None and now - calibrated_at > _CALIBRATION_MAX_AGE_SECONDS:
         tokens_per_pct = None
+        credits_per_pct = None
         calibrated_at = None
+        samples = []
         recalibration_reason = "calibration_expired"
 
     anchor_at = _epoch(prior_cal.get("anchor_observed_at")) if same_regime else None
@@ -349,7 +420,9 @@ def _local_five_hour_proxy(
         anchor_at = None
         anchor_used = None
         tokens_per_pct = None
+        credits_per_pct = None
         calibrated_at = None
+        samples = []
         recalibration_reason = "calibration_expired"
 
     if official_ok and anchor_at is None:
@@ -361,8 +434,11 @@ def _local_five_hour_proxy(
         scan_start = min(scan_start, anchor_at)
 
     five_hour_tokens = 0
+    five_hour_credits = 0.0
     five_hour_rounds = 0
+    credit_rounds = 0
     calibration_tokens = 0
+    calibration_credits = 0.0
     for path in paths:
         try:
             mtime = path.stat().st_mtime
@@ -374,30 +450,33 @@ def _local_five_hour_proxy(
         if not telemetry.get("structured"):
             continue
         tokens = max(0, int(telemetry.get("uncached_tokens") or 0))
+        credits = _weighted_credits(telemetry, _round_model(path, mtime))
         if mtime >= cutoff:
             five_hour_tokens += tokens
             five_hour_rounds += 1
+            if credits is not None:
+                five_hour_credits += credits
+                credit_rounds += 1
         if anchor_at is not None and mtime >= anchor_at:
             calibration_tokens += tokens
+            if credits is not None:
+                calibration_credits += credits
 
     calibration_status = "unavailable"
+    basis = str(prior_cal.get("basis") or "") if same_regime else ""
     if not official_ok:
         if prior_cal:
             calibration_status = "waiting_for_official"
-            # Preserve a still-fresh calibration across transient sensor failure,
-            # but never use it for a ready/hard-control proxy while official data
-            # is unavailable.
-            prior_value = prior_cal.get("tokens_per_weekly_percent")
             prior_time = _epoch(prior_cal.get("calibrated_at"))
-            if (
-                isinstance(prior_value, (int, float))
-                and not isinstance(prior_value, bool)
-                and prior_value > 0
-                and prior_time is not None
-                and now - prior_time <= _CALIBRATION_MAX_AGE_SECONDS
-            ):
-                tokens_per_pct = float(prior_value)
-                calibrated_at = prior_time
+            if prior_time is not None and now - prior_time <= _CALIBRATION_MAX_AGE_SECONDS:
+                prior_credit = prior_cal.get("credits_per_weekly_percent")
+                prior_token = prior_cal.get("tokens_per_weekly_percent")
+                if isinstance(prior_credit, (int, float)) and not isinstance(prior_credit, bool) and prior_credit > 0:
+                    credits_per_pct = float(prior_credit)
+                    calibrated_at = prior_time
+                if isinstance(prior_token, (int, float)) and not isinstance(prior_token, bool) and prior_token > 0:
+                    tokens_per_pct = float(prior_token)
+                    calibrated_at = prior_time
             anchor_at = _epoch(prior_cal.get("anchor_observed_at"))
             anchor_used = prior_cal.get("anchor_weekly_used_percent")
             weekly_reset = prior_cal.get("weekly_reset_at")
@@ -406,60 +485,120 @@ def _local_five_hour_proxy(
     else:
         if not same_regime and prior_cal:
             tokens_per_pct = None
+            credits_per_pct = None
             calibrated_at = None
+            samples = []
+            basis = ""
             anchor_at = now
             anchor_used = float(weekly_used)
             calibration_tokens = 0
+            calibration_credits = 0.0
 
-        calibration_status = "ready" if tokens_per_pct is not None else "waiting_for_weekly_delta"
+        if credits_per_pct is not None:
+            calibration_status = "ready"
+            basis = "weighted_credits"
+        elif tokens_per_pct is not None:
+            # Backward compatibility for pre-credit snapshots. New known-model
+            # intervals replace this as soon as the weekly meter moves.
+            calibration_status = "ready"
+            basis = "legacy_uncached_tokens"
+        else:
+            calibration_status = "waiting_for_weekly_delta"
+
         if anchor_at is not None and anchor_used is not None:
             delta_pct = float(weekly_used) - float(anchor_used)
             if delta_pct < 0:
                 tokens_per_pct = None
+                credits_per_pct = None
                 calibrated_at = None
+                samples = []
+                basis = ""
                 anchor_at = now
                 anchor_used = float(weekly_used)
                 calibration_tokens = 0
+                calibration_credits = 0.0
                 calibration_status = "waiting_for_weekly_delta"
                 recalibration_reason = "weekly_decreased"
             elif delta_pct > 0:
-                if calibration_tokens > 0:
-                    # Latest measurable interval wins: fast adaptation to account
-                    # quota/denominator changes, with no long-memory averaging.
-                    tokens_per_pct = calibration_tokens / delta_pct
+                tokens_per_pct = calibration_tokens / delta_pct if calibration_tokens > 0 else None
+                if calibration_credits > 0:
+                    sample = calibration_credits / delta_pct
+                    samples = (samples + [sample])[-_CALIBRATION_SAMPLES:]
+                    credits_per_pct = statistics.median(samples)
                     calibrated_at = now
                     calibration_status = "ready"
+                    basis = "weighted_credits"
+                    recalibration_reason = "online_update"
+                elif calibration_tokens > 0:
+                    # Preserve legacy behavior only where historical model attribution
+                    # is unavailable. It remains explicitly labelled as such.
+                    credits_per_pct = None
+                    calibrated_at = now
+                    calibration_status = "ready"
+                    basis = "legacy_uncached_tokens"
                     recalibration_reason = "online_update"
                 else:
-                    # The account meter moved without attributable Danus Codex
-                    # activity. Treat this as external usage/regime uncertainty.
                     tokens_per_pct = None
+                    credits_per_pct = None
                     calibrated_at = None
                     calibration_status = "waiting_for_weekly_delta"
+                    basis = ""
                     recalibration_reason = "external_usage"
                 anchor_at = now
                 anchor_used = float(weekly_used)
                 calibration_tokens = 0
+                calibration_credits = 0.0
+
+    prior_available = str(plan_type or "").lower() == "plus" and credit_rounds > 0
+    prior_credits_per_pct = _PLUS_PRIOR_WEEKLY_CREDITS / 100.0 if prior_available else None
+    empirical = calibration_status == "ready" and credits_per_pct is not None
+    effective_credits_per_pct = credits_per_pct if empirical else prior_credits_per_pct
 
     weekly_equivalent = None
     pace_pressure = None
-    if window_complete and calibration_status == "ready" and tokens_per_pct is not None:
+    estimated_five_hour_used = None
+    if window_complete and effective_credits_per_pct is not None:
+        weekly_equivalent = five_hour_credits / effective_credits_per_pct
+        sustainable_five_hour_pct = 100.0 * _FIVE_HOURS_MINS / _WEEKLY_MINS
+        pace_pressure = 100.0 * weekly_equivalent / sustainable_five_hour_pct
+        if not empirical:
+            estimated_five_hour_used = 100.0 * five_hour_credits / _PLUS_PRIOR_FIVE_HOUR_CREDITS
+    elif (
+        window_complete
+        and calibration_status == "ready"
+        and tokens_per_pct is not None
+        and basis == "legacy_uncached_tokens"
+    ):
         weekly_equivalent = five_hour_tokens / tokens_per_pct
         sustainable_five_hour_pct = 100.0 * _FIVE_HOURS_MINS / _WEEKLY_MINS
         pace_pressure = 100.0 * weekly_equivalent / sustainable_five_hour_pct
 
     if not window_complete:
         status = "warming_up"
-    elif calibration_status == "ready" and pace_pressure is not None:
+    elif calibration_status == "ready" and weekly_equivalent is not None:
         status = "ready"
     elif calibration_status == "waiting_for_official":
         status = "stale"
+    elif prior_available and weekly_equivalent is not None:
+        status = "estimated"
     else:
         status = "uncalibrated"
 
     calibration_age = None
     if calibrated_at is not None:
         calibration_age = max(0, int(now - calibrated_at))
+
+    estimate_source = None
+    estimate_confidence = None
+    if empirical:
+        estimate_source = "empirical_weekly_calibration"
+        estimate_confidence = "empirical"
+    elif status == "estimated":
+        estimate_source = "community_plus_prior"
+        estimate_confidence = "low"
+    elif basis == "legacy_uncached_tokens" and calibration_status == "ready":
+        estimate_source = "legacy_uncached_token_calibration"
+        estimate_confidence = "legacy"
 
     return {
         "source": "danus_structured_round_logs",
@@ -471,12 +610,27 @@ def _local_five_hour_proxy(
         "coverage_seconds": coverage,
         "window_complete": window_complete,
         "uncached_tokens": five_hour_tokens,
+        "weighted_credits": round(five_hour_credits, 4),
         "rounds": five_hour_rounds,
+        "credit_rounds": credit_rounds,
         "weekly_equivalent_percent": round(weekly_equivalent, 3) if weekly_equivalent is not None else None,
         "pace_pressure_percent": round(pace_pressure, 1) if pace_pressure is not None else None,
+        "estimated_five_hour_used_percent": (
+            round(estimated_five_hour_used, 1) if estimated_five_hour_used is not None else None
+        ),
+        "estimate_source": estimate_source,
+        "estimate_confidence": estimate_confidence,
+        "prior": {
+            "plan_type": "plus",
+            "source": "community_prior",
+            "confidence": "low",
+            "weekly_budget_credits": _PLUS_PRIOR_WEEKLY_CREDITS,
+            "five_hour_budget_credits": _PLUS_PRIOR_FIVE_HOUR_CREDITS,
+        } if str(plan_type or "").lower() == "plus" else None,
         "calibration": {
             "status": calibration_status,
-            "method": "latest_positive_weekly_delta",
+            "method": "median_last_three_positive_weekly_credit_deltas",
+            "basis": basis or None,
             "max_age_seconds": _CALIBRATION_MAX_AGE_SECONDS,
             "age_seconds": calibration_age,
             "recalibration_reason": recalibration_reason,
@@ -486,6 +640,11 @@ def _local_five_hour_proxy(
             "anchor_observed_at": _iso(anchor_at) if anchor_at is not None else None,
             "anchor_weekly_used_percent": anchor_used,
             "calibrated_at": _iso(calibrated_at) if calibrated_at is not None else None,
+            "credit_samples": [round(x, 6) for x in samples],
+            "credits_per_weekly_percent": (
+                round(credits_per_pct, 6) if credits_per_pct is not None else None
+            ),
+            # Kept for old snapshots/diagnostics; weighted credits are the primary basis.
             "tokens_per_weekly_percent": round(tokens_per_pct, 3) if tokens_per_pct is not None else None,
         },
     }
