@@ -92,6 +92,7 @@ def classify(previous: Optional[Dict[str, Any]], current: Dict[str, Any]) -> Dic
         "verdict": verdict,
         "observed_at": current.get("observed_at"),
         "official_available": bool(current.get("available")),
+        "official_error": str(current.get("error") or "") or None,
         "official_5h_available": bool(current.get("window_available", {}).get("5h"))
         if isinstance(current.get("window_available"), dict)
         else False,
@@ -133,6 +134,8 @@ def _emit(row: Dict[str, Any], *, as_json: bool) -> None:
         f"tokens_per_weekly_pct={row['tokens_per_weekly_percent']}",
         f"proxy={row['proxy_status']}",
     ]
+    if row.get("official_error"):
+        parts.append(f"error={row['official_error']}")
     print(" ".join(parts))
 
 
