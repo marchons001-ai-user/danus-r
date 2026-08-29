@@ -6,10 +6,10 @@ rate-limit query, lets ``danus.orchestration.quota`` update its persisted proxy,
 classifies the result, and appends a compact validation sample under the control
 project's ``supervisor/`` directory.
 
-Use a real Danus scientific worker separately to create the smallest possible
-attributable Codex token pulse. After that pulse, ``--watch-seconds`` can poll the
-quota endpoint without consuming model tokens until the official weekly meter
-moves or the timeout expires.
+The local proxy uses model-weighted Codex credits. Before the coarse official
+weekly meter moves, a Plus community prior can produce PRIOR_READY: useful
+low-confidence telemetry that is deliberately ineligible for Supervisor hard
+quota control. PASS still means empirical weekly calibration is ready.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ _RESET_REASONS = {
     "plan_changed",
     "limit_changed",
 }
-_TERMINAL_VERDICTS = {"PASS", "RESET", "EXTERNAL_USAGE"}
+_TERMINAL_VERDICTS = {"PASS", "PRIOR_READY", "RESET", "EXTERNAL_USAGE"}
 
 
 def _number(value: Any) -> Optional[float]:
@@ -75,7 +75,17 @@ def classify(previous: Optional[Dict[str, Any]], current: Dict[str, Any]) -> Dic
 
     reason = str(calibration.get("recalibration_reason") or "") or None
     tokens_per_pct = _number(calibration.get("tokens_per_weekly_percent"))
+    credits_per_pct = _number(calibration.get("credits_per_weekly_percent"))
     calibration_status = str(calibration.get("status") or "unavailable")
+    proxy_status = str(proxy.get("status") or "")
+    weighted_credits = _number(proxy.get("weighted_credits"))
+    prior_ready = (
+        proxy_status == "estimated"
+        and proxy.get("estimate_source") == "community_plus_prior"
+        and proxy.get("estimate_confidence") == "low"
+        and weighted_credits is not None
+        and weighted_credits > 0
+    )
 
     if not current.get("available") or current_weekly is None:
         verdict = "SENSOR_UNAVAILABLE"
@@ -83,8 +93,16 @@ def classify(previous: Optional[Dict[str, Any]], current: Dict[str, Any]) -> Dic
         verdict = "RESET"
     elif reason == "external_usage":
         verdict = "EXTERNAL_USAGE"
-    elif calibration_status == "ready" and tokens_per_pct is not None and tokens_per_pct > 0:
+    elif (
+        calibration_status == "ready"
+        and (
+            (credits_per_pct is not None and credits_per_pct > 0)
+            or (credits_per_pct is None and tokens_per_pct is not None and tokens_per_pct > 0)
+        )
+    ):
         verdict = "PASS"
+    elif prior_ready:
+        verdict = "PRIOR_READY"
     else:
         verdict = "WAIT"
 
@@ -92,7 +110,7 @@ def classify(previous: Optional[Dict[str, Any]], current: Dict[str, Any]) -> Dic
         "verdict": verdict,
         "observed_at": current.get("observed_at"),
         "official_available": bool(current.get("available")),
-        "official_error": str(current.get("error") or "") or None,
+        "official_error": current.get("error"),
         "official_5h_available": bool(current.get("window_available", {}).get("5h"))
         if isinstance(current.get("window_available"), dict)
         else False,
@@ -105,11 +123,18 @@ def classify(previous: Optional[Dict[str, Any]], current: Dict[str, Any]) -> Dic
         "proxy_status": proxy.get("status"),
         "window_complete": bool(proxy.get("window_complete")),
         "proxy_rounds": int(proxy.get("rounds") or 0),
+        "credit_rounds": int(proxy.get("credit_rounds") or 0),
         "proxy_uncached_tokens": int(proxy.get("uncached_tokens") or 0),
+        "weighted_credits": weighted_credits,
         "weekly_equivalent_percent": _number(proxy.get("weekly_equivalent_percent")),
         "pace_pressure_percent": _number(proxy.get("pace_pressure_percent")),
+        "estimated_five_hour_used_percent": _number(proxy.get("estimated_five_hour_used_percent")),
+        "estimate_source": proxy.get("estimate_source"),
+        "estimate_confidence": proxy.get("estimate_confidence"),
         "calibration_status": calibration_status,
+        "calibration_basis": calibration.get("basis"),
         "calibration_reason": reason,
+        "credits_per_weekly_percent": credits_per_pct,
         "tokens_per_weekly_percent": tokens_per_pct,
         "calibration_age_seconds": calibration.get("age_seconds"),
     }
@@ -128,10 +153,15 @@ def _emit(row: Dict[str, Any], *, as_json: bool) -> None:
         f"weekly_used={row['weekly_used_percent']}",
         f"delta={row['weekly_delta_percent']}",
         f"cal={row['calibration_status']}",
+        f"basis={row['calibration_basis'] or '-'}",
         f"reason={row['calibration_reason'] or '-'}",
         f"rounds={row['proxy_rounds']}",
+        f"credit_rounds={row['credit_rounds']}",
         f"uncached_tokens={row['proxy_uncached_tokens']}",
-        f"tokens_per_weekly_pct={row['tokens_per_weekly_percent']}",
+        f"weighted_credits={row['weighted_credits']}",
+        f"credits_per_weekly_pct={row['credits_per_weekly_percent']}",
+        f"five_hour_est={row['estimated_five_hour_used_percent']}",
+        f"confidence={row['estimate_confidence'] or '-'}",
         f"proxy={row['proxy_status']}",
     ]
     if row.get("official_error"):
@@ -204,7 +234,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             break
         time.sleep(min(args.poll_seconds, remaining))
 
-    if row["verdict"] == "PASS":
+    if row["verdict"] in {"PASS", "PRIOR_READY"}:
         return 0
     if row["verdict"] == "RESET":
         return 3
