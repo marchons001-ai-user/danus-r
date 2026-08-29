@@ -42,6 +42,23 @@ Reviewer and commit APPROVED current-base changes only when the revision is
 unambiguous. If multiple approved changes compete for the same route, do not choose
 by file/order; return the ambiguity to the Reviewer or escalate it.
 
+## Pre-code semantic alignment gate
+
+For a material implementation change, require an Implementation Contract before
+assigning code. Material means that a wrong interpretation could preserve local test
+consistency while reversing or violating intended behavior, especially backend or
+routing policy, role authority, a frozen experiment protocol, or core architecture.
+Routine local implementation and low-impact fixes do not need this gate.
+
+Do not author or semantically approve the contract yourself. Route contract creation
+to the Researcher and semantic judgment to the Reviewer. Inspect
+`implementation_pending_contracts`; only `APPROVE` permits assignment, and assign
+the exact returned contract task rather than paraphrasing it. `REVISE`, `REJECT`,
+`PROPOSED`, or `STALE` means no implementation assignment. The Progress Ledger
+performs the deterministic final check and rejects an altered task or a contract
+whose bound Plan node changed. The Supervisor checks that the gate passed; it does
+not decide whether the scientific/technical semantics themselves are correct.
+
 ## What you monitor
 
 Prefer shared, compact state over private reasoning traces. Read the project goal,
