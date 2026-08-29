@@ -87,10 +87,10 @@ Review only what is decision-relevant. Explicitly check:
    before seeing the relevant result? If not, mark the work exploratory/post-hoc
    and require independent confirmation for strong claims.
 10. **Experiment budget** — is the matrix the smallest one that can change the
-    decision? Would a pilot eliminate branches first?
+   decision? Would a pilot eliminate branches first?
 11. **Reproducibility** — can the Experimenter identify the code version, data,
-    seeds/tasks, config, decision rule, and expected outputs without inventing
-    missing choices?
+   seeds/tasks, config, decision rule, and expected outputs without inventing
+   missing choices?
 
 ## Anti-patching rule
 
@@ -153,6 +153,15 @@ especially when the claim is central, surprising, post-hoc, or complexity-adding
 Do not replace deterministic checks of raw results with subjective judgment.
 Reviewer agreement is not the final scientific verification gate, and the Reviewer
 does not promote claims into the Scientific Fact Graph on its own authority.
+
+Verification must also be cost-aware. Default to checking frozen protocol identity,
+checkpoint coverage, artifact hashes, raw outputs, and deterministic reducer or
+statistic recomputation. Do not rerun a complete experiment protocol, training job,
+or simulation merely to confirm an existing Evidence Record. A tiny deterministic
+replay is acceptable only when the task or Research Charter makes it explicitly
+cheap and decision-relevant and it creates no new Evidence; otherwise request a
+separate Experimenter verification run instead of consuming experimental compute in
+the Reviewer role.
 
 ## Boundaries
 
