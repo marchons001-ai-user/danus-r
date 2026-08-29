@@ -17,10 +17,16 @@ def _commit(plan: ResearchPlanGraph, operations):
     plan.commit_change(change_id, committer="supervisor")
 
 
-def _submit(ledger: ProgressLedger, version: int, *, goal: str = "Keep DSH primary"):
+def _submit(
+    ledger: ProgressLedger,
+    version: int,
+    *,
+    node_id: str = "root",
+    goal: str = "Keep DSH primary",
+):
     return ledger.submit_implementation_contract(
         proposer="researcher",
-        node_id="root",
+        node_id=node_id,
         plan_version=version,
         goal=goal,
         must_preserve_invariants=["Reviewer remains heterogeneous"],
@@ -76,9 +82,16 @@ def test_material_assignment_requires_approved_exact_contract(tmp_path):
 
 def test_revise_and_plan_semantic_change_keep_gate_closed(tmp_path):
     plan = ResearchPlanGraph.create(tmp_path, node_id="root", title="Root")
+    _commit(
+        plan,
+        [
+            {"op": "add_node", "node_id": "a", "title": "Direction A", "summary": "", "parent": "root", "depends_on": []},
+            {"op": "add_node", "node_id": "b", "title": "Direction B", "summary": "", "parent": "root", "depends_on": []},
+        ],
+    )
     ledger = ProgressLedger(tmp_path)
     version = plan.snapshot()["plan_version"]
-    contract = _submit(ledger, version)
+    contract = _submit(ledger, version, node_id="a")
     ledger.review_implementation_contract(
         contract["contract_id"],
         reviewer="reviewer",
@@ -89,22 +102,25 @@ def test_revise_and_plan_semantic_change_keep_gate_closed(tmp_path):
         ledger.assign(
             worker="experimenter",
             role="experimenter",
-            node_id="root",
+            node_id="a",
             plan_version=version,
             task=contract["task"],
         )
 
-    replacement = _submit(ledger, version, goal="Keep DSH primary with bounded Terra fallback")
+    replacement = _submit(
+        ledger,
+        version,
+        node_id="a",
+        goal="Keep DSH primary with bounded Terra fallback",
+    )
     ledger.review_implementation_contract(
         replacement["contract_id"],
         reviewer="reviewer",
         verdict="APPROVE",
         rationale="Aligned.",
     )
-    _commit(
-        plan,
-        [{"op": "update_node", "node_id": "root", "summary": "Changed semantic route"}],
-    )
+    _commit(plan, [{"op": "set_dependencies", "node_id": "a", "depends_on": ["b"]}])
+
     pending = ledger.pending_implementation_contracts()
     assert pending[0]["contract_id"] == replacement["contract_id"]
     assert pending[0]["status"] == "STALE"
@@ -112,7 +128,7 @@ def test_revise_and_plan_semantic_change_keep_gate_closed(tmp_path):
         ledger.assign(
             worker="experimenter",
             role="experimenter",
-            node_id="root",
+            node_id="a",
             plan_version=plan.snapshot()["plan_version"],
             task=replacement["task"],
         )
