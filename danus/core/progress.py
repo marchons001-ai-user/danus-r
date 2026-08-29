@@ -26,6 +26,7 @@ class ProgressLedger:
     NODE_STATES = ("OPEN", "DONE")
     TERMINAL_OUTCOMES = ("COMPLETE", "BLOCKED", "NEEDS_REVIEW")
     RUNTIME_EVENTS = ("STARTED", "EXITED")
+    IMPLEMENTATION_VERDICTS = ("APPROVE", "REVISE", "REJECT")
     _TERMINAL = {"DONE", "STALE"}
 
     def __init__(self, root: Path) -> None:
@@ -35,6 +36,165 @@ class ProgressLedger:
     @staticmethod
     def task_sha256(task: str) -> str:
         return hashlib.sha256(str(task).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def implementation_task(
+        *,
+        goal: str,
+        must_preserve_invariants: List[str],
+        forbidden_behaviors: List[str],
+        acceptance_conditions: List[str],
+    ) -> str:
+        """Render the exact implementation task that receives semantic review."""
+        goal = ProgressLedger._required(goal, "goal")
+        preserve = ProgressLedger._required_list(
+            must_preserve_invariants, "must_preserve_invariants"
+        )
+        forbidden = ProgressLedger._required_list(
+            forbidden_behaviors, "forbidden_behaviors"
+        )
+        acceptance = ProgressLedger._required_list(
+            acceptance_conditions, "acceptance_conditions"
+        )
+        return (
+            "# Implementation Contract\n\n"
+            f"Goal:\n{goal}\n\n"
+            "Must preserve:\n"
+            + "".join(f"- {item}\n" for item in preserve)
+            + "\nForbidden:\n"
+            + "".join(f"- {item}\n" for item in forbidden)
+            + "\nAcceptance:\n"
+            + "".join(f"- {item}\n" for item in acceptance)
+        )
+
+    def submit_implementation_contract(
+        self,
+        *,
+        proposer: str,
+        node_id: str,
+        plan_version: int,
+        goal: str,
+        must_preserve_invariants: List[str],
+        forbidden_behaviors: List[str],
+        acceptance_conditions: List[str],
+    ) -> Dict[str, Any]:
+        """Record one material implementation contract without assigning code work."""
+        proposer = self._required(proposer, "proposer")
+        node_id = self._required(node_id, "node_id")
+        plan = ResearchPlanGraph(self.root)
+        current = plan.snapshot()
+        version = int(plan_version)
+        if version != current["plan_version"]:
+            raise ValueError(
+                f"stale plan_version: {version}; current is {current['plan_version']}"
+            )
+        node = current["nodes"].get(node_id)
+        if node is None:
+            raise ValueError(f"unknown plan node: {node_id}")
+        if node["state"] != "ACTIVE":
+            raise ValueError(f"plan node {node_id} is not ACTIVE")
+
+        preserve = self._required_list(
+            must_preserve_invariants, "must_preserve_invariants"
+        )
+        forbidden = self._required_list(forbidden_behaviors, "forbidden_behaviors")
+        acceptance = self._required_list(
+            acceptance_conditions, "acceptance_conditions"
+        )
+        task = self.implementation_task(
+            goal=goal,
+            must_preserve_invariants=preserve,
+            forbidden_behaviors=forbidden,
+            acceptance_conditions=acceptance,
+        )
+        submitted_at = utc_now()
+        contract_id = self._content_id(
+            {
+                "node_id": node_id,
+                "plan_version": version,
+                "task_sha256": self.task_sha256(task),
+                "proposer": proposer,
+                "submitted_at": submitted_at,
+            }
+        )
+        event = {
+            "event": "IMPLEMENTATION_CONTRACT",
+            "contract_id": contract_id,
+            "node_id": node_id,
+            "plan_version": version,
+            "task_sha256": self.task_sha256(task),
+            "task": task,
+            "goal": self._required(goal, "goal"),
+            "must_preserve_invariants": preserve,
+            "forbidden_behaviors": forbidden,
+            "acceptance_conditions": acceptance,
+            "proposer": proposer,
+            "at": submitted_at,
+        }
+        append_jsonl(self.path, event)
+        return self.implementation_contract(contract_id) or event
+
+    def review_implementation_contract(
+        self,
+        contract_id: str,
+        *,
+        reviewer: str,
+        verdict: str,
+        rationale: str,
+    ) -> Dict[str, Any]:
+        """Record the Reviewer's one-shot semantic verdict for a contract."""
+        contract_id = self._required(contract_id, "contract_id")
+        reviewer = self._required(reviewer, "reviewer")
+        verdict = str(verdict).strip().upper()
+        if verdict not in self.IMPLEMENTATION_VERDICTS:
+            raise ValueError(f"verdict must be one of {self.IMPLEMENTATION_VERDICTS}")
+        rationale = self._required(rationale, "rationale")
+        current = self.implementation_contract(contract_id)
+        if current is None:
+            raise ValueError(f"unknown implementation contract: {contract_id}")
+        if current["status"] != "PROPOSED":
+            raise ValueError(
+                f"implementation contract {contract_id} is {current['status']}; expected PROPOSED"
+            )
+        append_jsonl(
+            self.path,
+            {
+                "event": "IMPLEMENTATION_REVIEW",
+                "contract_id": contract_id,
+                "reviewer": reviewer,
+                "verdict": verdict,
+                "rationale": rationale,
+                "at": utc_now(),
+            },
+        )
+        return self.implementation_contract(contract_id) or current
+
+    def implementation_contract(self, contract_id: str) -> Optional[Dict[str, Any]]:
+        records, _ = self._replay_implementation_contracts()
+        record = records.get(str(contract_id).strip())
+        return self._implementation_contract_view(record) if record else None
+
+    def pending_implementation_contracts(self) -> List[Dict[str, Any]]:
+        """Return the latest unconsumed semantic gate per plan node."""
+        records, order = self._replay_implementation_contracts()
+        latest_by_node: Dict[str, str] = {}
+        for contract_id in order:
+            record = records.get(contract_id)
+            if record:
+                latest_by_node[record["node_id"]] = contract_id
+        out: List[Dict[str, Any]] = []
+        for node_id in sorted(latest_by_node):
+            record = records[latest_by_node[node_id]]
+            view = self._implementation_contract_view(record)
+            if view["status"] != "CONSUMED":
+                out.append(view)
+        return out
+
+    def _active_implementation_contract(self, node_id: str) -> Optional[Dict[str, Any]]:
+        for record in self.pending_implementation_contracts():
+            if record["node_id"] == node_id:
+                return record
+        return None
 
     def assign(
         self,
@@ -65,6 +225,17 @@ class ProgressLedger:
         if node["state"] != "ACTIVE":
             raise ValueError(f"plan node {node_id} is not ACTIVE")
 
+        implementation_contract = self._active_implementation_contract(node_id)
+        if implementation_contract is not None:
+            status = implementation_contract["status"]
+            if status != "APPROVE":
+                raise ValueError(
+                    f"implementation contract {implementation_contract['contract_id']} "
+                    f"requires APPROVE; current status is {status}"
+                )
+            if self.task_sha256(task) != implementation_contract["task_sha256"]:
+                raise ValueError("assigned task does not match approved implementation contract")
+
         previous = self.current(worker, refresh_stale=True)
         if previous and previous["state"] not in self._TERMINAL:
             self._append_state(
@@ -84,6 +255,8 @@ class ProgressLedger:
             "task_sha256": task_hash,
             "assigned_at": assigned_at,
         }
+        if implementation_contract is not None:
+            identity["implementation_contract_id"] = implementation_contract["contract_id"]
         assignment_id = self._content_id(identity)
         event = {
             "event": "ASSIGNED",
@@ -296,6 +469,60 @@ class ProgressLedger:
         assignments, _ = self._replay_assignments()
         return list(assignments.values())
 
+    def _implementation_contract_view(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        view = dict(record)
+        if view.get("consumed_by_assignment_id"):
+            view["status"] = "CONSUMED"
+        elif self._implementation_contract_stale(view):
+            view["status"] = "STALE"
+        else:
+            view["status"] = str(view.get("verdict") or "PROPOSED")
+        return view
+
+    def _implementation_contract_stale(self, record: Dict[str, Any]) -> bool:
+        plan = ResearchPlanGraph(self.root)
+        current = plan.snapshot()
+        if current["plan_version"] == record["plan_version"]:
+            return False
+        try:
+            old = plan.revision(record["plan_version"])
+        except ValueError:
+            return True
+        old_node = old["nodes"].get(record["node_id"])
+        new_node = current["nodes"].get(record["node_id"])
+        if old_node is None or new_node is None or new_node["state"] != "ACTIVE":
+            return True
+        return old_node != new_node
+
+    def _replay_implementation_contracts(
+        self,
+    ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+        records: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+        for event in read_jsonl(self.path):
+            kind = event.get("event")
+            contract_id = str(event.get("contract_id") or "")
+            if kind == "IMPLEMENTATION_CONTRACT":
+                if not contract_id:
+                    continue
+                record = dict(event)
+                record.pop("event", None)
+                record["verdict"] = ""
+                records[contract_id] = record
+                order.append(contract_id)
+            elif kind == "IMPLEMENTATION_REVIEW" and contract_id in records:
+                record = records[contract_id]
+                record["verdict"] = str(event.get("verdict") or "").upper()
+                record["reviewer"] = str(event.get("reviewer") or "")
+                record["rationale"] = str(event.get("rationale") or "")
+                record["reviewed_at"] = event.get("at")
+            elif kind == "ASSIGNED":
+                linked = str(event.get("implementation_contract_id") or "")
+                if linked in records:
+                    records[linked]["consumed_by_assignment_id"] = event.get("assignment_id")
+                    records[linked]["consumed_at"] = event.get("at")
+        return records, order
+
     def _is_plan_stale(self, record: Dict[str, Any]) -> bool:
         plan = ResearchPlanGraph(self.root)
         current = plan.snapshot()
@@ -355,6 +582,11 @@ class ProgressLedger:
                     "actor": event.get("actor"),
                     "note": str(event.get("note") or ""),
                 }
+                implementation_contract_id = str(
+                    event.get("implementation_contract_id") or ""
+                )
+                if implementation_contract_id:
+                    record["implementation_contract_id"] = implementation_contract_id
                 if not record["worker"] or not record["node_id"]:
                     continue
                 assignments[aid] = record
@@ -385,6 +617,13 @@ class ProgressLedger:
         if not text:
             raise ValueError(f"{field} is required")
         return text
+
+    @staticmethod
+    def _required_list(values: List[str], field: str) -> List[str]:
+        out = [str(value).strip() for value in (values or []) if str(value).strip()]
+        if not out:
+            raise ValueError(f"{field} requires at least one item")
+        return out
 
     @staticmethod
     def _content_id(payload: Dict[str, Any]) -> str:
