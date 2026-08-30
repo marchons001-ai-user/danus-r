@@ -8,6 +8,7 @@ from pathlib import Path
 from danus.core import ProgressLedger, ResearchPlanGraph
 from danus.execution import layout as L
 from danus.orchestration import cli
+from danus.orchestration.control import reconcile
 
 
 @contextmanager
@@ -165,5 +166,25 @@ def test_missing_auto_task_preserves_manual_pending_assignment(tmp_path: Path):
         assert report["autonomy_applied"] == []
         pending = next(x for x in report["applied"] if x["action"] == "RETASK")
         assert pending["result"] == "pending_assignment"
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def test_superseded_done_assignment_does_not_review_new_worker_task(tmp_path: Path):
+    ctx, pdir = _project(tmp_path)
+    try:
+        ledger = ProgressLedger(pdir)
+        old = ledger.assign(
+            worker="low2", role="reviewer", node_id="P0", plan_version=2, task="old plan review\n"
+        )
+        ledger.update(worker="low2", state="DONE", actor="runtime", outcome="COMPLETE")
+        ledger.set_node_state("A", state="DONE", actor="supervisor")
+        new = ledger.assign(
+            worker="low2", role="reviewer", node_id="B", plan_version=2, task="new node review\n"
+        )
+
+        report = reconcile(pdir, cli._project_rows("P"))
+        assert not any(d.get("assignment_id") == old["assignment_id"] for d in report["decisions"])
+        assert any(d.get("assignment_id") == new["assignment_id"] for d in report["decisions"])
     finally:
         ctx.__exit__(None, None, None)
