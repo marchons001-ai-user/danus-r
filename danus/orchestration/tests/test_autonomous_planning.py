@@ -101,6 +101,40 @@ def test_rejected_proposal_routes_revision_to_researcher(tmp_path: Path, monkeyp
         assert "Revise Autonomous Research Plan" in L.WorkerLayout(L.worker_dir("P", "low")).task.read_text()
 
 
+def test_invalid_proposal_routes_deterministic_repair_to_researcher(tmp_path: Path, monkeypatch):
+    with _root(tmp_path):
+        monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+        init = planning.initialize_research("P", brief="Study a bounded scientific question.")
+        pdir = L.project_dir("P")
+        _finish("P", "low")
+        path = Path(init["proposal_handoff"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "base_plan_version": 1,
+            "reason": "minimal route",
+            "post_hoc": False,
+            "evidence_refs": [],
+            "operations": [{
+                "op": "add_node", "node_id": "R1", "title": "Research",
+                "summary": "x" * 101, "parent": "P0", "depends_on": [],
+            }],
+            "tasks": [{"node_id": "R1", "role": "researcher", "task": "research task"}],
+        }), encoding="utf-8")
+
+        actions = planning.planning_step("P")
+        blocked = next(x for x in actions if x["action"] == "PLAN_PROPOSAL")
+        repair = next(x for x in actions if x["action"] == "PLAN_REPAIR")
+        assert blocked["result"] == "blocked"
+        assert "summary exceeds 100 characters" in blocked["reason"]
+        assert repair["result"] == "assigned"
+        current = ProgressLedger(pdir).current("low")
+        assert current and current["state"] == "ASSIGNED"
+        task = L.WorkerLayout(L.worker_dir("P", "low")).task.read_text()
+        assert "summary exceeds 100 characters" in task
+        assert "summary` is at most 100 characters" in task
+        assert ResearchPlanGraph(pdir).pending_changes() == []
+
+
 def test_proposal_requires_exact_tasks_for_changed_leaves(tmp_path: Path, monkeypatch):
     with _root(tmp_path):
         monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
@@ -118,4 +152,5 @@ def test_proposal_requires_exact_tasks_for_changed_leaves(tmp_path: Path, monkey
         actions = planning.planning_step("P")
         blocked = next(x for x in actions if x["action"] == "PLAN_PROPOSAL")
         assert blocked["result"] == "blocked"
+        assert any(x["action"] == "PLAN_REPAIR" for x in actions)
         assert ResearchPlanGraph(pdir).pending_changes() == []
