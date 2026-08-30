@@ -135,7 +135,9 @@ def test_invalid_proposal_routes_deterministic_repair_to_researcher(tmp_path: Pa
         current = ProgressLedger(pdir).current("low")
         assert current and current["state"] == "ASSIGNED"
         task = L.WorkerLayout(L.worker_dir("P", "low")).task.read_text()
-        assert "summary exceeds 100 characters" in task
+        repair_error = json.loads(planning._repair_error_path(pdir).read_text(encoding="utf-8"))
+        assert "summary exceeds 100 characters" in repair_error["reason"]
+        assert str(planning._repair_error_path(pdir)) in task
         assert "summary` is at most 100 characters" in task
         assert ResearchPlanGraph(pdir).pending_changes() == []
 
@@ -162,7 +164,7 @@ def test_repair_retries_once_then_stops_spending(tmp_path: Path, monkeypatch):
         assert third["assignment_id"] == second["assignment_id"]
         repairs = [
             a for a in ProgressLedger(L.project_dir("P")).assignments()
-            if a.get("task_sha256") == ProgressLedger.task_sha256(planning._repair_task(L.project_dir("P"), "summary exceeds 100 characters"))
+            if a.get("task_sha256") == ProgressLedger.task_sha256(planning._repair_task(L.project_dir("P")))
         ]
         assert len(repairs) == 2
 
