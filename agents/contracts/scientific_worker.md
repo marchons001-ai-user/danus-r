@@ -31,9 +31,10 @@ authority.
 ## Human steering
 
 At the start of every scientific round, the runtime injects the current durable
-`HUMAN_GUIDANCE.md` content inside `<CURRENT_HUMAN_GUIDANCE>` when guidance exists.
-Treat that injected block as the latest explicit human steering for the project; do
-not spend a tool call rereading the file merely to rediscover the same text.
+Human Guidance inside `<CURRENT_HUMAN_GUIDANCE>` when guidance exists. Its durable
+source is `../../HUMAN_GUIDANCE.md` relative to the worker home. Treat the injected
+block as the latest explicit human steering for the project; do not spend a tool
+call rereading the file merely to rediscover the same text.
 
 Human Guidance does **not** itself mutate the Research Plan, Progress Ledger, task
 binding, evidence status, or role authority. If following it requires a material
