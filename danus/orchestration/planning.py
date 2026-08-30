@@ -27,6 +27,7 @@ from . import cli
 BRIEF_FILE = "RESEARCH_BRIEF.md"
 _PROPOSAL_REL = Path(".danus") / "plan_proposal.json"
 _POLICY_MARKER = "<!-- DANUS_AUTONOMOUS_PLANNING -->"
+_MAX_REPAIR_ATTEMPTS = 2
 
 
 def _role_value(wl: L.WorkerLayout, key: str) -> str:
@@ -441,25 +442,43 @@ def _repair_task(pdir: Path, reason: str) -> str:
     )
 
 
-def _assignment_for_task(pdir: Path, task: str) -> Optional[Dict[str, Any]]:
+def _task_assignments(pdir: Path, task: str) -> List[Dict[str, Any]]:
     digest = ProgressLedger.task_sha256(task)
     matches = [a for a in ProgressLedger(pdir).assignments() if a.get("task_sha256") == digest]
-    if not matches:
-        return None
     matches.sort(key=lambda item: str(item.get("assigned_at") or ""))
-    return matches[-1]
+    return matches
+
+
+def _assignment_for_task(pdir: Path, task: str) -> Optional[Dict[str, Any]]:
+    matches = _task_assignments(pdir, task)
+    return matches[-1] if matches else None
 
 
 def _assign_role(project: str, role: str, task: str, node_id: str) -> Dict[str, Any]:
     pdir = L.project_dir(project)
-    existing = _assignment_for_task(pdir, task)
-    if existing:
+    matches = _task_assignments(pdir, task)
+    existing = matches[-1] if matches else None
+    is_repair = task.startswith("# Repair Autonomous Plan Proposal\n")
+    retry = bool(
+        is_repair
+        and existing
+        and existing.get("state") in {"DONE", "BLOCKED"}
+        and len(matches) < _MAX_REPAIR_ATTEMPTS
+    )
+    if existing and not retry:
+        result = (
+            "repair_exhausted"
+            if is_repair
+            and existing.get("state") in {"DONE", "BLOCKED"}
+            and len(matches) >= _MAX_REPAIR_ATTEMPTS
+            else "existing"
+        )
         return {
             "action": "PLAN_ASSIGN",
             "role": role,
             "worker": existing.get("worker"),
             "assignment_id": existing.get("assignment_id"),
-            "result": "existing",
+            "result": result,
             "state": existing.get("state"),
             "outcome": existing.get("outcome"),
         }
@@ -467,7 +486,7 @@ def _assign_role(project: str, role: str, task: str, node_id: str) -> Dict[str, 
     if wl is None:
         return {"action": "PLAN_ASSIGN", "role": role, "result": "no_idle_worker"}
     assignment = cli.do_assign(f"{project}/{wl.name}", task, node_id=node_id)
-    return {
+    out = {
         "action": "PLAN_ASSIGN",
         "role": role,
         "worker": wl.name,
@@ -475,6 +494,9 @@ def _assign_role(project: str, role: str, task: str, node_id: str) -> Dict[str, 
         "result": "assigned",
         "start_result": cli._start_one(wl),
     }
+    if is_repair:
+        out["attempt"] = len(matches) + 1
+    return out
 
 
 def _review_assignment(pdir: Path, change: Dict[str, Any], proposal_id: str) -> Optional[Dict[str, Any]]:
