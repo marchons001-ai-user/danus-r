@@ -12,6 +12,7 @@ output signal used by the context token guard when the structured fields exist.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
@@ -26,10 +27,6 @@ CHECKPOINT_NAME = "agent_checkpoint.json"
 MIGRATION_NAME = "context_migration.json"
 ROLLOVER_NAME = ".context_rollover.json"
 
-# Conservative defaults for one scientific reasoning session. Operators can
-# override the four limits without introducing a separate config format. Zero
-# disables that signal. The token limit is a conservative usage-growth proxy,
-# not an exact Codex context-window occupancy measurement.
 _DEFAULT_TOKENS = 60_000
 _DEFAULT_TOOL_CALLS = 64
 _DEFAULT_COMPACTIONS = 2
@@ -57,6 +54,45 @@ _USAGE_FIELDS = (
 )
 
 
+def _empty_telemetry() -> Dict[str, Any]:
+    return {
+        "structured": False,
+        "thread_id": None,
+        "tokens": 0,
+        "uncached_tokens": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "tool_calls": 0,
+        "compactions": 0,
+        "last_agent_message": "",
+    }
+
+
+@dataclass
+class LogCursor:
+    """Ephemeral cursor for one growing round log; never persisted."""
+
+    offset: int = 0
+    remainder: bytes = b""
+    tools: set[str] = field(default_factory=set)
+    compactions: set[str] = field(default_factory=set)
+    telemetry: Dict[str, Any] = field(default_factory=_empty_telemetry)
+    structured_usage: bool = False
+    raw_tail: str = ""
+
+    def reset(self) -> None:
+        self.offset = 0
+        self.remainder = b""
+        self.tools.clear()
+        self.compactions.clear()
+        self.telemetry = _empty_telemetry()
+        self.structured_usage = False
+        self.raw_tail = ""
+
+
 def _positive_env(name: str, default: int) -> int:
     try:
         value = int(os.environ.get(name, str(default)))
@@ -74,102 +110,106 @@ def limits() -> Dict[str, int]:
     }
 
 
-def inspect_log(path: Path) -> Dict[str, Any]:
-    """Extract only machine-readable Codex JSONL telemetry when available.
-
-    DSH currently has no equivalent event stream, so it degrades to runtime-only
-    lifecycle control. Codex usage fields are preserved separately because
-    ``input_tokens`` includes cached input and is cumulative across model calls in
-    one exec turn; it must not be mistaken for exact context-window occupancy.
-    The historical final ``tokens used`` line is accepted as a fallback total, but
-    no natural-language tool/compaction guessing is done.
-    """
-    out: Dict[str, Any] = {
-        "structured": False,
-        "thread_id": None,
-        "tokens": 0,
-        "uncached_tokens": 0,
-        "input_tokens": 0,
-        "cached_input_tokens": 0,
-        "cache_write_input_tokens": 0,
-        "output_tokens": 0,
-        "reasoning_output_tokens": 0,
-        "tool_calls": 0,
-        "compactions": 0,
-        "last_agent_message": "",
-    }
+def _consume_line(cursor: LogCursor, line: str) -> None:
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        event = json.loads(line)
+    except (json.JSONDecodeError, TypeError):
+        match = _TOKEN_LINE_RE.search(line)
+        if match and not cursor.structured_usage:
+            try:
+                value = int(match.group(1).replace(",", ""))
+            except ValueError:
+                return
+            cursor.telemetry["tokens"] = value
+            cursor.telemetry["uncached_tokens"] = value
+        return
+    if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+        return
+
+    out = cursor.telemetry
+    out["structured"] = True
+    etype = event["type"]
+    if etype == "thread.started" and isinstance(event.get("thread_id"), str):
+        out["thread_id"] = event["thread_id"]
+    elif etype == "turn.completed":
+        usage = event.get("usage")
+        if isinstance(usage, dict):
+            inp = usage.get("input_tokens")
+            output = usage.get("output_tokens")
+            if isinstance(inp, int) and isinstance(output, int):
+                cursor.structured_usage = True
+                for key in _USAGE_FIELDS:
+                    value = usage.get(key)
+                    if isinstance(value, int):
+                        out[key] = max(out[key], max(0, value))
+                out["tokens"] = max(out["tokens"], max(0, inp) + max(0, output))
+    elif etype.startswith("item."):
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return
+        item_type = str(item.get("type") or "")
+        item_id = str(item.get("id") or f"{item_type}:{len(cursor.tools) + len(cursor.compactions)}")
+        if item_type in _TOOL_ITEM_TYPES:
+            cursor.tools.add(item_id)
+        if "compaction" in item_type.lower():
+            cursor.compactions.add(item_id)
+        if etype == "item.completed" and item_type == "agent_message":
+            msg = item.get("text")
+            if isinstance(msg, str):
+                out["last_agent_message"] = msg[-8000:]
+
+
+def inspect_log(path: Path, cursor: Optional[LogCursor] = None) -> Dict[str, Any]:
+    """Extract Codex JSONL telemetry; optionally consume only newly appended bytes.
+
+    Callers that omit ``cursor`` retain the historical one-shot behavior. A live
+    round may reuse one cursor so polling cost is proportional to new log output,
+    not the whole growing file.
+    """
+    own_cursor = cursor is None
+    cur = cursor or LogCursor()
+    p = Path(path)
+    try:
+        size = p.stat().st_size
+        if size < cur.offset:
+            cur.reset()
+        with p.open("rb") as handle:
+            handle.seek(cur.offset)
+            data = handle.read()
+            cur.offset = handle.tell()
     except OSError:
-        return out
+        return dict(cur.telemetry)
 
-    tools = set()
-    compactions = set()
-    structured_usage = False
-    for line in text.splitlines():
-        try:
-            event = json.loads(line)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
-            continue
-        out["structured"] = True
-        etype = event["type"]
-        if etype == "thread.started" and isinstance(event.get("thread_id"), str):
-            out["thread_id"] = event["thread_id"]
-        elif etype == "turn.completed":
-            usage = event.get("usage")
-            if isinstance(usage, dict):
-                inp = usage.get("input_tokens")
-                output = usage.get("output_tokens")
-                if isinstance(inp, int) and isinstance(output, int):
-                    structured_usage = True
-                    for key in _USAGE_FIELDS:
-                        value = usage.get(key)
-                        if isinstance(value, int):
-                            out[key] = max(out[key], max(0, value))
-                    out["tokens"] = max(out["tokens"], max(0, inp) + max(0, output))
-        elif etype.startswith("item."):
-            item = event.get("item")
-            if not isinstance(item, dict):
-                continue
-            item_type = str(item.get("type") or "")
-            item_id = str(item.get("id") or f"{item_type}:{len(tools) + len(compactions)}")
-            if item_type in _TOOL_ITEM_TYPES:
-                tools.add(item_id)
-            if "compaction" in item_type.lower():
-                compactions.add(item_id)
-            if etype == "item.completed" and item_type == "agent_message":
-                msg = item.get("text")
-                if isinstance(msg, str):
-                    out["last_agent_message"] = msg[-8000:]
+    if data:
+        cur.raw_tail = (cur.raw_tail + data.decode("utf-8", errors="replace"))[-4000:]
+    merged = cur.remainder + data
+    lines = merged.split(b"\n")
+    cur.remainder = lines.pop() if lines else b""
+    for raw in lines:
+        _consume_line(cur, raw.decode("utf-8", errors="replace").rstrip("\r"))
 
-    out["tool_calls"] = len(tools)
-    out["compactions"] = len(compactions)
-    if structured_usage:
+    # A one-shot read is over a stable file, so parse a final non-newline-terminated
+    # record as well. Live cursors keep it until the writer completes the line.
+    if own_cursor and cur.remainder:
+        _consume_line(cur, cur.remainder.decode("utf-8", errors="replace").rstrip("\r"))
+        cur.remainder = b""
+
+    out = cur.telemetry
+    out["tool_calls"] = len(cur.tools)
+    out["compactions"] = len(cur.compactions)
+    if cur.structured_usage:
         uncached_input = max(0, out["input_tokens"] - out["cached_input_tokens"])
         out["uncached_tokens"] = uncached_input + out["output_tokens"]
-    if not out["tokens"]:
-        matches = _TOKEN_LINE_RE.findall(text)
-        if matches:
-            try:
-                out["tokens"] = int(matches[-1].replace(",", ""))
-                out["uncached_tokens"] = out["tokens"]
-            except ValueError:
-                pass
-    if not out["last_agent_message"] and text:
-        out["last_agent_message"] = text[-4000:]
-    return out
+    result = dict(out)
+    if not result["last_agent_message"] and cur.raw_tail:
+        result["last_agent_message"] = cur.raw_tail
+    return result
 
 
 def budget_reason(telemetry: Dict[str, Any], elapsed_s: float) -> Optional[str]:
     cap = limits()
     total_tokens = int(telemetry.get("tokens") or 0)
     if "uncached_tokens" in telemetry:
-        # ``run_round`` deliberately zeros legacy ``tokens`` while a process is
-        # still alive to avoid the turn.completed/process-exit race. Taking the
-        # smaller signal preserves that boundary while using uncached usage after
-        # normal completion.
         token_value = min(total_tokens, int(telemetry.get("uncached_tokens") or 0))
     else:
         token_value = total_tokens
@@ -222,7 +262,6 @@ def write_checkpoint(
     trigger: Optional[str] = None,
     migration: Optional[Dict[str, Any]] = None,
 ) -> Path:
-    """Persist bounded runtime-owned recovery state after a scientific round."""
     wdir = Path(worker_dir)
     assignment = _assignment(wdir)
     telemetry_out = {
@@ -255,7 +294,6 @@ def write_checkpoint(
 
 
 def checkpoint_for_prompt(worker_dir: Path, role: str) -> Optional[Dict[str, Any]]:
-    """Return a checkpoint only when it still belongs to this exact task/role."""
     path = _path(worker_dir, CHECKPOINT_NAME)
     try:
         obj = json.loads(path.read_text(encoding="utf-8"))
@@ -267,7 +305,6 @@ def checkpoint_for_prompt(worker_dir: Path, role: str) -> Optional[Dict[str, Any
         return None
     if obj.get("role") != role or obj.get("task_sha256") != _task_hash(worker_dir):
         return None
-    # Keep prompt injection bounded even if a file was manually edited.
     if len(json.dumps(obj, ensure_ascii=False)) > 20_000:
         return None
     return obj
@@ -296,7 +333,6 @@ def migration_path(worker_dir: Path) -> Path:
 
 
 def load_migration(worker_dir: Path) -> Optional[Dict[str, Any]]:
-    """Validate and bound the semantic migration object written by the model."""
     path = migration_path(worker_dir)
     try:
         obj = json.loads(path.read_text(encoding="utf-8"))
