@@ -25,6 +25,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import json
 import os
@@ -50,25 +51,54 @@ _TOKEN_USAGE_SEMANTICS = "completed_turn_usage_not_context_window"
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
     "do_supervise", "watch_supervisor", "do_pause", "do_resume",
-    "do_list", "do_stop", "do_finalize", "build_parser", "main",
+    "do_list", "do_stop", "do_finalize", "project_control_lock", "build_parser", "main",
 ]
+
+
+@contextmanager
+def project_control_lock(project_dir: Path):
+    """Serialize one project's durable control-plane mutations across processes."""
+    path = Path(project_dir) / "supervisor" / ".control.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 # --------------------------------------------------------------------------- #
 # read helpers                                                                 #
 # --------------------------------------------------------------------------- #
 
-def _read_pid(wl: L.WorkerLayout) -> Optional[int]:
+def _read_pid_record(wl: L.WorkerLayout) -> tuple[Optional[int], Optional[str]]:
     pf = wl.pid
     if not pf.exists():
-        return None
+        return None, None
     try:
-        return int(pf.read_text().strip())
+        parts = pf.read_text().split()
+        if not parts:
+            return None, None
+        return int(parts[0]), parts[1] if len(parts) > 1 else None
     except (ValueError, OSError):
-        return None
+        return None, None
 
 
-def _alive(pid: Optional[int]) -> bool:
+def _read_pid(wl: L.WorkerLayout) -> Optional[int]:
+    return _read_pid_record(wl)[0]
+
+
+def _proc_state_start(pid: int) -> tuple[Optional[str], Optional[str]]:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        # fields[0] is proc field 3 (state), so field 22 (starttime) is index 19.
+        return fields[0], fields[19]
+    except (OSError, IndexError):
+        return None, None
+
+
+def _alive(pid: Optional[int], expected_start: Optional[str] = None) -> bool:
     if not pid:
         return False
     try:
@@ -76,15 +106,23 @@ def _alive(pid: Optional[int]) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # exists but not ours
-    # The pid exists — but a zombie (killed, not yet reaped by its parent) is
-    # effectively dead. Linux /proc tells us the process state.
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-        state = stat.rsplit(")", 1)[1].split()[0]  # field after "(comm)"
-        return state != "Z"
-    except (OSError, IndexError):
-        return True
+        return expected_start is None
+    state, start = _proc_state_start(pid)
+    if state == "Z":
+        return False
+    if expected_start is not None and start != expected_start:
+        return False
+    return state is not None or expected_start is None
+
+
+def _worker_alive(wl: L.WorkerLayout) -> bool:
+    pid, expected_start = _read_pid_record(wl)
+    return _alive(pid, expected_start)
+
+
+def _write_pid(wl: L.WorkerLayout, pid: int) -> None:
+    _, start = _proc_state_start(pid)
+    atomic_write(wl.pid, f"{pid} {start}\n" if start is not None else f"{pid}\n")
 
 
 def _read_status(wl: L.WorkerLayout) -> Dict:
@@ -407,12 +445,12 @@ def _start_one(wl: L.WorkerLayout) -> str:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return "locked"
-        if _alive(_read_pid(wl)):
+        if _worker_alive(wl):
             return "already-running"
         _prepare_reviewer_backend(wl)
         wl.stop.unlink(missing_ok=True)
         pid = spawn_loop(wl.dir)
-        atomic_write(wl.pid, str(pid))
+        _write_pid(wl, pid)
         return "started"
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
@@ -437,7 +475,7 @@ def do_start(target: str, stagger: float = 0.2) -> List[Dict]:
 
 def worker_status(wl: L.WorkerLayout) -> Dict:
     pid = _read_pid(wl)
-    alive = _alive(pid)
+    alive = _worker_alive(wl)
     st = _read_status(wl)
     state = st.get("state", "—")
     now = time.time()
@@ -467,9 +505,6 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         except (FileNotFoundError, ValueError) as exc:
             progress_error = str(exc)
 
-    # Codex exposes completed-turn usage; DSH headless currently does not expose a
-    # stable usage stream. An auto Reviewer may also have mixed DSH/Terra history,
-    # so its cumulative total is conservatively incomplete after it has run.
     backend = _selected_worker_backend(wl)
     round_no = int(st.get("round") or 0)
     usage_available = backend != "dsh" and any(
@@ -516,8 +551,6 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         "usage_available": usage_available,
         "usage_complete": usage_complete,
         "token_semantics": _TOKEN_USAGE_SEMANTICS,
-        # Compatibility aliases. They intentionally become null when usage is
-        # unknown rather than claiming that DSH used zero tokens/tool calls.
         "context_tokens": round_usage_tokens,
         "context_tokens_total": usage_tokens_total,
         "context_tool_calls": usage_tool_calls,
@@ -628,7 +661,6 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
                 "tool_calls": row.get("usage_tool_calls"),
                 "compactions": row.get("usage_compactions"),
                 "rollover": row.get("context_trigger"),
-                # Compatibility aliases for existing consumers.
                 "tokens": row.get("round_usage_tokens"),
                 "tokens_total": row.get("usage_tokens_total"),
             }
@@ -683,8 +715,6 @@ def _apply_quota_gate(project: str, rows: List[Dict[str, Any]], policy: Dict[str
                 continue
             if not quota_owned:
                 atomic_write(wl.pause, f"quota:{state}:{reason}\n")
-            # .stop is already the worker loop's safe round boundary: it is checked
-            # before the next model round. Do not SIGTERM an active round for quota.
             if row.get("alive"):
                 wl.stop.touch()
             applied.append({"worker": row["worker"], "result": "pause-at-round-boundary"})
@@ -728,8 +758,6 @@ def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -
             if worker:
                 result = _start_one(L.WorkerLayout(L.worker_dir(project, worker)))
             else:
-                # A ready node has no task text or scientific role encoded in Plan.
-                # Deterministic Supervisor must not invent either.
                 result = "pending_assignment"
         elif action == "STOP":
             if worker:
@@ -767,7 +795,7 @@ def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -
     )
 
 
-def do_supervise(
+def _do_supervise_unlocked(
     project: str,
     *,
     complete_node: Optional[str] = None,
@@ -776,12 +804,6 @@ def do_supervise(
     token_budget: int = 0,
     trigger: str = "manual",
 ) -> Dict:
-    """Run one deterministic Supervisor reconciliation pass.
-
-    ``--complete-node`` / ``--reopen-node`` update only Progress Ledger node state;
-    they never revise the Research Plan. With ``apply=True`` the existing
-    CONTINUE/REVIEW/RETASK/STOP decisions are executed as process-control actions.
-    """
     pdir = L.project_dir(project)
     if not pdir.is_dir():
         raise SystemExit(f"no such project: {project}")
@@ -830,8 +852,30 @@ def do_supervise(
         raise SystemExit(f"cannot reconcile project: {exc}") from exc
 
 
+def do_supervise(
+    project: str,
+    *,
+    complete_node: Optional[str] = None,
+    reopen_node: Optional[str] = None,
+    apply: bool = False,
+    token_budget: int = 0,
+    trigger: str = "manual",
+) -> Dict:
+    """Run one serialized deterministic Supervisor reconciliation pass."""
+    pdir = L.project_dir(project)
+    if not pdir.is_dir():
+        return _do_supervise_unlocked(
+            project, complete_node=complete_node, reopen_node=reopen_node,
+            apply=apply, token_budget=token_budget, trigger=trigger,
+        )
+    with project_control_lock(pdir):
+        return _do_supervise_unlocked(
+            project, complete_node=complete_node, reopen_node=reopen_node,
+            apply=apply, token_budget=token_budget, trigger=trigger,
+        )
+
+
 def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[str, Any]) -> str:
-    """Small change signature; age_s is deliberately excluded so idle time is not an event."""
     pdir = L.project_dir(project)
     compact_rows = [
         {k: row.get(k) for k in (
@@ -880,7 +924,6 @@ def watch_supervisor(
     poll: float = 1.0,
     token_budget: int = 0,
 ) -> Iterator[Dict[str, Any]]:
-    """Change-driven long-running Supervisor with quota refresh at safe boundaries."""
     if heartbeat <= 0:
         raise SystemExit("heartbeat must be > 0")
     if poll <= 0:
@@ -924,8 +967,6 @@ def watch_supervisor(
                 for item in report.get("autonomy_applied", [])
             )
             if autonomy_changed:
-                # Let the next poll observe our durable assignment/completion
-                # transition so dependent nodes advance without waiting heartbeat.
                 last_signature = signature
             else:
                 rows = _project_rows(project)
@@ -942,7 +983,6 @@ def watch_supervisor(
 # --------------------------------------------------------------------------- #
 
 def do_list() -> List[Dict]:
-    """One row per project: roster + how many workers are live + model."""
     out: List[Dict] = []
     for project in L.list_projects():
         meta = {}
@@ -953,8 +993,10 @@ def do_list() -> List[Dict]:
             except (json.JSONDecodeError, OSError):
                 meta = {}
         workers = L.list_workers(project)
-        live = sum(1 for w in workers
-                   if _alive(_read_pid(L.WorkerLayout(L.worker_dir(project, w)))))
+        live = sum(
+            1 for w in workers
+            if _worker_alive(L.WorkerLayout(L.worker_dir(project, w)))
+        )
         out.append({"project": project, "workers": len(workers), "live": live,
                     "model": meta.get("model", "—")})
     return out
@@ -985,25 +1027,28 @@ def _fmt_status(rows: List[Dict]) -> str:
 def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
     pid = _read_pid(wl)
     if not force:
-        if not _alive(pid):
+        if not _worker_alive(wl):
             return "not-running"
         wl.stop.touch()
         return "stopping (graceful)"
-    if not _alive(pid):
+    if not _worker_alive(wl):
         wl.pid.unlink(missing_ok=True)
         return "not-running"
     try:
-        pgid = os.getpgid(pid)
-        os.killpg(pgid, signal.SIGTERM)
+        pgid = os.getpgid(pid) if pid is not None else None
+        if pgid is not None:
+            os.killpg(pgid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
     for _ in range(50):
-        if not _alive(pid):
+        if not _worker_alive(wl):
             break
         time.sleep(0.1)
-    if _alive(pid):
+    if _worker_alive(wl):
         try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            pgid = os.getpgid(pid) if pid is not None else None
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
     wl.pid.unlink(missing_ok=True)
