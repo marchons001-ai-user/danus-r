@@ -103,6 +103,43 @@ def test_supervisor_dispatches_completes_and_advances_dag(tmp_path: Path, monkey
         ctx.__exit__(None, None, None)
 
 
+def test_watch_immediately_observes_autonomous_transitions(tmp_path: Path, monkeypatch):
+    ctx, pdir = _project(tmp_path)
+    try:
+        _task(pdir, "researcher", "A", "do A")
+        _task(pdir, "reviewer", "B", "review B")
+        monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+        monkeypatch.setattr(cli.Q, "refresh_quota", lambda pdir: {})
+        monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+
+        watch = cli.watch_supervisor("P", heartbeat=999999, poll=0.01)
+        first = next(watch)
+        assert any(x["action"] == "AUTO_DISPATCH" and x["node_id"] == "A" for x in first["autonomy_applied"])
+
+        ledger = ProgressLedger(pdir)
+        ledger.update(worker="low", state="DONE", actor="runtime", outcome="COMPLETE")
+        second = next(watch)
+        assert any(x["action"] == "AUTO_COMPLETE" and x["node_id"] == "A" for x in second["autonomy_applied"])
+
+        third = next(watch)
+        assert any(x["action"] == "AUTO_DISPATCH" and x["node_id"] == "B" for x in third["autonomy_applied"])
+        ledger.update(worker="low2", state="DONE", actor="runtime", outcome="COMPLETE")
+
+        fourth = next(watch)
+        assert any(x["action"] == "AUTO_COMPLETE" and x["node_id"] == "B" for x in fourth["autonomy_applied"])
+        fifth = next(watch)
+        assert fifth["project_state"] == "COMPLETE"
+        assert fifth["decisions"] == []
+        try:
+            next(watch)
+        except StopIteration:
+            pass
+        else:
+            raise AssertionError("completed watch did not exit")
+    finally:
+        ctx.__exit__(None, None, None)
+
+
 def test_changed_task_is_not_auto_completed(tmp_path: Path, monkeypatch):
     ctx, pdir = _project(tmp_path)
     try:
