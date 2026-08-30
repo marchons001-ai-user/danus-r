@@ -226,9 +226,11 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         )
 
     current_by_node: Dict[str, List[Dict[str, Any]]] = {}
+    current_by_worker: Dict[str, Dict[str, Any]] = {}
     for assignment in current_assignments:
         node_id = assignment["node_id"]
         current_by_node.setdefault(node_id, []).append(assignment)
+        current_by_worker[assignment["worker"]] = assignment
         worker = assignment["worker"]
         row = status_by_worker.get(worker, {})
         state = assignment["state"]
@@ -292,6 +294,9 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
 
     completion_waiting = set()
     for node_id, assignment in latest_by_node.items():
+        current = current_by_worker.get(assignment["worker"])
+        if current and current["assignment_id"] != assignment["assignment_id"]:
+            continue
         if (
             assignment["state"] == "DONE"
             and node_id not in completed
