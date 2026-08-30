@@ -1,7 +1,7 @@
 """Autonomous Research Plan bootstrap and reviewed revision loop.
 
 The LLM never mutates Plan/task control state directly. A sole Researcher writes one
-structured handoff into the scientific workspace. The control plane normalizes and
+structured handoff into the scientific workspace. The control plane validates and
 content-addresses that proposal, persists the existing ResearchPlanGraph change on
 the Researcher's behalf, routes it to the Reviewer, then commits and materializes
 versioned A2-8b task specs only after Reviewer approval.
@@ -103,7 +103,7 @@ Schema:
   "operations": [ResearchPlanGraph operations],
   "tasks": [{{"node_id": "R1", "role": "researcher|reviewer|experimenter", "task": "exact task"}}]
 }}
-Provide one task for every executable leaf introduced or materially changed by the proposal. Keep the Plan coarse; experiment cells and implementation minutiae belong inside task text, not extra Plan nodes. Result-conditioned revisions must set `post_hoc=true` and cite immutable `evidence_refs`. Do not edit Plan files or `tasks/` directly and, in this autonomous mode, do not call `plan_propose_change`; the Supervisor will content-address this handoff and submit it through the normal reviewed change gate.
+Plan operation constraints are strict: every `add_node` has exactly `op`, `node_id`, `title`, `summary`, `parent`, and `depends_on`; `title` is at most {ResearchPlanGraph.MAX_TITLE_CHARS} characters and `summary` is at most {ResearchPlanGraph.MAX_SUMMARY_CHARS} characters. Keep the Plan coarse. Provide one task for every executable leaf introduced or materially changed by the proposal; experiment cells and implementation minutiae belong inside task text, not extra Plan nodes. Result-conditioned revisions must set `post_hoc=true` and cite immutable `evidence_refs`. Do not edit Plan files or `tasks/` directly and, in this autonomous mode, do not call `plan_propose_change`; the Supervisor will content-address this handoff and submit it through the normal reviewed change gate.
 """
 
 
@@ -135,16 +135,14 @@ def _append_project_policy(project: str) -> None:
 
 
 def _bootstrap_task(pdir: Path, plan_version: int) -> str:
-    brief = pdir / BRIEF_FILE
-    path = _proposal_path(pdir)
     return (
         "# Autonomous Research Bootstrap\n\n"
-        f"Read the binding research brief at `{brief}` and RESEARCH_CHARTER.md. Inspect only "
-        "the existing workspace/context needed to understand the problem. Design the smallest "
-        "coarse Research Plan DAG that can answer the brief, with explicit Researcher/Reviewer/"
-        "Experimenter handoffs where scientifically needed. Do not run the planned experiments "
+        f"Read the binding research brief at `{pdir / BRIEF_FILE}` and RESEARCH_CHARTER.md. "
+        "Inspect only the existing workspace/context needed to understand the problem. Design the "
+        "smallest coarse Research Plan DAG that can answer the brief, with explicit Researcher/"
+        "Reviewer/Experimenter handoffs where scientifically needed. Do not run planned experiments "
         "in this bootstrap task.\n\n"
-        + _proposal_instructions(path, plan_version)
+        + _proposal_instructions(_proposal_path(pdir), plan_version)
         + "\nAfter the proposal file is fully written, end this assignment with COMPLETE.\n"
     )
 
@@ -158,13 +156,8 @@ def _validate_roster(project: str) -> Dict[str, List[str]]:
     return roles
 
 
-def initialize_research(
-    project: str,
-    *,
-    brief: Optional[str] = None,
-    model: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Create/resume the minimal autonomous-research control state."""
+def initialize_research(project: str, *, brief: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
+    """Create or resume the minimal autonomous-research control state."""
     pdir = L.project_dir(project)
     created = False
     if not pdir.is_dir():
@@ -189,32 +182,24 @@ def initialize_research(
         raise SystemExit("autonomous research project has no research brief")
 
     _append_project_policy(project)
-    plan_path = pdir / "plan" / "current.json"
-    if not plan_path.is_file():
-        ResearchPlanGraph.create(
-            pdir,
-            node_id="P0",
-            title="Research Project",
-            summary="Autonomous research root",
-        )
+    if not (pdir / "plan" / "current.json").is_file():
+        ResearchPlanGraph.create(pdir, node_id="P0", title="Research Project", summary="Autonomous research root")
 
-    graph = ResearchPlanGraph(pdir)
-    plan = graph.snapshot()
+    plan = ResearchPlanGraph(pdir).snapshot()
     bootstrap_result = "not-needed"
+    bootstrap_assignment = None
     if plan["plan_version"] == 1 and set(plan["nodes"]) == {plan["root_id"]}:
         task = _bootstrap_task(pdir, 1)
-        task_hash = ProgressLedger.task_sha256(task)
-        prior = [a for a in ProgressLedger(pdir).assignments() if a.get("task_sha256") == task_hash]
-        if not prior:
-            researcher = roles["researcher"][0]
-            assignment = cli.do_assign(f"{project}/{researcher}", task, node_id=plan["root_id"])
-            bootstrap_result = cli._start_one(L.WorkerLayout(L.worker_dir(project, researcher)))
-            bootstrap_assignment = assignment.get("assignment_id")
-        else:
+        digest = ProgressLedger.task_sha256(task)
+        prior = [a for a in ProgressLedger(pdir).assignments() if a.get("task_sha256") == digest]
+        if prior:
             bootstrap_assignment = prior[-1].get("assignment_id")
             bootstrap_result = "existing"
-    else:
-        bootstrap_assignment = None
+        else:
+            researcher = roles["researcher"][0]
+            assignment = cli.do_assign(f"{project}/{researcher}", task, node_id=plan["root_id"])
+            bootstrap_assignment = assignment.get("assignment_id")
+            bootstrap_result = cli._start_one(L.WorkerLayout(L.worker_dir(project, researcher)))
 
     return {
         "project": project,
@@ -250,18 +235,10 @@ def _active_leaves(plan: Dict[str, Any]) -> set[str]:
         for node_id, node in nodes.items()
         if node.get("parent") and _active_route(nodes, node_id)
     }
-    return {
-        node_id
-        for node_id in nodes
-        if _active_route(nodes, node_id) and node_id not in parents
-    }
+    return {node_id for node_id in nodes if _active_route(nodes, node_id) and node_id not in parents}
 
 
-def _normalize_proposal(
-    graph: ResearchPlanGraph,
-    raw: Dict[str, Any],
-    proposal_path: Path,
-) -> Dict[str, Any]:
+def _normalize_proposal(graph: ResearchPlanGraph, raw: Dict[str, Any], proposal_path: Path) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("proposal root must be an object")
     allowed = {"base_plan_version", "reason", "post_hoc", "evidence_refs", "operations", "tasks"}
@@ -279,13 +256,11 @@ def _normalize_proposal(
     reason = str(raw.get("reason") or "").strip()
     if not reason:
         raise ValueError("proposal reason is required")
-    post_hoc = bool(raw.get("post_hoc", False))
     refs_raw = raw.get("evidence_refs", [])
     if not isinstance(refs_raw, list):
         raise ValueError("evidence_refs must be a list")
     refs = list(dict.fromkeys(str(x).strip() for x in refs_raw if str(x).strip()))
 
-    # Reuse the Plan's own normalizer/validator so proposal semantics cannot drift.
     ops = graph._normalize_operations(raw.get("operations", []))
     candidate = copy.deepcopy(current)
     graph._apply_operations(candidate, ops)
@@ -300,8 +275,7 @@ def _normalize_proposal(
     required = {
         node_id
         for node_id in candidate_leaves
-        if node_id not in current_leaves
-        or current["nodes"].get(node_id) != candidate["nodes"].get(node_id)
+        if node_id not in current_leaves or current["nodes"].get(node_id) != candidate["nodes"].get(node_id)
     }
     required.discard(candidate["root_id"])
 
@@ -338,7 +312,7 @@ def _normalize_proposal(
     return {
         "base_plan_version": base,
         "reason": reason,
-        "post_hoc": post_hoc,
+        "post_hoc": bool(raw.get("post_hoc", False)),
         "evidence_refs": refs,
         "operations": ops,
         "tasks": tasks,
@@ -347,18 +321,18 @@ def _normalize_proposal(
 
 def _researcher_handoff_ready(pdir: Path, researcher: str) -> bool:
     current = ProgressLedger(pdir).current(researcher, refresh_stale=True)
-    if not current:
-        return False
     return bool(
-        (current.get("state") == "DONE" and current.get("outcome") == "COMPLETE")
-        or (current.get("state") == "BLOCKED" and current.get("outcome") == "NEEDS_REVIEW")
+        current
+        and (
+            (current.get("state") == "DONE" and current.get("outcome") == "COMPLETE")
+            or (current.get("state") == "BLOCKED" and current.get("outcome") == "NEEDS_REVIEW")
+        )
     )
 
 
 def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
     pdir = L.project_dir(project)
-    roles = _validate_roster(project)
-    researcher = roles["researcher"][0]
+    researcher = _validate_roster(project)["researcher"][0]
     path = _proposal_path(pdir)
     if not path.is_file() or not _researcher_handoff_ready(pdir, researcher):
         return None
@@ -381,11 +355,10 @@ def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
                 "change_id": record.get("change_id"),
                 "result": "already_captured",
             }
-        change_reason = f"[proposal:{proposal_id}] {proposal['reason']}"
         change_id = graph.propose_change(
             base_plan_version=proposal["base_plan_version"],
             proposer=researcher,
-            reason=change_reason,
+            reason=f"[proposal:{proposal_id}] {proposal['reason']}",
             operations=proposal["operations"],
             post_hoc=proposal["post_hoc"],
             evidence_refs=proposal["evidence_refs"],
@@ -399,12 +372,7 @@ def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
         }
         atomic_write(record_path, _json_text(record))
         path.unlink(missing_ok=True)
-        return {
-            "action": "PLAN_PROPOSAL",
-            "proposal_id": proposal_id,
-            "change_id": change_id,
-            "result": "captured",
-        }
+        return {"action": "PLAN_PROPOSAL", "proposal_id": proposal_id, "change_id": change_id, "result": "captured"}
     except (OSError, ValueError) as exc:
         return {"action": "PLAN_PROPOSAL", "result": "blocked", "reason": str(exc)}
 
@@ -426,41 +394,50 @@ def _load_proposal_record(pdir: Path, proposal_id: str) -> Dict[str, Any]:
     record = json.loads(path.read_text(encoding="utf-8"))
     if record.get("proposal_id") != proposal_id:
         raise ValueError(f"proposal identity mismatch: {proposal_id}")
-    identity = {"proposer": record.get("proposer"), "proposal": record.get("proposal")}
-    if _content_id(identity) != proposal_id:
+    if _content_id({"proposer": record.get("proposer"), "proposal": record.get("proposal")}) != proposal_id:
         raise ValueError(f"proposal content mismatch: {proposal_id}")
     return record
 
 
 def _review_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
-    proposal_path = _proposal_record_path(pdir, proposal_id)
     return (
         "# Autonomous Research Plan Review\n\n"
         f"Review Plan change `{change['change_id']}` against the research brief, charter, current "
-        f"Plan v{change['base_plan_version']}, and the exact immutable proposal at `{proposal_path}`. "
-        "Approval covers both structural operations and the exact role/task specs in that proposal. "
-        "Reject if the route is scientifically weak, unnecessarily large, post-hoc without required "
-        "evidence, or if the task decomposition would bypass role/review/experiment boundaries.\n\n"
+        f"Plan v{change['base_plan_version']}, and the exact immutable proposal at "
+        f"`{_proposal_record_path(pdir, proposal_id)}`. Approval covers both structural operations "
+        "and exact role/task specs. Reject if the route is scientifically weak, unnecessarily large, "
+        "post-hoc without required evidence, or bypasses role/review/experiment boundaries.\n\n"
         f"Call `plan_review_change(change_id=\"{change['change_id']}\", approve=<true|false>, "
         "rationale=<specific rationale>)` exactly once. Use approve=false for REVISE or REJECT. "
-        "Do not commit the change and do not write task files. After recording the verdict, end this "
-        "assignment with COMPLETE.\n"
+        "Do not commit or write task files. After recording the verdict, end with COMPLETE.\n"
     )
 
 
 def _revision_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
-    proposal_path = _proposal_record_path(pdir, proposal_id)
-    rationale = str(change.get("review_rationale") or "Reviewer rejected the proposal")
     current = ResearchPlanGraph(pdir).snapshot()["plan_version"]
     return (
         "# Revise Autonomous Research Plan\n\n"
-        f"The Reviewer rejected proposal `{proposal_id}` / change `{change['change_id']}`. Read the "
-        f"immutable proposal at `{proposal_path}` and address only the blocking rationale below.\n\n"
-        f"Reviewer rationale:\n{rationale}\n\n"
-        "Produce the smallest corrected replacement; do not broaden the project merely to satisfy "
-        "non-blocking suggestions.\n\n"
+        f"Reviewer rejected proposal `{proposal_id}` / change `{change['change_id']}`. Read the "
+        f"immutable proposal at `{_proposal_record_path(pdir, proposal_id)}` and address only the "
+        f"blocking rationale below.\n\nReviewer rationale:\n"
+        f"{str(change.get('review_rationale') or 'Reviewer rejected the proposal')}\n\n"
+        "Produce the smallest corrected replacement; do not broaden the project for non-blocking suggestions.\n\n"
         + _proposal_instructions(_proposal_path(pdir), current)
-        + "\nAfter writing the replacement proposal, end this assignment with COMPLETE.\n"
+        + "\nAfter writing the replacement proposal, end with COMPLETE.\n"
+    )
+
+
+def _repair_task(pdir: Path, reason: str) -> str:
+    current = ResearchPlanGraph(pdir).snapshot()["plan_version"]
+    return (
+        "# Repair Autonomous Plan Proposal\n\n"
+        f"The proposal at `{_proposal_path(pdir)}` failed deterministic control-plane validation:\n\n"
+        f"{reason}\n\n"
+        "Replace that JSON with the smallest correction needed to satisfy the validator. Preserve "
+        "the scientific intent and task decomposition unless the error itself requires changing them; "
+        "do not broaden the research.\n\n"
+        + _proposal_instructions(_proposal_path(pdir), current)
+        + "\nAfter replacing the proposal, end with COMPLETE.\n"
     )
 
 
@@ -486,19 +463,17 @@ def _assign_role(project: str, role: str, task: str, node_id: str) -> Dict[str, 
             "state": existing.get("state"),
             "outcome": existing.get("outcome"),
         }
-    rows = cli._project_rows(project)
-    wl = A._idle_worker(project, role, rows, set(), cli._read_worker_role)
+    wl = A._idle_worker(project, role, cli._project_rows(project), set(), cli._read_worker_role)
     if wl is None:
         return {"action": "PLAN_ASSIGN", "role": role, "result": "no_idle_worker"}
     assignment = cli.do_assign(f"{project}/{wl.name}", task, node_id=node_id)
-    start_result = cli._start_one(wl)
     return {
         "action": "PLAN_ASSIGN",
         "role": role,
         "worker": wl.name,
         "assignment_id": assignment.get("assignment_id"),
         "result": "assigned",
-        "start_result": start_result,
+        "start_result": cli._start_one(wl),
     }
 
 
@@ -514,8 +489,8 @@ def _materialize_tasks(pdir: Path, record: Dict[str, Any], version: int) -> List
         if path.is_file():
             if path.read_text(encoding="utf-8") != text:
                 raise ValueError(f"task spec conflict: {path}")
-        else:
-            atomic_write(path, text)
+            continue
+        atomic_write(path, text)
         written.append(str(path))
     return written
 
@@ -538,7 +513,8 @@ def _recover_materialized_tasks(pdir: Path) -> List[Dict[str, Any]]:
                     "action": "PLAN_TASK_RECOVERY",
                     "proposal_id": path.stem,
                     "plan_version": int(change["committed_version"]),
-                    "result": "ready",
+                    "task_count": len(written),
+                    "result": "recovered",
                 })
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             actions.append({"action": "PLAN_TASK_RECOVERY", "result": "blocked", "reason": str(exc)})
@@ -554,10 +530,16 @@ def planning_step(project: str) -> List[Dict[str, Any]]:
     captured = _capture_proposal(project)
     if captured:
         actions.append(captured)
+        if captured.get("result") == "blocked":
+            task = _repair_task(pdir, str(captured.get("reason") or "proposal validation failed"))
+            item = _assign_role(project, "researcher", task, ResearchPlanGraph(pdir).snapshot()["root_id"])
+            item["action"] = "PLAN_REPAIR"
+            item["reason"] = captured.get("reason")
+            actions.append(item)
+            return actions
 
     graph = ResearchPlanGraph(pdir)
-    pending = graph.pending_changes()
-    linked = [item for item in pending if _proposal_id_from_change(item)]
+    linked = [item for item in graph.pending_changes() if _proposal_id_from_change(item)]
     if linked:
         change = linked[0]
         proposal_id = _proposal_id_from_change(change)
@@ -568,11 +550,10 @@ def planning_step(project: str) -> List[Dict[str, Any]]:
                 raise ValueError("proposal/change binding mismatch")
             if record["proposal"]["operations"] != change.get("operations"):
                 raise ValueError("approved change operations diverge from immutable proposal")
-            review_task = _review_task(pdir, change, proposal_id)
             review = _review_assignment(pdir, change, proposal_id)
             if change["status"] == "PROPOSED":
                 if review is None:
-                    item = _assign_role(project, "reviewer", review_task, graph.snapshot()["root_id"])
+                    item = _assign_role(project, "reviewer", _review_task(pdir, change, proposal_id), graph.snapshot()["root_id"])
                     item.update({"change_id": change["change_id"], "proposal_id": proposal_id})
                     actions.append(item)
                 elif review.get("state") in {"DONE", "BLOCKED"}:
@@ -605,8 +586,6 @@ def planning_step(project: str) -> List[Dict[str, Any]]:
             actions.append({"action": "PLAN_GOVERNANCE", "result": "blocked", "reason": str(exc)})
         return actions
 
-    # A rejected autonomous proposal is revised by the sole Researcher. Historical
-    # rejected records are ignored once a later Plan version has moved past them.
     directory = _proposal_dir(pdir)
     if directory.is_dir():
         current_version = graph.snapshot()["plan_version"]
@@ -623,24 +602,15 @@ def planning_step(project: str) -> List[Dict[str, Any]]:
             proposal_id, change = rejected[-1]
             review = _review_assignment(pdir, change, proposal_id)
             if review and review.get("state") == "DONE" and review.get("outcome") == "COMPLETE":
-                task = _revision_task(pdir, change, proposal_id)
-                item = _assign_role(project, "researcher", task, graph.snapshot()["root_id"])
+                item = _assign_role(project, "researcher", _revision_task(pdir, change, proposal_id), graph.snapshot()["root_id"])
                 item.update({"change_id": change["change_id"], "proposal_id": proposal_id})
                 actions.append(item)
     return actions
 
 
-def watch_research(
-    project: str,
-    *,
-    heartbeat: float = 1800.0,
-    poll: float = 1.0,
-    token_budget: int = 0,
-) -> Iterator[Dict[str, Any]]:
+def watch_research(project: str, *, heartbeat: float = 1800.0, poll: float = 1.0, token_budget: int = 0) -> Iterator[Dict[str, Any]]:
     pending = planning_step(project)
-    for report in cli.watch_supervisor(
-        project, heartbeat=heartbeat, poll=poll, token_budget=token_budget
-    ):
+    for report in cli.watch_supervisor(project, heartbeat=heartbeat, poll=poll, token_budget=token_budget):
         actions = pending + planning_step(project)
         pending = []
         if actions:
@@ -683,11 +653,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True), flush=True)
         return 0
 
-    for report in watch_research(
-        args.project,
-        heartbeat=args.heartbeat,
-        poll=args.poll,
-        token_budget=args.token_budget,
-    ):
+    for report in watch_research(args.project, heartbeat=args.heartbeat, poll=args.poll, token_budget=args.token_budget):
         print(json.dumps(report, ensure_ascii=False, sort_keys=True), flush=True)
     return 0
