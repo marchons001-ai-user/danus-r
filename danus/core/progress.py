@@ -9,6 +9,7 @@ plan node after deciding that its scientific objective is actually satisfied.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 from pathlib import Path
@@ -205,74 +206,94 @@ class ProgressLedger:
         plan_version: int,
         task: str,
     ) -> Dict[str, Any]:
-        """Bind one task to an ACTIVE node in the named current plan version."""
+        """Atomically bind one worker task to one ACTIVE Plan node."""
         worker = self._required(worker, "worker")
         role = self._required(role, "role")
         node_id = self._required(node_id, "node_id")
         if not str(task).strip():
             raise ValueError("task is required")
 
-        plan = ResearchPlanGraph(self.root)
-        current = plan.snapshot()
-        version = int(plan_version)
-        if version != current["plan_version"]:
-            raise ValueError(
-                f"stale plan_version: {version}; current is {current['plan_version']}"
-            )
-        node = current["nodes"].get(node_id)
-        if node is None:
-            raise ValueError(f"unknown plan node: {node_id}")
-        if node["state"] != "ACTIVE":
-            raise ValueError(f"plan node {node_id} is not ACTIVE")
+        lock_path = self.root / "progress" / ".assign.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                plan = ResearchPlanGraph(self.root)
+                current = plan.snapshot()
+                version = int(plan_version)
+                if version != current["plan_version"]:
+                    raise ValueError(
+                        f"stale plan_version: {version}; current is {current['plan_version']}"
+                    )
+                node = current["nodes"].get(node_id)
+                if node is None:
+                    raise ValueError(f"unknown plan node: {node_id}")
+                if node["state"] != "ACTIVE":
+                    raise ValueError(f"plan node {node_id} is not ACTIVE")
 
-        implementation_contract = (
-            self._active_implementation_contract(node_id)
-            if role.lower() == "experimenter"
-            else None
-        )
-        if implementation_contract is not None:
-            status = implementation_contract["status"]
-            if status != "APPROVE":
-                raise ValueError(
-                    f"implementation contract {implementation_contract['contract_id']} "
-                    f"requires APPROVE; current status is {status}"
+                implementation_contract = (
+                    self._active_implementation_contract(node_id)
+                    if role.lower() == "experimenter"
+                    else None
                 )
-            if self.task_sha256(task) != implementation_contract["task_sha256"]:
-                raise ValueError("assigned task does not match approved implementation contract")
+                if implementation_contract is not None:
+                    status = implementation_contract["status"]
+                    if status != "APPROVE":
+                        raise ValueError(
+                            f"implementation contract {implementation_contract['contract_id']} "
+                            f"requires APPROVE; current status is {status}"
+                        )
+                    if self.task_sha256(task) != implementation_contract["task_sha256"]:
+                        raise ValueError("assigned task does not match approved implementation contract")
 
-        previous = self.current(worker, refresh_stale=True)
-        if previous and previous["state"] not in self._TERMINAL:
-            self._append_state(
-                previous,
-                state="STALE",
-                actor="system",
-                note="superseded by a newer assignment",
-            )
+                assignments, _ = self._replay_assignments()
+                for record in assignments.values():
+                    if record["state"] in self._TERMINAL:
+                        continue
+                    if record["node_id"] == node_id and record["worker"] != worker:
+                        raise ValueError(
+                            f"plan node {node_id} already has active assignment "
+                            f"{record['assignment_id']} on worker {record['worker']}"
+                        )
 
-        assigned_at = utc_now()
-        task_hash = self.task_sha256(task)
-        identity = {
-            "worker": worker,
-            "role": role,
-            "node_id": node_id,
-            "plan_version": version,
-            "task_sha256": task_hash,
-            "assigned_at": assigned_at,
-        }
-        if implementation_contract is not None:
-            identity["implementation_contract_id"] = implementation_contract["contract_id"]
-        assignment_id = self._content_id(identity)
-        event = {
-            "event": "ASSIGNED",
-            "assignment_id": assignment_id,
-            **identity,
-            "state": "ASSIGNED",
-            "actor": "supervisor",
-            "note": "",
-            "at": assigned_at,
-        }
-        append_jsonl(self.path, event)
-        return self.current(worker, refresh_stale=False) or event
+                # A worker may be deliberately rebound. Serialize that transition
+                # and stale every surviving nonterminal assignment from any legacy
+                # race before creating the new one.
+                for record in assignments.values():
+                    if record["worker"] == worker and record["state"] not in self._TERMINAL:
+                        self._append_state(
+                            record,
+                            state="STALE",
+                            actor="system",
+                            note="superseded by a newer assignment",
+                        )
+
+                assigned_at = utc_now()
+                task_hash = self.task_sha256(task)
+                identity = {
+                    "worker": worker,
+                    "role": role,
+                    "node_id": node_id,
+                    "plan_version": version,
+                    "task_sha256": task_hash,
+                    "assigned_at": assigned_at,
+                }
+                if implementation_contract is not None:
+                    identity["implementation_contract_id"] = implementation_contract["contract_id"]
+                assignment_id = self._content_id(identity)
+                event = {
+                    "event": "ASSIGNED",
+                    "assignment_id": assignment_id,
+                    **identity,
+                    "state": "ASSIGNED",
+                    "actor": "supervisor",
+                    "note": "",
+                    "at": assigned_at,
+                }
+                append_jsonl(self.path, event)
+                return self.current(worker, refresh_stale=False) or event
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
     def update(
         self,
