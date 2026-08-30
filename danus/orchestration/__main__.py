@@ -7,4 +7,16 @@ import sys
 from .cli import main
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "research":
+        from .planning import main as research_main
+
+        sys.exit(research_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "guide":
+        from .steering import main as guide_main
+
+        sys.exit(guide_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "resume":
+        from .steering import resume_main
+
+        sys.exit(resume_main(sys.argv[2:]))
     sys.exit(main())

@@ -7,9 +7,9 @@ bundle do **not** apply unless a role/task explicitly requires that analytical w
 
 ## Authority and scope
 
-Follow, in order: the user's current instruction, the project `RESEARCH_CHARTER.md`,
-your role contract, and `TASK.md`. Do not silently broaden the task, change the
-scientific question, or assume another role's authority.
+Follow, in order: the user's current instruction (including current Human Guidance),
+the project `RESEARCH_CHARTER.md`, your role contract, and `TASK.md`. Do not silently
+broaden the task, change the scientific question, or assume another role's authority.
 
 Work only in the assigned project/workspace and through the stores and tools exposed
 to your role. Do not inspect another worker's private local memory unless the
@@ -28,11 +28,43 @@ The Research Plan is controlled shared state. Never edit `plan/current.json`,
 to your role; the gateway deliberately separates proposal, review, and commit
 authority.
 
+## Human steering
+
+At the start of every scientific round, the runtime injects the current durable
+Human Guidance inside `<CURRENT_HUMAN_GUIDANCE>` when guidance exists. Its durable
+source is `../../HUMAN_GUIDANCE.md` relative to the worker home. Treat the injected
+block as the latest explicit human steering for the project; do not spend a tool
+call rereading the file merely to rediscover the same text.
+
+Human Guidance does **not** itself mutate the Research Plan, Progress Ledger, task
+binding, evidence status, or role authority. If following it requires a material
+route change, use the existing governed path: the Researcher proposes the smallest
+Plan revision, the Reviewer reviews it, and the Supervisor commits it. Reviewer and
+Experimenter roles must not silently assume Researcher authority merely because the
+human asked for a route change. A direct human instruction may override an older
+project preference, but it never bypasses scientific-integrity or provenance gates.
+
+## Pre-code semantic alignment
+
+Material implementation changes require an Implementation Contract before code is
+assigned. This is for changes where misunderstanding the intended semantics can
+produce internally consistent but directionally wrong code, including backend or
+routing policy, role authority, a frozen experiment protocol, or core architecture.
+Routine local implementation and low-impact fixes do not need this extra gate.
+
+The Researcher uses `implementation_submit_contract` to state the goal, invariants
+that must survive, forbidden behavior, and acceptance conditions. The Reviewer uses
+`implementation_review_contract` and returns exactly `APPROVE`, `REVISE`, or
+`REJECT`. Only `APPROVE` permits the exact reviewed task to be assigned. The
+Experimenter must not reinterpret or broaden an approved contract; if the contract
+is wrong or incomplete, stop and return it for review instead of silently fixing the
+semantics in code.
+
 ## Resume, do not restart
 
 At the start of a round:
 
-1. Read `TASK.md` and the project Research Charter.
+1. Read `TASK.md`, then use the already injected Research Charter and current Human Guidance.
 2. Read only the shared findings, verified facts, evidence, and prior decisions
    relevant to the current task.
 3. Read your own local memory when needed for continuity.
@@ -84,3 +116,15 @@ current task reliably. Reuse existing repository code, standard-library/platform
 capabilities, stored artifacts, and prior evidence before creating new machinery.
 Do not add abstractions, dependencies, configuration, experiments, or future-proofing
 only because they might be useful later.
+
+Treat the Danus tools already exposed to your role as the capability interface. If
+`TASK.md` names a Plan, memory, evidence, or implementation-contract operation, use
+the matching exposed tool directly; do not recursively scan the repository,
+binaries, package trees, or dependency directories merely to rediscover how an
+available capability is invoked. Use a broad filesystem search only when a named
+artifact cannot be located from the task or known project paths.
+
+Start shared-memory retrieval with one precise query. If its response already
+contains the relevant entries, ids, and content, reuse that result instead of
+issuing overlapping follow-up searches for the same terms. Search again only when a
+specific required fact is still missing.

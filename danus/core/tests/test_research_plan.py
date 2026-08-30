@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from danus.core import ResearchPlanGraph
+from danus.core import EvidenceStore, ResearchPlanGraph
 
 
 def _commit(plan: ResearchPlanGraph, operations, *, reason="needed", post_hoc=False, evidence_refs=None):
@@ -116,6 +116,33 @@ def test_concurrent_approved_change_becomes_stale_after_other_commit(tmp_path):
     assert plan.get_change(ids[1])["status"] == "STALE"
 
 
+def test_pending_changes_retire_requests_from_old_plan_version(tmp_path):
+    plan = ResearchPlanGraph.create(tmp_path, node_id="root", title="Root")
+    first = plan.propose_change(
+        base_plan_version=1,
+        proposer="researcher",
+        reason="Add first route.",
+        operations=[{"op": "add_node", "node_id": "a", "title": "A", "parent": "root"}],
+    )
+    second = plan.propose_change(
+        base_plan_version=1,
+        proposer="researcher",
+        reason="Add competing route.",
+        operations=[{"op": "add_node", "node_id": "b", "title": "B", "parent": "root"}],
+    )
+    plan.review_change(
+        first,
+        reviewer="reviewer",
+        approve=True,
+        rationale="Bounded route change.",
+    )
+    assert {item["change_id"] for item in plan.pending_changes()} == {first, second}
+
+    assert plan.commit_change(first, committer="supervisor") == 2
+    assert plan.pending_changes() == []
+    assert plan.get_change(second)["status"] == "STALE"
+
+
 def test_direct_current_rewrite_is_detected(tmp_path):
     plan = ResearchPlanGraph.create(tmp_path, node_id="root", title="Root")
     path = tmp_path / "plan" / "current.json"
@@ -162,7 +189,7 @@ def test_constraints_are_checked_before_review(tmp_path):
         )
 
 
-def test_post_hoc_change_requires_evidence_and_node_ids_cannot_be_redefined(tmp_path):
+def test_post_hoc_change_requires_real_evidence_and_node_ids_cannot_be_redefined(tmp_path):
     plan = ResearchPlanGraph.create(tmp_path, node_id="root", title="Root")
     with pytest.raises(ValueError, match="requires evidence_refs"):
         plan.propose_change(
@@ -172,6 +199,36 @@ def test_post_hoc_change_requires_evidence_and_node_ids_cannot_be_redefined(tmp_
             operations=[{"op": "set_state", "node_id": "root", "state": "SUPERSEDED"}],
             post_hoc=True,
         )
+    with pytest.raises(ValueError, match="unknown evidence_refs"):
+        plan.propose_change(
+            base_plan_version=1,
+            proposer="researcher",
+            reason="Observed result changes the route.",
+            operations=[{"op": "set_state", "node_id": "root", "state": "SUPERSEDED"}],
+            post_hoc=True,
+            evidence_refs=["missing-evidence"],
+        )
+
+    store = EvidenceStore(tmp_path)
+    protocol_id = store.freeze_protocol(
+        question="Does the observation change the route?",
+        hypothesis="The current route is no longer adequate.",
+        matrix={"units": []},
+        primary_metrics=["decision"],
+        decision_rule="Revise only if the recorded result changes the route.",
+        author="experimenter",
+    )
+    evidence_id = store.add_record(protocol_id=protocol_id, author="experimenter")
+    change_id = plan.propose_change(
+        base_plan_version=1,
+        proposer="researcher",
+        reason="Recorded evidence changes the route.",
+        operations=[{"op": "set_state", "node_id": "root", "state": "SUPERSEDED"}],
+        post_hoc=True,
+        evidence_refs=[evidence_id],
+    )
+    assert plan.get_change(change_id)["evidence_refs"] == [evidence_id]
+
     with pytest.raises(ValueError, match="unsupported plan operation"):
         plan.propose_change(
             base_plan_version=1,
@@ -179,6 +236,19 @@ def test_post_hoc_change_requires_evidence_and_node_ids_cannot_be_redefined(tmp_
             reason="Attempt to rewrite existing meaning.",
             operations=[{"op": "update_node", "node_id": "root", "title": "New meaning"}],
         )
+
+
+def test_noop_change_does_not_consume_plan_version(tmp_path):
+    plan = ResearchPlanGraph.create(tmp_path, node_id="root", title="Root")
+    with pytest.raises(ValueError, match="no structural effect"):
+        plan.propose_change(
+            base_plan_version=1,
+            proposer="researcher",
+            reason="No actual route change.",
+            operations=[{"op": "set_state", "node_id": "root", "state": "ACTIVE"}],
+        )
+    assert plan.snapshot()["plan_version"] == 1
+    assert not (tmp_path / "plan" / "changes").exists()
 
 
 def test_a2_6a_plan_is_migrated_to_versioned_history(tmp_path):

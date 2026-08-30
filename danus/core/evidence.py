@@ -16,8 +16,11 @@ without duplicating large data.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -60,6 +63,15 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     return obj if isinstance(obj, dict) else None
 
 
+def _stable_record(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Ignore creation timestamps when checking one content-addressed retry."""
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in {"frozen_at", "created_at"}
+    }
+
+
 class EvidenceStore:
     """Project-shared immutable protocol/evidence records."""
 
@@ -77,14 +89,37 @@ class EvidenceStore:
 
     @staticmethod
     def _write_once(path: Path, payload: Dict[str, Any]) -> None:
-        """Create an immutable JSON record; identical id never gets overwritten."""
-        if path.exists():
-            return
+        """Crash-atomically create or recover one immutable JSON record."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        lock_path = path.with_name(f".{path.name}.lock")
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                existing = _read_json(path)
+                if existing is not None:
+                    if _stable_record(existing) == _stable_record(payload):
+                        return
+                    raise ValueError(f"immutable evidence record conflict: {path}")
+
+                text = json.dumps(
+                    payload, ensure_ascii=False, indent=2, sort_keys=True
+                ) + "\n"
+                fd, tmp_name = tempfile.mkstemp(
+                    prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+                )
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                        handle.write(text)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(tmp_name, path)
+                finally:
+                    try:
+                        os.unlink(tmp_name)
+                    except FileNotFoundError:
+                        pass
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
     # --------------------------------------------------------------- protocol
     def freeze_protocol(

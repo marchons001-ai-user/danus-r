@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from danus._mcp import FastMCP
-from danus.core import FACT_TYPES, FactGraph, GlobalMemory, ResearchPlanGraph
+from danus.core import FACT_TYPES, FactGraph, GlobalMemory, ProgressLedger, ResearchPlanGraph
 from danus.integrations import search as _arxiv_search
 
 from .roles import tools_for
@@ -94,6 +94,10 @@ def _fg(project: Optional[str] = None) -> FactGraph:
 
 def _pg(project: Optional[str] = None) -> ResearchPlanGraph:
     return ResearchPlanGraph(_project(project))
+
+
+def _pl(project: Optional[str] = None) -> ProgressLedger:
+    return ProgressLedger(_project(project))
 
 
 def _verify_endpoint(*, empirical: bool = False) -> str:
@@ -393,8 +397,70 @@ def fact_revoke(
 
 
 # --------------------------------------------------------------------------- #
+# pre-code semantic alignment gate                                            #
+# --------------------------------------------------------------------------- #
+
+def implementation_pending_contracts(project: Optional[str] = None) -> Dict[str, Any]:
+    """Return the latest unconsumed implementation contract for each gated node."""
+    contracts = _pl(project).pending_implementation_contracts()
+    return {"contracts": contracts, "count": len(contracts)}
+
+
+def implementation_submit_contract(
+    node_id: str,
+    plan_version: int,
+    goal: str,
+    must_preserve_invariants: List[str],
+    forbidden_behaviors: List[str],
+    acceptance_conditions: List[str],
+) -> Dict[str, Any]:
+    """Researcher-only path for a material implementation change.
+
+    Use this for changes whose semantic direction matters before code exists, such
+    as backend/routing policy, role authority, frozen experiment protocol, or core
+    architecture. The returned ``task`` is the exact task the Supervisor must bind
+    after Reviewer APPROVE; changing it invalidates the approval.
+    """
+    record = _pl().submit_implementation_contract(
+        proposer=_author(),
+        node_id=node_id,
+        plan_version=plan_version,
+        goal=goal,
+        must_preserve_invariants=must_preserve_invariants,
+        forbidden_behaviors=forbidden_behaviors,
+        acceptance_conditions=acceptance_conditions,
+    )
+    return {
+        "contract_id": record["contract_id"],
+        "status": record["status"],
+        "task": record["task"],
+    }
+
+
+def implementation_review_contract(
+    contract_id: str,
+    verdict: str,
+    rationale: str,
+) -> Dict[str, Any]:
+    """Reviewer-only semantic verdict: APPROVE, REVISE, or REJECT."""
+    record = _pl().review_implementation_contract(
+        contract_id,
+        reviewer=_author(),
+        verdict=verdict,
+        rationale=rationale,
+    )
+    return {"contract_id": contract_id, "status": record["status"]}
+
+
+# --------------------------------------------------------------------------- #
 # research-plan change gate                                                   #
 # --------------------------------------------------------------------------- #
+
+def plan_pending_changes(project: Optional[str] = None) -> Dict[str, Any]:
+    """Return current-base proposed/approved revisions; stale requests are retired."""
+    changes = _pg(project).pending_changes()
+    return {"changes": changes, "count": len(changes)}
+
 
 def plan_propose_change(
     base_plan_version: int,
@@ -457,6 +523,10 @@ _TOOLS = {
     "fact_submit": fact_submit,
     "fact_search": fact_search,
     "fact_revoke": fact_revoke,
+    "implementation_pending_contracts": implementation_pending_contracts,
+    "implementation_submit_contract": implementation_submit_contract,
+    "implementation_review_contract": implementation_review_contract,
+    "plan_pending_changes": plan_pending_changes,
     "plan_propose_change": plan_propose_change,
     "plan_review_change": plan_review_change,
     "plan_commit_change": plan_commit_change,

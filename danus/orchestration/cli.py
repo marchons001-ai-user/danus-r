@@ -25,6 +25,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import json
 import os
@@ -38,30 +39,66 @@ from danus.core._util import append_jsonl, utc_now
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
 
-from .control import reconcile
+from . import autonomy as A
+from . import quota as Q
+from .control import quota_policy, reconcile, reviewer_cost_policy
+
+_QUOTA_REFRESH_SECONDS = 5 * 60
+_REVIEWER_TERRA_MODEL = "gpt-5.6-terra"
+_REVIEWER_DSH_DEFAULT_MODEL = "deepseek-v4-flash"
+_TOKEN_USAGE_SEMANTICS = "completed_turn_usage_not_context_window"
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
     "do_supervise", "watch_supervisor", "do_pause", "do_resume",
-    "do_list", "do_stop", "do_finalize", "build_parser", "main",
+    "do_list", "do_stop", "do_finalize", "project_control_lock", "build_parser", "main",
 ]
+
+
+@contextmanager
+def project_control_lock(project_dir: Path):
+    """Serialize one project's durable control-plane mutations across processes."""
+    path = Path(project_dir) / "supervisor" / ".control.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 # --------------------------------------------------------------------------- #
 # read helpers                                                                 #
 # --------------------------------------------------------------------------- #
 
-def _read_pid(wl: L.WorkerLayout) -> Optional[int]:
+def _read_pid_record(wl: L.WorkerLayout) -> tuple[Optional[int], Optional[str]]:
     pf = wl.pid
     if not pf.exists():
-        return None
+        return None, None
     try:
-        return int(pf.read_text().strip())
+        parts = pf.read_text().split()
+        if not parts:
+            return None, None
+        return int(parts[0]), parts[1] if len(parts) > 1 else None
     except (ValueError, OSError):
-        return None
+        return None, None
 
 
-def _alive(pid: Optional[int]) -> bool:
+def _read_pid(wl: L.WorkerLayout) -> Optional[int]:
+    return _read_pid_record(wl)[0]
+
+
+def _proc_state_start(pid: int) -> tuple[Optional[str], Optional[str]]:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        # fields[0] is proc field 3 (state), so field 22 (starttime) is index 19.
+        return fields[0], fields[19]
+    except (OSError, IndexError):
+        return None, None
+
+
+def _alive(pid: Optional[int], expected_start: Optional[str] = None) -> bool:
     if not pid:
         return False
     try:
@@ -69,15 +106,23 @@ def _alive(pid: Optional[int]) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # exists but not ours
-    # The pid exists — but a zombie (killed, not yet reaped by its parent) is
-    # effectively dead. Linux /proc tells us the process state.
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-        state = stat.rsplit(")", 1)[1].split()[0]  # field after "(comm)"
-        return state != "Z"
-    except (OSError, IndexError):
-        return True
+        return expected_start is None
+    state, start = _proc_state_start(pid)
+    if state == "Z":
+        return False
+    if expected_start is not None and start != expected_start:
+        return False
+    return state is not None or expected_start is None
+
+
+def _worker_alive(wl: L.WorkerLayout) -> bool:
+    pid, expected_start = _read_pid_record(wl)
+    return _alive(pid) if expected_start is None else _alive(pid, expected_start)
+
+
+def _write_pid(wl: L.WorkerLayout, pid: int) -> None:
+    _, start = _proc_state_start(pid)
+    atomic_write(wl.pid, f"{pid} {start}\n" if start is not None else f"{pid}\n")
 
 
 def _read_status(wl: L.WorkerLayout) -> Dict:
@@ -90,19 +135,166 @@ def _read_status(wl: L.WorkerLayout) -> Dict:
         return {}
 
 
-def _read_worker_role(wl: L.WorkerLayout) -> str:
+def _role_value(wl: L.WorkerLayout, key: str) -> str:
     if not wl.role.is_file():
-        return "worker"
+        return ""
     try:
         for line in wl.role.read_text(encoding="utf-8").splitlines():
             if "=" not in line:
                 continue
-            key, value = line.split("=", 1)
-            if key.strip() == "ROLE" and value.strip():
-                return value.strip().lower()
+            name, value = line.split("=", 1)
+            if name.strip() == key:
+                return value.strip()
     except OSError:
         pass
-    return "worker"
+    return ""
+
+
+def _read_worker_role(wl: L.WorkerLayout) -> str:
+    return (_role_value(wl, "ROLE") or "worker").lower()
+
+
+def _auto_reviewer(wl: L.WorkerLayout) -> bool:
+    return _read_worker_role(wl) == "reviewer" and _role_value(wl, "BACKEND").lower() == "auto"
+
+
+def _selected_worker_backend(wl: L.WorkerLayout) -> str:
+    backend = _role_value(wl, "BACKEND").lower()
+    if backend == "dsh":
+        return "dsh"
+    if backend == "auto" and _read_worker_role(wl) == "reviewer":
+        selected = str(_read_status(wl).get("reviewer_backend_selected") or "dsh").lower()
+        return selected if selected in {"chatgpt", "dsh"} else "dsh"
+    return "chatgpt"
+
+
+def _uses_openai_codex(wl: L.WorkerLayout) -> bool:
+    """Quota pressure never gates a worker currently bound to DSH."""
+    return _selected_worker_backend(wl) != "dsh"
+
+
+def _dsh_available() -> bool:
+    path = os.environ.get("DANUS_DSH_BIN")
+    return bool(path and Path(path).is_file())
+
+
+def _current_assignment_id(wl: L.WorkerLayout) -> Optional[str]:
+    path = wl.project_dir / "progress" / "ledger.jsonl"
+    if not path.is_file():
+        return None
+    try:
+        current = ProgressLedger(wl.project_dir).current(wl.name, refresh_stale=True)
+    except (FileNotFoundError, ValueError):
+        return None
+    value = current.get("assignment_id") if current else None
+    return str(value) if value else None
+
+
+def _dsh_quota_for_assignment(wl: L.WorkerLayout, assignment_id: Optional[str]) -> bool:
+    if not assignment_id:
+        return False
+    status = _read_status(wl)
+    return bool(status.get("reviewer_dsh_quota_exhausted")) and str(
+        status.get("reviewer_dsh_quota_assignment_id") or ""
+    ) == assignment_id
+
+
+def _reviewer_model(wl: L.WorkerLayout, backend: str) -> str:
+    if backend == "chatgpt":
+        return _REVIEWER_TERRA_MODEL
+    model = _role_value(wl, "MODEL")
+    if model.lower().startswith(("deepseek", "ds-", "dsh-")):
+        return model
+    return _REVIEWER_DSH_DEFAULT_MODEL
+
+
+def _persist_reviewer_backend(
+    wl: L.WorkerLayout,
+    decision: Dict[str, Any],
+    *,
+    assignment_id: Optional[str],
+) -> None:
+    status = _read_status(wl)
+    backend = decision["selected_backend"]
+    status.update({
+        "reviewer_backend_selected": backend,
+        "reviewer_model_selected": _reviewer_model(wl, backend),
+        "reviewer_backend_reason": decision["reason"],
+        "reviewer_backend_policy": decision["policy"],
+        "reviewer_backend_quota_state": decision["quota_state"],
+        "reviewer_backend_selected_at": utc_now(),
+    })
+    if backend == "dsh":
+        status.pop("reviewer_dsh_quota_exhausted", None)
+        status.pop("reviewer_dsh_quota_assignment_id", None)
+    atomic_write(wl.status, json.dumps(status, ensure_ascii=False, indent=2) + "\n")
+
+
+def _reviewer_cost_rows(
+    project: str,
+    rows: List[Dict[str, Any]],
+    quota: Dict[str, Any],
+    *,
+    apply: bool,
+) -> List[Dict[str, Any]]:
+    available = _dsh_available()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        wl = L.WorkerLayout(L.worker_dir(project, row["worker"]))
+        if not _auto_reviewer(wl):
+            continue
+        if row.get("progress_state") in {"DONE", "BLOCKED", "STALE"}:
+            continue
+        assignment_id = str(row.get("assignment_id") or "") or None
+        if not assignment_id:
+            continue
+        exhausted = _dsh_quota_for_assignment(wl, assignment_id)
+        desired = reviewer_cost_policy(
+            quota,
+            dsh_available=available,
+            dsh_quota_exhausted=exhausted,
+        )
+        desired_model = _reviewer_model(wl, desired["selected_backend"])
+        current = _selected_worker_backend(wl)
+        current_model = str(
+            _read_status(wl).get("reviewer_model_selected") or _reviewer_model(wl, current)
+        )
+        selected = current if row.get("alive") else desired["selected_backend"]
+        selected_model = current_model if row.get("alive") else desired_model
+        if row.get("alive"):
+            switching = current != desired["selected_backend"] or current_model != desired_model
+            result = "switch-planned" if switching else "active-unchanged"
+            if apply and switching:
+                wl.stop.touch()
+                result = "switch-at-round-boundary"
+        else:
+            result = "planned"
+            if apply:
+                _persist_reviewer_backend(wl, desired, assignment_id=assignment_id)
+                result = "selected"
+        out.append({
+            "worker": row["worker"],
+            **desired,
+            "selected_backend": selected,
+            "selected_model": selected_model,
+            "desired_backend": desired["selected_backend"],
+            "desired_model": desired_model,
+            "assignment_id": assignment_id,
+            "result": result,
+        })
+    return out
+
+
+def _prepare_reviewer_backend(wl: L.WorkerLayout) -> None:
+    if not _auto_reviewer(wl):
+        return
+    assignment_id = _current_assignment_id(wl)
+    decision = reviewer_cost_policy(
+        quota_policy(Q.load_quota(wl.project_dir)),
+        dsh_available=_dsh_available(),
+        dsh_quota_exhausted=_dsh_quota_for_assignment(wl, assignment_id),
+    )
+    _persist_reviewer_backend(wl, decision, assignment_id=assignment_id)
 
 
 def _pause_reason(wl: L.WorkerLayout) -> Optional[str]:
@@ -112,6 +304,10 @@ def _pause_reason(wl: L.WorkerLayout) -> Optional[str]:
         return wl.pause.read_text(encoding="utf-8").strip() or "manual"
     except OSError:
         return "manual"
+
+
+def _project_pause(project: str) -> Path:
+    return L.project_dir(project) / L.PAUSE_FILE
 
 
 # --------------------------------------------------------------------------- #
@@ -236,10 +432,11 @@ def do_finalize(project: str, fact_ids: List[str],
 # --------------------------------------------------------------------------- #
 
 def _start_one(wl: L.WorkerLayout) -> str:
-    """Returns 'started' / 'already-running' / 'locked' / 'paused'. Idempotent via
-    an flock on .pid.lock; clears a stale .stop before spawning."""
+    """Start one worker unless worker/project pause state blocks it."""
     wl.dir.mkdir(parents=True, exist_ok=True)
     wl.logs.mkdir(exist_ok=True)
+    if (wl.project_dir / L.PAUSE_FILE).is_file():
+        return "project-paused"
     if wl.pause.exists():
         return "paused"
     lock = open(wl.lock, "w")
@@ -248,11 +445,12 @@ def _start_one(wl: L.WorkerLayout) -> str:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return "locked"
-        if _alive(_read_pid(wl)):
+        if _worker_alive(wl):
             return "already-running"
+        _prepare_reviewer_backend(wl)
         wl.stop.unlink(missing_ok=True)
         pid = spawn_loop(wl.dir)
-        atomic_write(wl.pid, str(pid))
+        _write_pid(wl, pid)
         return "started"
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
@@ -277,7 +475,7 @@ def do_start(target: str, stagger: float = 0.2) -> List[Dict]:
 
 def worker_status(wl: L.WorkerLayout) -> Dict:
     pid = _read_pid(wl)
-    alive = _alive(pid)
+    alive = _worker_alive(wl)
     st = _read_status(wl)
     state = st.get("state", "—")
     now = time.time()
@@ -307,6 +505,35 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         except (FileNotFoundError, ValueError) as exc:
             progress_error = str(exc)
 
+    backend = _selected_worker_backend(wl)
+    round_no = int(st.get("round") or 0)
+    usage_available = backend != "dsh" and any(
+        key in st for key in ("context_tokens", "context_tokens_total", "context_tool_calls")
+    )
+    usage_complete = round_no == 0 or (
+        backend != "dsh" and not _auto_reviewer(wl) and "context_tokens_total" in st
+    )
+    round_usage_tokens = (
+        int(st.get("context_tokens") or 0)
+        if backend != "dsh" and "context_tokens" in st
+        else None
+    )
+    usage_tokens_total = (
+        0 if round_no == 0
+        else int(st.get("context_tokens_total") or 0) if usage_complete
+        else None
+    )
+    usage_tool_calls = (
+        int(st.get("context_tool_calls") or 0)
+        if backend != "dsh" and "context_tool_calls" in st
+        else None
+    )
+    usage_compactions = (
+        int(st.get("context_compactions") or 0)
+        if backend != "dsh" and "context_compactions" in st
+        else None
+    )
+
     return {
         "worker": wl.name, "pid": pid, "alive": alive, "state": state,
         "round": st.get("round", 0), "age_s": round(age, 1) if age is not None else None,
@@ -317,12 +544,24 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         "plan_version": progress.get("plan_version") if progress else None,
         "progress_state": progress.get("state") if progress else None,
         "progress_outcome": progress.get("outcome") if progress else None,
-        "context_tokens": int(st.get("context_tokens") or 0),
-        "context_tokens_total": int(st.get("context_tokens_total") or 0),
-        "context_tool_calls": int(st.get("context_tool_calls") or 0),
-        "context_compactions": int(st.get("context_compactions") or 0),
+        "round_usage_tokens": round_usage_tokens,
+        "usage_tokens_total": usage_tokens_total,
+        "usage_tool_calls": usage_tool_calls,
+        "usage_compactions": usage_compactions,
+        "usage_available": usage_available,
+        "usage_complete": usage_complete,
+        "token_semantics": _TOKEN_USAGE_SEMANTICS,
+        "context_tokens": round_usage_tokens,
+        "context_tokens_total": usage_tokens_total,
+        "context_tool_calls": usage_tool_calls,
+        "context_compactions": usage_compactions,
         "context_trigger": st.get("context_trigger"),
         "terminal_outcome": st.get("terminal_outcome"),
+        "reviewer_backend_selected": st.get("reviewer_backend_selected"),
+        "reviewer_model_selected": st.get("reviewer_model_selected"),
+        "reviewer_backend_reason": st.get("reviewer_backend_reason"),
+        "reviewer_dsh_quota_exhausted": st.get("reviewer_dsh_quota_exhausted"),
+        "reviewer_dsh_quota_assignment_id": st.get("reviewer_dsh_quota_assignment_id"),
         "progress_error": progress_error,
     }
 
@@ -342,8 +581,24 @@ def _project_rows(project: str) -> List[Dict[str, Any]]:
 
 
 def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int) -> Dict[str, Any]:
-    used_tokens = sum(max(0, int(row.get("context_tokens_total") or 0)) for row in rows)
+    known_totals = [
+        max(0, int(row["usage_tokens_total"]))
+        for row in rows
+        if row.get("usage_complete") and row.get("usage_tokens_total") is not None
+    ]
+    used_tokens = sum(known_totals)
+    unknown_workers = sorted(
+        str(row.get("worker") or "")
+        for row in rows
+        if not row.get("usage_complete")
+    )
     limit = max(0, int(token_budget))
+    if limit and used_tokens >= limit:
+        token_exceeded: Optional[bool] = True
+    elif limit and unknown_workers:
+        token_exceeded = None
+    else:
+        token_exceeded = False
 
     deadline = None
     deadline_path = pdir / L.DEADLINE_FILE
@@ -379,12 +634,17 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
                 "evidence_id": checkpoint.get("evidence_id"),
             })
 
+    tokens = {"used": used_tokens, "limit": limit, "exceeded": token_exceeded}
+    if unknown_workers:
+        tokens.update({
+            "complete": False,
+            "used_is_lower_bound": True,
+            "unknown_workers": unknown_workers,
+            "semantics": _TOKEN_USAGE_SEMANTICS,
+        })
+
     return {
-        "tokens": {
-            "used": used_tokens,
-            "limit": limit,
-            "exceeded": bool(limit and used_tokens >= limit),
-        },
+        "tokens": tokens,
         "time": {
             "deadline": deadline,
             "remaining_s": None if deadline is None else round(deadline - now, 1),
@@ -393,11 +653,16 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
         "context": [
             {
                 "worker": row["worker"],
-                "tokens": row.get("context_tokens", 0),
-                "tokens_total": row.get("context_tokens_total", 0),
-                "tool_calls": row.get("context_tool_calls", 0),
-                "compactions": row.get("context_compactions", 0),
+                "round_usage_tokens": row.get("round_usage_tokens"),
+                "usage_tokens_total": row.get("usage_tokens_total"),
+                "usage_available": row.get("usage_available", False),
+                "usage_complete": row.get("usage_complete", False),
+                "token_semantics": row.get("token_semantics", _TOKEN_USAGE_SEMANTICS),
+                "tool_calls": row.get("usage_tool_calls"),
+                "compactions": row.get("usage_compactions"),
                 "rollover": row.get("context_trigger"),
+                "tokens": row.get("round_usage_tokens"),
+                "tokens_total": row.get("usage_tokens_total"),
             }
             for row in rows
         ],
@@ -409,7 +674,7 @@ def _apply_resource_budget(report: Dict[str, Any], rows: List[Dict[str, Any]], b
     reason = None
     if budget["time"]["exceeded"]:
         reason = "resource_time_budget"
-    elif budget["tokens"]["exceeded"]:
+    elif budget["tokens"]["exceeded"] is True:
         reason = "resource_token_budget"
     if not reason:
         return
@@ -426,6 +691,43 @@ def _apply_resource_budget(report: Dict[str, Any], rows: List[Dict[str, Any]], b
         if row.get("alive") or row.get("progress_state") in {"ASSIGNED", "RUNNING", "BLOCKED"}
     ]
     report["budget_stop"] = reason
+
+
+def _apply_quota_gate(project: str, rows: List[Dict[str, Any]], policy: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Persist/clear only quota-owned pauses; active rounds are never signalled."""
+    block = bool(policy.get("block_new_codex_rounds"))
+    state = str(policy.get("state") or "UNKNOWN").lower()
+    reason = str(policy.get("reason") or "quota")
+    applied: List[Dict[str, Any]] = []
+
+    for row in rows:
+        wl = L.WorkerLayout(L.worker_dir(project, row["worker"]))
+        pause_reason = _pause_reason(wl)
+        quota_owned = bool(pause_reason and pause_reason.startswith("quota:"))
+
+        if block:
+            if not _uses_openai_codex(wl):
+                if quota_owned:
+                    wl.pause.unlink(missing_ok=True)
+                    applied.append({"worker": row["worker"], "result": "quota-cleared-non-codex"})
+                continue
+            if pause_reason and not quota_owned:
+                continue
+            if not quota_owned:
+                atomic_write(wl.pause, f"quota:{state}:{reason}\n")
+            if row.get("alive"):
+                wl.stop.touch()
+            applied.append({"worker": row["worker"], "result": "pause-at-round-boundary"})
+            continue
+
+        if quota_owned:
+            wl.pause.unlink(missing_ok=True)
+            result = "quota-cleared"
+            if not row.get("alive") and row.get("progress_state") in {"ASSIGNED", "RUNNING"}:
+                result = _start_one(wl)
+            applied.append({"worker": row["worker"], "result": result})
+
+    return applied
 
 
 def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -456,8 +758,6 @@ def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -
             if worker:
                 result = _start_one(L.WorkerLayout(L.worker_dir(project, worker)))
             else:
-                # A ready node has no task text or scientific role encoded in Plan.
-                # Deterministic Supervisor must not invent either.
                 result = "pending_assignment"
         elif action == "STOP":
             if worker:
@@ -479,16 +779,23 @@ def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -
         {
             "event": "RECONCILE",
             "trigger": trigger,
+            "project_state": report.get("project_state"),
             "plan_version": report.get("plan_version"),
+            "plan_changes": report.get("plan_changes", []),
             "decisions": report.get("decisions", []),
             "applied": report.get("applied", []),
+            "autonomy_applied": report.get("autonomy_applied", []),
             "budget": report.get("budget", {}),
+            "quota_policy": report.get("quota_policy", {}),
+            "quota_applied": report.get("quota_applied", []),
+            "reviewer_cost_policy": report.get("reviewer_cost_policy", []),
+            "reviewer_cost_applied": report.get("reviewer_cost_applied", []),
             "at": utc_now(),
         },
     )
 
 
-def do_supervise(
+def _do_supervise_unlocked(
     project: str,
     *,
     complete_node: Optional[str] = None,
@@ -497,12 +804,6 @@ def do_supervise(
     token_budget: int = 0,
     trigger: str = "manual",
 ) -> Dict:
-    """Run one deterministic Supervisor reconciliation pass.
-
-    ``--complete-node`` / ``--reopen-node`` update only Progress Ledger node state;
-    they never revise the Research Plan. With ``apply=True`` the existing
-    CONTINUE/REVIEW/RETASK/STOP decisions are executed as process-control actions.
-    """
     pdir = L.project_dir(project)
     if not pdir.is_dir():
         raise SystemExit(f"no such project: {project}")
@@ -521,33 +822,79 @@ def do_supervise(
             ledger.set_node_state(reopen_node, state="OPEN", actor="supervisor")
         rows = _project_rows(project)
         report = reconcile(pdir, rows)
+        quiescent = report.get("project_state") in {"PAUSED", "COMPLETE"}
         budget = _resource_snapshot(pdir, rows, token_budget)
         report["budget"] = budget
-        _apply_resource_budget(report, rows, budget)
+        if not quiescent:
+            _apply_resource_budget(report, rows, budget)
+        policy = quota_policy(Q.load_quota(pdir))
+        report["quota_policy"] = policy
+        report["reviewer_cost_policy"] = (
+            [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=False)
+        )
         if apply:
+            report["reviewer_cost_applied"] = (
+                [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=True)
+            )
+            report["quota_applied"] = [] if quiescent else _apply_quota_gate(project, rows, policy)
             report["applied"] = _apply_supervisor_decisions(project, report["decisions"])
+            report["autonomy_applied"] = [] if quiescent else A.apply_autonomy(
+                project,
+                report["decisions"],
+                rows=rows,
+                assign=do_assign,
+                start=_start_one,
+                role_of=_read_worker_role,
+            )
             _record_supervisor_event(pdir, trigger, report)
         return report
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"cannot reconcile project: {exc}") from exc
 
 
+def do_supervise(
+    project: str,
+    *,
+    complete_node: Optional[str] = None,
+    reopen_node: Optional[str] = None,
+    apply: bool = False,
+    token_budget: int = 0,
+    trigger: str = "manual",
+) -> Dict:
+    """Run one serialized deterministic Supervisor reconciliation pass."""
+    pdir = L.project_dir(project)
+    if not pdir.is_dir():
+        return _do_supervise_unlocked(
+            project, complete_node=complete_node, reopen_node=reopen_node,
+            apply=apply, token_budget=token_budget, trigger=trigger,
+        )
+    with project_control_lock(pdir):
+        return _do_supervise_unlocked(
+            project, complete_node=complete_node, reopen_node=reopen_node,
+            apply=apply, token_budget=token_budget, trigger=trigger,
+        )
+
+
 def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[str, Any]) -> str:
-    """Small change signature; age_s is deliberately excluded so idle time is not an event."""
     pdir = L.project_dir(project)
     compact_rows = [
         {k: row.get(k) for k in (
             "worker", "pid", "alive", "state", "round", "label", "paused", "pause_reason",
             "assignment_id", "plan_node_id", "plan_version", "progress_state", "progress_outcome",
-            "context_tokens", "context_tokens_total", "context_tool_calls", "context_compactions",
-            "context_trigger", "terminal_outcome",
+            "round_usage_tokens", "usage_tokens_total", "usage_available", "usage_complete",
+            "usage_tool_calls", "usage_compactions", "context_trigger", "terminal_outcome",
+            "reviewer_backend_selected", "reviewer_model_selected", "reviewer_backend_reason",
+            "reviewer_dsh_quota_exhausted", "reviewer_dsh_quota_assignment_id",
         )}
         for row in rows
     ]
 
     stamps = []
-    paths = [pdir / "plan" / "current.json", pdir / "progress" / "ledger.jsonl", pdir / L.DEADLINE_FILE]
+    paths = [pdir / "plan" / "current.json", pdir / "progress" / "ledger.jsonl",
+             pdir / L.PAUSE_FILE, pdir / L.DEADLINE_FILE, Q.quota_path(pdir)]
+    paths.extend(sorted((pdir / "plan" / "changes").glob("*.json")))
     paths.extend(sorted((pdir / "experiment_runtime").glob("*/checkpoint.json")))
+    paths.extend(sorted((pdir / "tasks").glob("v*/*/*.md")))
     for path in paths:
         try:
             stat = path.stat()
@@ -560,7 +907,8 @@ def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[st
             "stamps": stamps,
             "experiments": budget.get("experiments", []),
             "budget_state": {
-                "token_exceeded": bool(budget.get("tokens", {}).get("exceeded")),
+                "token_exceeded": budget.get("tokens", {}).get("exceeded"),
+                "token_complete": bool(budget.get("tokens", {}).get("complete", True)),
                 "time_exceeded": bool(budget.get("time", {}).get("exceeded")),
             },
         },
@@ -576,22 +924,33 @@ def watch_supervisor(
     poll: float = 1.0,
     token_budget: int = 0,
 ) -> Iterator[Dict[str, Any]]:
-    """Change-driven long-running Supervisor with a coarse heartbeat fallback."""
     if heartbeat <= 0:
         raise SystemExit("heartbeat must be > 0")
     if poll <= 0:
         raise SystemExit("poll must be > 0")
 
+    pdir = L.project_dir(project)
     last_signature: Optional[str] = None
     last_reconcile = 0.0
+    last_quota_refresh: Optional[float] = None
     while True:
-        rows = _project_rows(project)
-        budget = _resource_snapshot(L.project_dir(project), rows, token_budget)
-        signature = _control_signature(project, rows, budget)
         now = time.monotonic()
+        quota_due = (
+            last_quota_refresh is None
+            or now - last_quota_refresh >= _QUOTA_REFRESH_SECONDS
+        )
+        if quota_due:
+            Q.refresh_quota(pdir)
+            last_quota_refresh = now
+
+        rows = _project_rows(project)
+        budget = _resource_snapshot(pdir, rows, token_budget)
+        signature = _control_signature(project, rows, budget)
         trigger = None
         if signature != last_signature:
             trigger = "event"
+        elif quota_due:
+            trigger = "quota"
         elif now - last_reconcile >= heartbeat:
             trigger = "heartbeat"
 
@@ -603,12 +962,19 @@ def watch_supervisor(
                 trigger=trigger,
             )
             last_reconcile = now
-            # Actions themselves change pid/pause/progress files; consume that new
-            # state now so the next poll does not immediately replay our own action.
-            rows = _project_rows(project)
-            budget = _resource_snapshot(L.project_dir(project), rows, token_budget)
-            last_signature = _control_signature(project, rows, budget)
+            autonomy_changed = any(
+                item.get("result") in {"assigned", "completed"}
+                for item in report.get("autonomy_applied", [])
+            )
+            if autonomy_changed:
+                last_signature = signature
+            else:
+                rows = _project_rows(project)
+                budget = _resource_snapshot(pdir, rows, token_budget)
+                last_signature = _control_signature(project, rows, budget)
             yield report
+            if report.get("project_state") == "COMPLETE" and not report.get("decisions"):
+                return
         time.sleep(poll)
 
 
@@ -617,7 +983,6 @@ def watch_supervisor(
 # --------------------------------------------------------------------------- #
 
 def do_list() -> List[Dict]:
-    """One row per project: roster + how many workers are live + model."""
     out: List[Dict] = []
     for project in L.list_projects():
         meta = {}
@@ -628,8 +993,10 @@ def do_list() -> List[Dict]:
             except (json.JSONDecodeError, OSError):
                 meta = {}
         workers = L.list_workers(project)
-        live = sum(1 for w in workers
-                   if _alive(_read_pid(L.WorkerLayout(L.worker_dir(project, w)))))
+        live = sum(
+            1 for w in workers
+            if _worker_alive(L.WorkerLayout(L.worker_dir(project, w)))
+        )
         out.append({"project": project, "workers": len(workers), "live": live,
                     "model": meta.get("model", "—")})
     return out
@@ -660,25 +1027,28 @@ def _fmt_status(rows: List[Dict]) -> str:
 def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
     pid = _read_pid(wl)
     if not force:
-        if not _alive(pid):
+        if not _worker_alive(wl):
             return "not-running"
         wl.stop.touch()
         return "stopping (graceful)"
-    if not _alive(pid):
+    if not _worker_alive(wl):
         wl.pid.unlink(missing_ok=True)
         return "not-running"
     try:
-        pgid = os.getpgid(pid)
-        os.killpg(pgid, signal.SIGTERM)
+        pgid = os.getpgid(pid) if pid is not None else None
+        if pgid is not None:
+            os.killpg(pgid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
     for _ in range(50):
-        if not _alive(pid):
+        if not _worker_alive(wl):
             break
         time.sleep(0.1)
-    if _alive(pid):
+    if _worker_alive(wl):
         try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            pgid = os.getpgid(pid) if pid is not None else None
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
     wl.pid.unlink(missing_ok=True)
@@ -699,10 +1069,25 @@ def _pause_one(wl: L.WorkerLayout, reason: str = "manual") -> str:
 
 
 def do_pause(target: str) -> List[Dict]:
+    project, worker = L.resolve_target(target)
     dirs = L.target_worker_dirs(target)
     if not dirs:
         raise SystemExit(f"no workers for target {target!r}")
-    return [{"worker": d.name, "result": _pause_one(L.WorkerLayout(d))} for d in dirs]
+    if worker:
+        wl = L.WorkerLayout(dirs[0])
+        return [{"worker": wl.name, "result": _pause_one(wl)}]
+
+    atomic_write(_project_pause(project), "manual\n")
+    out = []
+    for wdir in dirs:
+        wl = L.WorkerLayout(wdir)
+        result = _stop_one(wl, force=False)
+        if result == "not-running":
+            result = "paused"
+        elif result == "stopping (graceful)":
+            result = "pausing"
+        out.append({"worker": wl.name, "result": result})
+    return out
 
 
 def _resume_one(wl: L.WorkerLayout) -> str:
@@ -711,14 +1096,21 @@ def _resume_one(wl: L.WorkerLayout) -> str:
 
 
 def do_resume(target: str, stagger: float = 0.2) -> List[Dict]:
+    project, worker = L.resolve_target(target)
     dirs = L.target_worker_dirs(target)
     if not dirs:
         raise SystemExit(f"no workers for target {target!r}")
+    if worker:
+        wl = L.WorkerLayout(dirs[0])
+        return [{"worker": wl.name, "result": _resume_one(wl)}]
+
+    _project_pause(project).unlink(missing_ok=True)
     out = []
     for i, wdir in enumerate(dirs):
         if i and stagger:
             time.sleep(stagger)
-        out.append({"worker": wdir.name, "result": _resume_one(L.WorkerLayout(wdir))})
+        wl = L.WorkerLayout(wdir)
+        out.append({"worker": wl.name, "result": _start_one(wl)})
     return out
 
 
