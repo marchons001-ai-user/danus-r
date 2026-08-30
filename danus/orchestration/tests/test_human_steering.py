@@ -69,6 +69,27 @@ def test_guide_does_not_disturb_project_pause(tmp_path: Path):
         ctx.__exit__(None, None, None)
 
 
+def test_project_resume_starts_only_active_assignments(tmp_path: Path, monkeypatch):
+    ctx, pdir = _project(tmp_path)
+    try:
+        cli.do_assign("P/low", "Continue R1.\n", node_id="R1")
+        (pdir / L.PAUSE_FILE).write_text("manual\n", encoding="utf-8")
+        started = []
+
+        def fake_start(target: str, stagger: float = 0.2):
+            started.append((target, stagger))
+            return [{"worker": target.rsplit("/", 1)[-1], "result": "started"}]
+
+        monkeypatch.setattr(steering, "do_start", fake_start)
+        result = {row["worker"]: row["result"] for row in steering.do_resume("P")}
+
+        assert result == {"low": "started", "low2": "idle"}
+        assert started == [("P/low", 0)]
+        assert not (pdir / L.PAUSE_FILE).exists()
+    finally:
+        ctx.__exit__(None, None, None)
+
+
 def test_interrupt_restarts_only_workers_that_were_live(tmp_path: Path, monkeypatch):
     ctx, _ = _project(tmp_path)
     try:
