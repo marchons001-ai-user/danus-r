@@ -117,7 +117,7 @@ def _alive(pid: Optional[int], expected_start: Optional[str] = None) -> bool:
 
 def _worker_alive(wl: L.WorkerLayout) -> bool:
     pid, expected_start = _read_pid_record(wl)
-    return _alive(pid, expected_start)
+    return _alive(pid) if expected_start is None else _alive(pid, expected_start)
 
 
 def _write_pid(wl: L.WorkerLayout, pid: int) -> None:
