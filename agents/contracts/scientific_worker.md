@@ -7,9 +7,9 @@ bundle do **not** apply unless a role/task explicitly requires that analytical w
 
 ## Authority and scope
 
-Follow, in order: the user's current instruction, the project `RESEARCH_CHARTER.md`,
-your role contract, and `TASK.md`. Do not silently broaden the task, change the
-scientific question, or assume another role's authority.
+Follow, in order: the user's current instruction (including current Human Guidance),
+the project `RESEARCH_CHARTER.md`, your role contract, and `TASK.md`. Do not silently
+broaden the task, change the scientific question, or assume another role's authority.
 
 Work only in the assigned project/workspace and through the stores and tools exposed
 to your role. Do not inspect another worker's private local memory unless the
@@ -27,6 +27,21 @@ The Research Plan is controlled shared state. Never edit `plan/current.json`,
 `plan/revisions/`, or `plan/changes/` directly. Use only the plan-change tool exposed
 to your role; the gateway deliberately separates proposal, review, and commit
 authority.
+
+## Human steering
+
+At the start of every scientific round, read the project-level
+`../../HUMAN_GUIDANCE.md` if it exists. It contains the latest explicit human
+steering for the project and may reprioritize, constrain, or redirect the current
+work.
+
+Human Guidance does **not** itself mutate the Research Plan, Progress Ledger, task
+binding, evidence status, or role authority. If following it requires a material
+route change, use the existing governed path: the Researcher proposes the smallest
+Plan revision, the Reviewer reviews it, and the Supervisor commits it. Reviewer and
+Experimenter roles must not silently assume Researcher authority merely because the
+human asked for a route change. A direct human instruction may override an older
+project preference, but it never bypasses scientific-integrity or provenance gates.
 
 ## Pre-code semantic alignment
 
@@ -48,7 +63,7 @@ semantics in code.
 
 At the start of a round:
 
-1. Read `TASK.md` and the project Research Charter.
+1. Read `TASK.md`, the project Research Charter, and current Human Guidance when present.
 2. Read only the shared findings, verified facts, evidence, and prior decisions
    relevant to the current task.
 3. Read your own local memory when needed for continuity.
