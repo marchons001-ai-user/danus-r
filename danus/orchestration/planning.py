@@ -26,6 +26,7 @@ from . import cli
 
 BRIEF_FILE = "RESEARCH_BRIEF.md"
 _PROPOSAL_REL = Path(".danus") / "plan_proposal.json"
+_BOOTSTRAP_REL = Path("planning") / "bootstrap.json"
 _POLICY_MARKER = "<!-- DANUS_AUTONOMOUS_PLANNING -->"
 _MAX_REPAIR_ATTEMPTS = 2
 
@@ -93,11 +94,20 @@ def _content_id(value: Any) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def _proposal_instructions(path: Path, plan_version: int) -> str:
-    return f"""Write exactly one JSON object to `{path}` only if a structural Plan change is needed.
+def _proposal_instructions(path: Path, plan_version: Optional[int]) -> str:
+    if plan_version is None:
+        version = "<current plan_version from the committed Research Plan>"
+        version_note = (
+            "Immediately before writing the proposal, read the current committed Research Plan "
+            "and copy its integer `plan_version` exactly into `base_plan_version`.\n"
+        )
+    else:
+        version = str(plan_version)
+        version_note = ""
+    return f"""{version_note}Write exactly one JSON object to `{path}` only if a structural Plan change is needed.
 Schema:
 {{
-  "base_plan_version": {plan_version},
+  "base_plan_version": {version},
   "reason": "why the route must change",
   "post_hoc": false,
   "evidence_refs": [],
@@ -108,13 +118,13 @@ Plan operation constraints are strict: every `add_node` has exactly `op`, `node_
 """
 
 
-def _researcher_footer(path: Path, plan_version: int) -> str:
+def _researcher_footer(path: Path) -> str:
     return (
         "\n\n## Autonomous Plan Revision\n\n"
         "If new evidence, a blocker, or changed scientific understanding makes the committed "
         "route materially wrong or incomplete, use this project handoff instead of editing Plan "
         "state or calling `plan_propose_change` directly. Otherwise create no proposal file.\n\n"
-        + _proposal_instructions(path, plan_version)
+        + _proposal_instructions(path, None)
     )
 
 
@@ -186,21 +196,79 @@ def initialize_research(project: str, *, brief: Optional[str] = None, model: Opt
     if not (pdir / "plan" / "current.json").is_file():
         ResearchPlanGraph.create(pdir, node_id="P0", title="Research Project", summary="Autonomous research root")
 
-    plan = ResearchPlanGraph(pdir).snapshot()
+    graph = ResearchPlanGraph(pdir)
+    plan = graph.snapshot()
     bootstrap_result = "not-needed"
     bootstrap_assignment = None
     if plan["plan_version"] == 1 and set(plan["nodes"]) == {plan["root_id"]}:
-        task = _bootstrap_task(pdir, 1)
-        digest = ProgressLedger.task_sha256(task)
-        prior = [a for a in ProgressLedger(pdir).assignments() if a.get("task_sha256") == digest]
-        if prior:
-            bootstrap_assignment = prior[-1].get("assignment_id")
+        researcher = roles["researcher"][0]
+        ledger = ProgressLedger(pdir)
+        assignments = ledger.assignments()
+        record_path = pdir / _BOOTSTRAP_REL
+        record: Dict[str, Any] = {}
+        if record_path.is_file():
+            try:
+                loaded = json.loads(record_path.read_text(encoding="utf-8"))
+                record = loaded if isinstance(loaded, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                record = {}
+        recorded_id = str(record.get("assignment_id") or "")
+        recorded = next((a for a in assignments if a.get("assignment_id") == recorded_id), None)
+        if recorded_id:
+            if (
+                recorded is None
+                or recorded.get("worker") != researcher
+                or recorded.get("node_id") != plan["root_id"]
+                or int(recorded.get("plan_version") or 0) != 1
+            ):
+                raise SystemExit("bootstrap provenance does not match a valid root Researcher assignment")
+            bootstrap_assignment = recorded_id
             bootstrap_result = "existing"
         else:
-            researcher = roles["researcher"][0]
-            assignment = cli.do_assign(f"{project}/{researcher}", task, node_id=plan["root_id"])
-            bootstrap_assignment = assignment.get("assignment_id")
-            bootstrap_result = cli._start_one(L.WorkerLayout(L.worker_dir(project, researcher)))
+            root_assignments = [
+                a for a in assignments
+                if a.get("worker") == researcher
+                and a.get("node_id") == plan["root_id"]
+                and int(a.get("plan_version") or 0) == 1
+            ]
+            root_assignments.sort(key=lambda item: str(item.get("assigned_at") or ""))
+            wl = L.WorkerLayout(L.worker_dir(project, researcher))
+            try:
+                current_task = wl.task.read_text(encoding="utf-8")
+            except OSError:
+                current_task = ""
+            progressed = (
+                current_task.startswith("# Autonomous Research Bootstrap\n")
+                or _proposal_path(pdir).is_file()
+                or (_proposal_dir(pdir).is_dir() and any(_proposal_dir(pdir).glob("*.json")))
+                or any(_proposal_id_from_change(item) for item in graph.pending_changes())
+            )
+            if root_assignments and progressed:
+                prior = root_assignments[0]
+                bootstrap_assignment = str(prior.get("assignment_id") or "")
+                atomic_write(record_path, _json_text({
+                    "assignment_id": bootstrap_assignment,
+                    "worker": researcher,
+                    "node_id": plan["root_id"],
+                    "plan_version": 1,
+                    "recorded_at": utc_now(),
+                    "recovered": True,
+                }))
+                bootstrap_result = "existing"
+            else:
+                task = _bootstrap_task(pdir, 1)
+                assignment = cli.do_assign(f"{project}/{researcher}", task, node_id=plan["root_id"])
+                bootstrap_assignment = assignment.get("assignment_id")
+                atomic_write(record_path, _json_text({
+                    "assignment_id": bootstrap_assignment,
+                    "worker": researcher,
+                    "node_id": plan["root_id"],
+                    "plan_version": 1,
+                    "task_sha256": ProgressLedger.task_sha256(task),
+                    "recorded_at": utc_now(),
+                    "recovered": False,
+                }))
+                bootstrap_result = cli._start_one(wl)
 
     return {
         "project": project,
@@ -302,7 +370,7 @@ def _normalize_proposal(graph: ResearchPlanGraph, raw: Dict[str, Any], proposal_
         if not task.endswith("\n"):
             task += "\n"
         if role == "researcher":
-            task = task.rstrip() + _researcher_footer(proposal_path, base) + "\n"
+            task = task.rstrip() + _researcher_footer(proposal_path) + "\n"
         tasks.append({"node_id": node_id, "role": role, "task": task})
         seen.add(node_id)
     if seen != required:
