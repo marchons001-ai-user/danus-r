@@ -30,10 +30,10 @@ authority.
 
 ## Human steering
 
-At the start of every scientific round, read the project-level
-`../../HUMAN_GUIDANCE.md` if it exists. It contains the latest explicit human
-steering for the project and may reprioritize, constrain, or redirect the current
-work.
+At the start of every scientific round, the runtime injects the current durable
+`HUMAN_GUIDANCE.md` content inside `<CURRENT_HUMAN_GUIDANCE>` when guidance exists.
+Treat that injected block as the latest explicit human steering for the project; do
+not spend a tool call rereading the file merely to rediscover the same text.
 
 Human Guidance does **not** itself mutate the Research Plan, Progress Ledger, task
 binding, evidence status, or role authority. If following it requires a material
@@ -63,7 +63,7 @@ semantics in code.
 
 At the start of a round:
 
-1. Read `TASK.md`, the project Research Charter, and current Human Guidance when present.
+1. Read `TASK.md`, then use the already injected Research Charter and current Human Guidance.
 2. Read only the shared findings, verified facts, evidence, and prior decisions
    relevant to the current task.
 3. Read your own local memory when needed for continuity.
