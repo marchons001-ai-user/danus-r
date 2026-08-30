@@ -15,4 +15,8 @@ if __name__ == "__main__":
         from .steering import main as guide_main
 
         sys.exit(guide_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "resume":
+        from .steering import resume_main
+
+        sys.exit(resume_main(sys.argv[2:]))
     sys.exit(main())
