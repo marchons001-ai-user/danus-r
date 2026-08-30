@@ -11,7 +11,7 @@ from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write
 
 from .cli import do_resume as _legacy_resume
-from .cli import do_start, do_status, do_stop
+from .cli import do_start, do_status, do_stop, project_control_lock
 
 _GUIDANCE_FILE = "HUMAN_GUIDANCE.md"
 _ACTIVE_PROGRESS = frozenset({"ASSIGNED", "RUNNING"})
@@ -19,6 +19,12 @@ _ACTIVE_PROGRESS = frozenset({"ASSIGNED", "RUNNING"})
 
 def guidance_path(project: str) -> Path:
     return L.project_dir(project) / _GUIDANCE_FILE
+
+
+def _write_guidance(project: str, message: str) -> Path:
+    path = guidance_path(project)
+    atomic_write(path, f"# Current Human Guidance\n\n{message}\n")
+    return path
 
 
 def do_guide(project: str, text: str, *, interrupt: bool = False) -> Dict[str, Any]:
@@ -33,25 +39,27 @@ def do_guide(project: str, text: str, *, interrupt: bool = False) -> Dict[str, A
     if not message:
         raise SystemExit("refusing empty guidance")
 
-    path = guidance_path(project)
-    atomic_write(path, f"# Current Human Guidance\n\n{message}\n")
-
     interrupted: List[Dict[str, str]] = []
-    if interrupt:
-        # Only workers that were live at command time are restarted. Their current
-        # assignment remains untouched; Supervisor/Progress provenance is unchanged.
-        for row in do_status(project):
-            if not row.get("alive"):
-                continue
-            worker = str(row["worker"])
-            target = f"{project}/{worker}"
-            stopped = do_stop(target, force=True)[0]["result"]
-            started = do_start(target, stagger=0)[0]["result"]
-            interrupted.append({
-                "worker": worker,
-                "stop_result": str(stopped),
-                "start_result": str(started),
-            })
+    if not interrupt:
+        path = _write_guidance(project, message)
+    else:
+        # Share the Supervisor/planning mutation lock so no automatic dispatch can
+        # replace TASK.md in the kill/restart window. Assignment provenance itself
+        # stays unchanged.
+        with project_control_lock(pdir):
+            path = _write_guidance(project, message)
+            for row in do_status(project):
+                if not row.get("alive"):
+                    continue
+                worker = str(row["worker"])
+                target = f"{project}/{worker}"
+                stopped = do_stop(target, force=True)[0]["result"]
+                started = do_start(target, stagger=0)[0]["result"]
+                interrupted.append({
+                    "worker": worker,
+                    "stop_result": str(stopped),
+                    "start_result": str(started),
+                })
 
     return {
         "project": project,
