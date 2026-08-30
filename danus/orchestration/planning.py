@@ -27,6 +27,7 @@ from . import cli
 BRIEF_FILE = "RESEARCH_BRIEF.md"
 _PROPOSAL_REL = Path(".danus") / "plan_proposal.json"
 _BOOTSTRAP_REL = Path("planning") / "bootstrap.json"
+_REPAIR_ERROR_REL = Path("planning") / "repair_error.json"
 _POLICY_MARKER = "<!-- DANUS_AUTONOMOUS_PLANNING -->"
 _MAX_REPAIR_ATTEMPTS = 2
 
@@ -83,6 +84,10 @@ def _proposal_dir(pdir: Path) -> Path:
 
 def _proposal_record_path(pdir: Path, proposal_id: str) -> Path:
     return _proposal_dir(pdir) / f"{proposal_id}.json"
+
+
+def _repair_error_path(pdir: Path) -> Path:
+    return pdir / _REPAIR_ERROR_REL
 
 
 def _json_text(value: Any) -> str:
@@ -496,15 +501,15 @@ def _revision_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
     )
 
 
-def _repair_task(pdir: Path, reason: str) -> str:
+def _repair_task(pdir: Path) -> str:
     current = ResearchPlanGraph(pdir).snapshot()["plan_version"]
     return (
         "# Repair Autonomous Plan Proposal\n\n"
-        f"The proposal at `{_proposal_path(pdir)}` failed deterministic control-plane validation:\n\n"
-        f"{reason}\n\n"
-        "Replace that JSON with the smallest correction needed to satisfy the validator. Preserve "
-        "the scientific intent and task decomposition unless the error itself requires changing them; "
-        "do not broaden the research.\n\n"
+        f"Read the latest deterministic validation failure at `{_repair_error_path(pdir)}` and "
+        f"the rejected proposal at `{_proposal_path(pdir)}`. Replace that proposal JSON with the "
+        "smallest correction needed to satisfy the validator. Preserve the scientific intent and "
+        "task decomposition unless the error itself requires changing them; do not broaden the "
+        "research.\n\n"
         + _proposal_instructions(_proposal_path(pdir), current)
         + "\nAfter replacing the proposal, end with COMPLETE.\n"
     )
@@ -611,8 +616,7 @@ def _recover_materialized_tasks(pdir: Path) -> List[Dict[str, Any]]:
     return actions
 
 
-def planning_step(project: str) -> List[Dict[str, Any]]:
-    """Run one deterministic proposal/review/commit/materialization pass."""
+def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
     pdir = L.project_dir(project)
     if (pdir / L.PAUSE_FILE).is_file():
         return []
@@ -621,12 +625,23 @@ def planning_step(project: str) -> List[Dict[str, Any]]:
     if captured:
         actions.append(captured)
         if captured.get("result") == "blocked":
-            task = _repair_task(pdir, str(captured.get("reason") or "proposal validation failed"))
-            item = _assign_role(project, "researcher", task, ResearchPlanGraph(pdir).snapshot()["root_id"])
+            reason = str(captured.get("reason") or "proposal validation failed")
+            atomic_write(_repair_error_path(pdir), _json_text({
+                "plan_version": ResearchPlanGraph(pdir).snapshot()["plan_version"],
+                "reason": reason,
+                "recorded_at": utc_now(),
+            }))
+            item = _assign_role(
+                project,
+                "researcher",
+                _repair_task(pdir),
+                ResearchPlanGraph(pdir).snapshot()["root_id"],
+            )
             item["action"] = "PLAN_REPAIR"
-            item["reason"] = captured.get("reason")
+            item["reason"] = reason
             actions.append(item)
             return actions
+        _repair_error_path(pdir).unlink(missing_ok=True)
 
     graph = ResearchPlanGraph(pdir)
     linked = [item for item in graph.pending_changes() if _proposal_id_from_change(item)]
@@ -696,6 +711,13 @@ def planning_step(project: str) -> List[Dict[str, Any]]:
                 item.update({"change_id": change["change_id"], "proposal_id": proposal_id})
                 actions.append(item)
     return actions
+
+
+def planning_step(project: str) -> List[Dict[str, Any]]:
+    """Run one serialized proposal/review/commit/materialization pass."""
+    pdir = L.project_dir(project)
+    with cli.project_control_lock(pdir):
+        return _planning_step_unlocked(project)
 
 
 def watch_research(project: str, *, heartbeat: float = 1800.0, poll: float = 1.0, token_budget: int = 0) -> Iterator[Dict[str, Any]]:
