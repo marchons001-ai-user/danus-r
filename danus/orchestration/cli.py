@@ -38,6 +38,7 @@ from danus.core._util import append_jsonl, utc_now
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
 
+from . import autonomy as A
 from . import quota as Q
 from .control import quota_policy, reconcile, reviewer_cost_policy
 
@@ -52,10 +53,6 @@ __all__ = [
     "do_list", "do_stop", "do_finalize", "build_parser", "main",
 ]
 
-
-# --------------------------------------------------------------------------- #
-# read helpers                                                                 #
-# --------------------------------------------------------------------------- #
 
 def _read_pid(wl: L.WorkerLayout) -> Optional[int]:
     pf = wl.pid
@@ -75,12 +72,10 @@ def _alive(pid: Optional[int]) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # exists but not ours
-    # The pid exists — but a zombie (killed, not yet reaped by its parent) is
-    # effectively dead. Linux /proc tells us the process state.
+        return True
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-        state = stat.rsplit(")", 1)[1].split()[0]  # field after "(comm)"
+        state = stat.rsplit(")", 1)[1].split()[0]
         return state != "Z"
     except (OSError, IndexError):
         return True
@@ -130,7 +125,6 @@ def _selected_worker_backend(wl: L.WorkerLayout) -> str:
 
 
 def _uses_openai_codex(wl: L.WorkerLayout) -> bool:
-    """Quota pressure never gates a worker currently bound to DSH."""
     return _selected_worker_backend(wl) != "dsh"
 
 
@@ -271,12 +265,7 @@ def _project_pause(project: str) -> Path:
     return L.project_dir(project) / L.PAUSE_FILE
 
 
-# --------------------------------------------------------------------------- #
-# assign                                                                       #
-# --------------------------------------------------------------------------- #
-
 def do_assign(target: str, task: str, node_id: Optional[str] = None) -> Dict:
-    """Replace one worker TASK.md and, for planned projects, bind it to Plan."""
     project, worker = L.resolve_target(target)
     if not worker:
         raise SystemExit("assign needs a specific worker: <project>/<worker>")
@@ -285,7 +274,6 @@ def do_assign(target: str, task: str, node_id: Optional[str] = None) -> Dict:
         raise SystemExit(f"no such worker: {project}/{worker}")
     if not task.strip():
         raise SystemExit("refusing to assign an empty task")
-
     text = task if task.endswith("\n") else task + "\n"
     pdir = wl.project_dir
     planned = (pdir / "plan" / "current.json").is_file()
@@ -296,12 +284,10 @@ def do_assign(target: str, task: str, node_id: Optional[str] = None) -> Dict:
         return {"worker": f"{project}/{worker}", "task_file": str(wl.task)}
     if not node_id:
         raise SystemExit("assign on a planned project requires --node <plan_node_id>")
-
     try:
         plan_version = ResearchPlanGraph(pdir).snapshot()["plan_version"]
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"cannot read Research Plan: {exc}") from exc
-
     old_task = None
     if wl.task.exists():
         try:
@@ -323,7 +309,6 @@ def do_assign(target: str, task: str, node_id: Optional[str] = None) -> Dict:
         else:
             atomic_write(wl.task, old_task)
         raise SystemExit(f"cannot bind assignment: {exc}") from exc
-
     return {
         "worker": f"{project}/{worker}",
         "task_file": str(wl.task),
@@ -333,39 +318,15 @@ def do_assign(target: str, task: str, node_id: Optional[str] = None) -> Dict:
     }
 
 
-# --------------------------------------------------------------------------- #
-# finalize                                                                     #
-# --------------------------------------------------------------------------- #
-
-def do_finalize(project: str, fact_ids: List[str],
-                paper_id: Optional[str] = None) -> Dict:
-    """Record the finalized target theorem(s) for a PAPER of a project in that
-    paper's TARGET.md — the durable slot write-paper reads (never a guess). The
-    default paper writes the LEGACY ``<project>/TARGET.md``; a non-default
-    ``paper_id`` writes ``<project>/papers/<paper_id>/TARGET.md`` (its own
-    workspace). One fact graph per project; per-paper targets.
-
-    Resolves the project dir, VALIDATES every ``fact_id`` against that project's
-    fact graph (refuses an id the graph does not have — you cannot record a
-    phantom target), then writes the ids to the paper's TARGET.md.
-
-    With NO ``fact_ids`` (suggestion mode): prints the candidate terminal facts
-    (facts that are no other fact's predecessor — the ``assemble._terminal_facts``
-    helper) as SUGGESTIONS and writes NOTHING (returns ``{"suggested": [...]}``).
-
-    Rejections raise ``SystemExit`` (nonzero exit) with a clear message."""
+def do_finalize(project: str, fact_ids: List[str], paper_id: Optional[str] = None) -> Dict:
     from danus.core import FactGraph
     from danus.write_paper import assemble
-
     pdir = L.project_dir(project)
     if not pdir.is_dir():
         raise SystemExit(f"no such project: {project}")
     fg = FactGraph(pdir)
-
     if not fact_ids:
-        return {"project": project, "paper_id": paper_id,
-                "suggested": assemble._terminal_facts(fg)}
-
+        return {"project": project, "paper_id": paper_id, "suggested": assemble._terminal_facts(fg)}
     unknown = [fid for fid in fact_ids if not fg.exists(fid)]
     if unknown:
         raise SystemExit(
@@ -374,7 +335,7 @@ def do_finalize(project: str, fact_ids: List[str],
         )
     try:
         if not assemble._is_default_paper(paper_id):
-            assemble._validate_paper_id(paper_id)  # type: ignore[arg-type]
+            assemble._validate_paper_id(paper_id)
     except ValueError as e:
         raise SystemExit(f"cannot finalize: {e}")
     seen: set = set()
@@ -384,16 +345,10 @@ def do_finalize(project: str, fact_ids: List[str],
             seen.add(fid)
             ids.append(fid)
     path = assemble.write_target_fact_ids(pdir, ids, paper_id)
-    return {"project": project, "paper_id": paper_id,
-            "target_file": str(path), "target_fact_ids": ids}
+    return {"project": project, "paper_id": paper_id, "target_file": str(path), "target_fact_ids": ids}
 
-
-# --------------------------------------------------------------------------- #
-# start                                                                        #
-# --------------------------------------------------------------------------- #
 
 def _start_one(wl: L.WorkerLayout) -> str:
-    """Start one worker unless worker/project pause state blocks it."""
     wl.dir.mkdir(parents=True, exist_ok=True)
     wl.logs.mkdir(exist_ok=True)
     if (wl.project_dir / L.PAUSE_FILE).is_file():
@@ -430,10 +385,6 @@ def do_start(target: str, stagger: float = 0.2) -> List[Dict]:
     return out
 
 
-# --------------------------------------------------------------------------- #
-# status                                                                       #
-# --------------------------------------------------------------------------- #
-
 def worker_status(wl: L.WorkerLayout) -> Dict:
     pid = _read_pid(wl)
     alive = _alive(pid)
@@ -443,7 +394,6 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
     last = st.get("last_round_at") or st.get("round_started_at") or st.get("updated_at")
     age = (now - last) if isinstance(last, (int, float)) else None
     pause_reason = _pause_reason(wl)
-
     if pause_reason is not None:
         label = "paused"
     elif alive:
@@ -454,9 +404,7 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         else:
             label = "working"
     else:
-        label = state if state in ("stopped", "deadline", "max_rounds", "error",
-                                   "terminated", "created") else "dead"
-
+        label = state if state in ("stopped", "deadline", "max_rounds", "error", "terminated", "created") else "dead"
     progress = None
     progress_error = None
     ledger_path = wl.project_dir / "progress" / "ledger.jsonl"
@@ -465,10 +413,6 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
             progress = ProgressLedger(wl.project_dir).current(wl.name, refresh_stale=True)
         except (FileNotFoundError, ValueError) as exc:
             progress_error = str(exc)
-
-    # Codex exposes completed-turn usage; DSH headless currently does not expose a
-    # stable usage stream. An auto Reviewer may also have mixed DSH/Terra history,
-    # so its cumulative total is conservatively incomplete after it has run.
     backend = _selected_worker_backend(wl)
     round_no = int(st.get("round") or 0)
     usage_available = backend != "dsh" and any(
@@ -477,27 +421,10 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
     usage_complete = round_no == 0 or (
         backend != "dsh" and not _auto_reviewer(wl) and "context_tokens_total" in st
     )
-    round_usage_tokens = (
-        int(st.get("context_tokens") or 0)
-        if backend != "dsh" and "context_tokens" in st
-        else None
-    )
-    usage_tokens_total = (
-        0 if round_no == 0
-        else int(st.get("context_tokens_total") or 0) if usage_complete
-        else None
-    )
-    usage_tool_calls = (
-        int(st.get("context_tool_calls") or 0)
-        if backend != "dsh" and "context_tool_calls" in st
-        else None
-    )
-    usage_compactions = (
-        int(st.get("context_compactions") or 0)
-        if backend != "dsh" and "context_compactions" in st
-        else None
-    )
-
+    round_usage_tokens = int(st.get("context_tokens") or 0) if backend != "dsh" and "context_tokens" in st else None
+    usage_tokens_total = 0 if round_no == 0 else int(st.get("context_tokens_total") or 0) if usage_complete else None
+    usage_tool_calls = int(st.get("context_tool_calls") or 0) if backend != "dsh" and "context_tool_calls" in st else None
+    usage_compactions = int(st.get("context_compactions") or 0) if backend != "dsh" and "context_compactions" in st else None
     return {
         "worker": wl.name, "pid": pid, "alive": alive, "state": state,
         "round": st.get("round", 0), "age_s": round(age, 1) if age is not None else None,
@@ -515,8 +442,6 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         "usage_available": usage_available,
         "usage_complete": usage_complete,
         "token_semantics": _TOKEN_USAGE_SEMANTICS,
-        # Compatibility aliases. They intentionally become null when usage is
-        # unknown rather than claiming that DSH used zero tokens/tool calls.
         "context_tokens": round_usage_tokens,
         "context_tokens_total": usage_tokens_total,
         "context_tool_calls": usage_tool_calls,
@@ -540,24 +465,13 @@ def do_status(target: str) -> List[Dict]:
 
 
 def _project_rows(project: str) -> List[Dict[str, Any]]:
-    return [
-        worker_status(L.WorkerLayout(L.worker_dir(project, worker)))
-        for worker in L.list_workers(project)
-    ]
+    return [worker_status(L.WorkerLayout(L.worker_dir(project, worker))) for worker in L.list_workers(project)]
 
 
 def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int) -> Dict[str, Any]:
-    known_totals = [
-        max(0, int(row["usage_tokens_total"]))
-        for row in rows
-        if row.get("usage_complete") and row.get("usage_tokens_total") is not None
-    ]
+    known_totals = [max(0, int(row["usage_tokens_total"])) for row in rows if row.get("usage_complete") and row.get("usage_tokens_total") is not None]
     used_tokens = sum(known_totals)
-    unknown_workers = sorted(
-        str(row.get("worker") or "")
-        for row in rows
-        if not row.get("usage_complete")
-    )
+    unknown_workers = sorted(str(row.get("worker") or "") for row in rows if not row.get("usage_complete"))
     limit = max(0, int(token_budget))
     if limit and used_tokens >= limit:
         token_exceeded: Optional[bool] = True
@@ -565,7 +479,6 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
         token_exceeded = None
     else:
         token_exceeded = False
-
     deadline = None
     deadline_path = pdir / L.DEADLINE_FILE
     try:
@@ -573,7 +486,6 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
     except (OSError, ValueError):
         deadline = None
     now = time.time()
-
     experiments = []
     store = EvidenceStore(pdir)
     runtime_dir = pdir / "experiment_runtime"
@@ -599,7 +511,6 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
                 "failures": len(failures) if isinstance(failures, list) else 0,
                 "evidence_id": checkpoint.get("evidence_id"),
             })
-
     tokens = {"used": used_tokens, "limit": limit, "exceeded": token_exceeded}
     if unknown_workers:
         tokens.update({
@@ -608,7 +519,6 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
             "unknown_workers": unknown_workers,
             "semantics": _TOKEN_USAGE_SEMANTICS,
         })
-
     return {
         "tokens": tokens,
         "time": {
@@ -627,7 +537,6 @@ def _resource_snapshot(pdir: Path, rows: List[Dict[str, Any]], token_budget: int
                 "tool_calls": row.get("usage_tool_calls"),
                 "compactions": row.get("usage_compactions"),
                 "rollover": row.get("context_trigger"),
-                # Compatibility aliases for existing consumers.
                 "tokens": row.get("round_usage_tokens"),
                 "tokens_total": row.get("usage_tokens_total"),
             }
@@ -645,7 +554,6 @@ def _apply_resource_budget(report: Dict[str, Any], rows: List[Dict[str, Any]], b
         reason = "resource_token_budget"
     if not reason:
         return
-
     report["decisions"] = [
         {
             "action": "STOP",
@@ -661,17 +569,14 @@ def _apply_resource_budget(report: Dict[str, Any], rows: List[Dict[str, Any]], b
 
 
 def _apply_quota_gate(project: str, rows: List[Dict[str, Any]], policy: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Persist/clear only quota-owned pauses; active rounds are never signalled."""
     block = bool(policy.get("block_new_codex_rounds"))
     state = str(policy.get("state") or "UNKNOWN").lower()
     reason = str(policy.get("reason") or "quota")
     applied: List[Dict[str, Any]] = []
-
     for row in rows:
         wl = L.WorkerLayout(L.worker_dir(project, row["worker"]))
         pause_reason = _pause_reason(wl)
         quota_owned = bool(pause_reason and pause_reason.startswith("quota:"))
-
         if block:
             if not _uses_openai_codex(wl):
                 if quota_owned:
@@ -682,20 +587,16 @@ def _apply_quota_gate(project: str, rows: List[Dict[str, Any]], policy: Dict[str
                 continue
             if not quota_owned:
                 atomic_write(wl.pause, f"quota:{state}:{reason}\n")
-            # .stop is already the worker loop's safe round boundary: it is checked
-            # before the next model round. Do not SIGTERM an active round for quota.
             if row.get("alive"):
                 wl.stop.touch()
             applied.append({"worker": row["worker"], "result": "pause-at-round-boundary"})
             continue
-
         if quota_owned:
             wl.pause.unlink(missing_ok=True)
             result = "quota-cleared"
             if not row.get("alive") and row.get("progress_state") in {"ASSIGNED", "RUNNING"}:
                 result = _start_one(wl)
             applied.append({"worker": row["worker"], "result": result})
-
     return applied
 
 
@@ -708,17 +609,13 @@ def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -
         worker = decision.get("worker")
         reason = str(decision.get("reason") or "")
         result = "no-op"
-
         if action == "CONTINUE":
             result = "continued"
         elif action == "REVIEW":
             if worker:
                 current = ledger.current(worker, refresh_stale=True)
                 if current and current["state"] != "DONE":
-                    result = _pause_one(
-                        L.WorkerLayout(L.worker_dir(project, worker)),
-                        reason=f"review:{reason}",
-                    )
+                    result = _pause_one(L.WorkerLayout(L.worker_dir(project, worker)), reason=f"review:{reason}")
                 else:
                     result = "pending_review"
             else:
@@ -727,8 +624,6 @@ def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -
             if worker:
                 result = _start_one(L.WorkerLayout(L.worker_dir(project, worker)))
             else:
-                # A ready node has no task text or scientific role encoded in Plan.
-                # Deterministic Supervisor must not invent either.
                 result = "pending_assignment"
         elif action == "STOP":
             if worker:
@@ -739,7 +634,6 @@ def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -
                     result = _stop_one(wl, force=True)
             else:
                 result = "no_worker"
-
         applied.append({**decision, "result": result})
     return applied
 
@@ -755,6 +649,7 @@ def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -
             "plan_changes": report.get("plan_changes", []),
             "decisions": report.get("decisions", []),
             "applied": report.get("applied", []),
+            "autonomy_applied": report.get("autonomy_applied", []),
             "budget": report.get("budget", {}),
             "quota_policy": report.get("quota_policy", {}),
             "quota_applied": report.get("quota_applied", []),
@@ -774,12 +669,6 @@ def do_supervise(
     token_budget: int = 0,
     trigger: str = "manual",
 ) -> Dict:
-    """Run one deterministic Supervisor reconciliation pass.
-
-    ``--complete-node`` / ``--reopen-node`` update only Progress Ledger node state;
-    they never revise the Research Plan. With ``apply=True`` the existing
-    CONTINUE/REVIEW/RETASK/STOP decisions are executed as process-control actions.
-    """
     pdir = L.project_dir(project)
     if not pdir.is_dir():
         raise SystemExit(f"no such project: {project}")
@@ -789,7 +678,6 @@ def do_supervise(
         raise SystemExit("choose only one of --complete-node or --reopen-node")
     if token_budget < 0:
         raise SystemExit("token budget must be >= 0")
-
     ledger = ProgressLedger(pdir)
     try:
         if complete_node:
@@ -805,15 +693,19 @@ def do_supervise(
             _apply_resource_budget(report, rows, budget)
         policy = quota_policy(Q.load_quota(pdir))
         report["quota_policy"] = policy
-        report["reviewer_cost_policy"] = (
-            [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=False)
-        )
+        report["reviewer_cost_policy"] = [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=False)
         if apply:
-            report["reviewer_cost_applied"] = (
-                [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=True)
-            )
+            report["reviewer_cost_applied"] = [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=True)
             report["quota_applied"] = [] if quiescent else _apply_quota_gate(project, rows, policy)
             report["applied"] = _apply_supervisor_decisions(project, report["decisions"])
+            report["autonomy_applied"] = [] if quiescent else A.apply_autonomy(
+                project,
+                report["decisions"],
+                rows=rows,
+                assign=do_assign,
+                start=_start_one,
+                role_of=_read_worker_role,
+            )
             _record_supervisor_event(pdir, trigger, report)
         return report
     except (FileNotFoundError, ValueError) as exc:
@@ -821,7 +713,6 @@ def do_supervise(
 
 
 def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[str, Any]) -> str:
-    """Small change signature; age_s is deliberately excluded so idle time is not an event."""
     pdir = L.project_dir(project)
     compact_rows = [
         {k: row.get(k) for k in (
@@ -834,12 +725,11 @@ def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[st
         )}
         for row in rows
     ]
-
     stamps = []
-    paths = [pdir / "plan" / "current.json", pdir / "progress" / "ledger.jsonl",
-             pdir / L.PAUSE_FILE, pdir / L.DEADLINE_FILE, Q.quota_path(pdir)]
+    paths = [pdir / "plan" / "current.json", pdir / "progress" / "ledger.jsonl", pdir / L.PAUSE_FILE, pdir / L.DEADLINE_FILE, Q.quota_path(pdir)]
     paths.extend(sorted((pdir / "plan" / "changes").glob("*.json")))
     paths.extend(sorted((pdir / "experiment_runtime").glob("*/checkpoint.json")))
+    paths.extend(sorted((pdir / "tasks").glob("v*/*/*.md")))
     for path in paths:
         try:
             stat = path.stat()
@@ -869,26 +759,20 @@ def watch_supervisor(
     poll: float = 1.0,
     token_budget: int = 0,
 ) -> Iterator[Dict[str, Any]]:
-    """Change-driven long-running Supervisor with quota refresh at safe boundaries."""
     if heartbeat <= 0:
         raise SystemExit("heartbeat must be > 0")
     if poll <= 0:
         raise SystemExit("poll must be > 0")
-
     pdir = L.project_dir(project)
     last_signature: Optional[str] = None
     last_reconcile = 0.0
     last_quota_refresh: Optional[float] = None
     while True:
         now = time.monotonic()
-        quota_due = (
-            last_quota_refresh is None
-            or now - last_quota_refresh >= _QUOTA_REFRESH_SECONDS
-        )
+        quota_due = last_quota_refresh is None or now - last_quota_refresh >= _QUOTA_REFRESH_SECONDS
         if quota_due:
             Q.refresh_quota(pdir)
             last_quota_refresh = now
-
         rows = _project_rows(project)
         budget = _resource_snapshot(pdir, rows, token_budget)
         signature = _control_signature(project, rows, budget)
@@ -899,17 +783,9 @@ def watch_supervisor(
             trigger = "quota"
         elif now - last_reconcile >= heartbeat:
             trigger = "heartbeat"
-
         if trigger:
-            report = do_supervise(
-                project,
-                apply=True,
-                token_budget=token_budget,
-                trigger=trigger,
-            )
+            report = do_supervise(project, apply=True, token_budget=token_budget, trigger=trigger)
             last_reconcile = now
-            # Actions themselves change pid/pause/progress/quota files; consume that
-            # new state now so the next poll does not replay our own action.
             rows = _project_rows(project)
             budget = _resource_snapshot(pdir, rows, token_budget)
             last_signature = _control_signature(project, rows, budget)
@@ -919,12 +795,7 @@ def watch_supervisor(
         time.sleep(poll)
 
 
-# --------------------------------------------------------------------------- #
-# list                                                                         #
-# --------------------------------------------------------------------------- #
-
 def do_list() -> List[Dict]:
-    """One row per project: roster + how many workers are live + model."""
     out: List[Dict] = []
     for project in L.list_projects():
         meta = {}
@@ -935,10 +806,8 @@ def do_list() -> List[Dict]:
             except (json.JSONDecodeError, OSError):
                 meta = {}
         workers = L.list_workers(project)
-        live = sum(1 for w in workers
-                   if _alive(_read_pid(L.WorkerLayout(L.worker_dir(project, w)))))
-        out.append({"project": project, "workers": len(workers), "live": live,
-                    "model": meta.get("model", "—")})
+        live = sum(1 for w in workers if _alive(_read_pid(L.WorkerLayout(L.worker_dir(project, w)))))
+        out.append({"project": project, "workers": len(workers), "live": live, "model": meta.get("model", "—")})
     return out
 
 
@@ -959,10 +828,6 @@ def _fmt_status(rows: List[Dict]) -> str:
                      f"{r['round']:>6}  {age:>7}  {str(r['last_fact_id'] or '—'):<16}")
     return "\n".join(lines)
 
-
-# --------------------------------------------------------------------------- #
-# stop                                                                         #
-# --------------------------------------------------------------------------- #
 
 def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
     pid = _read_pid(wl)
@@ -1013,7 +878,6 @@ def do_pause(target: str) -> List[Dict]:
     if worker:
         wl = L.WorkerLayout(dirs[0])
         return [{"worker": wl.name, "result": _pause_one(wl)}]
-
     atomic_write(_project_pause(project), "manual\n")
     out = []
     for wdir in dirs:
@@ -1040,7 +904,6 @@ def do_resume(target: str, stagger: float = 0.2) -> List[Dict]:
     if worker:
         wl = L.WorkerLayout(dirs[0])
         return [{"worker": wl.name, "result": _resume_one(wl)}]
-
     _project_pause(project).unlink(missing_ok=True)
     out = []
     for i, wdir in enumerate(dirs):
@@ -1050,10 +913,6 @@ def do_resume(target: str, stagger: float = 0.2) -> List[Dict]:
         out.append({"worker": wl.name, "result": _start_one(wl)})
     return out
 
-
-# --------------------------------------------------------------------------- #
-# argparse                                                                      #
-# --------------------------------------------------------------------------- #
 
 def _task_from_args(args) -> str:
     import sys
@@ -1069,64 +928,44 @@ def _task_from_args(args) -> str:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="danus", description="Control codex workers.")
     sub = p.add_subparsers(dest="cmd", required=True)
-
     li = sub.add_parser("list", help="list all projects + live worker counts")
     li.add_argument("--json", action="store_true")
-
     n = sub.add_parser("new", help="scaffold a project + worker dirs")
     n.add_argument("project")
     n.add_argument("--roles", default="high:3,xhigh:4", help="e.g. high:3,xhigh:4 (default)")
     n.add_argument("--model", default=None)
-
     a = sub.add_parser("assign", help="write a worker's per-round TASK.md")
     a.add_argument("target", help="<project>/<worker>")
     a.add_argument("--task", default=None)
     a.add_argument("--file", default=None)
     a.add_argument("--stdin", action="store_true")
     a.add_argument("--node", default=None, help="Research Plan node id; required when a plan exists")
-
-    f = sub.add_parser("finalize", help="record the finalized target fact_id(s) in "
-                                        "a paper's TARGET.md (write-paper reads this)")
+    f = sub.add_parser("finalize", help="record the finalized target fact_id(s) in a paper's TARGET.md")
     f.add_argument("project")
-    f.add_argument("--paper", default=None,
-                   help="the paper_id (multiple papers per project). Default / 'main' "
-                        "→ legacy <project>/TARGET.md; else "
-                        "<project>/papers/<paper_id>/TARGET.md")
-    f.add_argument("fact_ids", nargs="*",
-                   help="the target fact id(s); omit to print candidate terminal facts")
-
+    f.add_argument("--paper", default=None)
+    f.add_argument("fact_ids", nargs="*")
     s = sub.add_parser("start", help="launch worker loop(s)")
     s.add_argument("target", help="<project> or <project>/<worker>")
-
     st = sub.add_parser("status", help="liveness + progress")
     st.add_argument("target", help="<project> or <project>/<worker>")
     st.add_argument("--json", action="store_true")
-
     sv = sub.add_parser("supervise", help="reconcile Plan, progress, worker state, and budgets")
     sv.add_argument("project")
     group = sv.add_mutually_exclusive_group()
-    group.add_argument("--complete-node", default=None,
-                       help="record Supervisor-approved node completion in Progress Ledger")
-    group.add_argument("--reopen-node", default=None,
-                       help="reopen a node in Progress Ledger without revising Plan")
-    sv.add_argument("--apply", action="store_true", help="execute this one reconcile pass")
-    sv.add_argument("--watch", action="store_true", help="run continuously; implies --apply")
-    sv.add_argument("--heartbeat", type=float, default=1800.0,
-                    help="fallback reconcile interval in seconds (default 1800)")
-    sv.add_argument("--poll", type=float, default=1.0,
-                    help="control-file/liveness poll interval in seconds (default 1)")
-    sv.add_argument("--token-budget", type=int, default=0,
-                    help="project cumulative completed-session token budget; 0 disables")
-
+    group.add_argument("--complete-node", default=None)
+    group.add_argument("--reopen-node", default=None)
+    sv.add_argument("--apply", action="store_true")
+    sv.add_argument("--watch", action="store_true")
+    sv.add_argument("--heartbeat", type=float, default=1800.0)
+    sv.add_argument("--poll", type=float, default=1.0)
+    sv.add_argument("--token-budget", type=int, default=0)
     pa = sub.add_parser("pause", help="pause worker loop(s) and prevent automatic restart")
     pa.add_argument("target", help="<project> or <project>/<worker>")
-
     rs = sub.add_parser("resume", help="clear pause and restart worker loop(s)")
     rs.add_argument("target", help="<project> or <project>/<worker>")
-
     sp = sub.add_parser("stop", help="stop worker loop(s)")
     sp.add_argument("target", help="<project> or <project>/<worker>")
-    sp.add_argument("--force", action="store_true", help="kill now (else finish current round)")
+    sp.add_argument("--force", action="store_true")
     return p
 
 
@@ -1137,8 +976,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(rows, ensure_ascii=False, indent=2) if args.json else _fmt_list(rows))
     elif args.cmd == "new":
         r = do_new(args.project, roles=args.roles, model=args.model)
-        print(f"created {args.project} with {len(r['workers'])} workers: "
-              f"{', '.join(r['workers'])}\n  {r['project_dir']}")
+        print(f"created {args.project} with {len(r['workers'])} workers: {', '.join(r['workers'])}\n  {r['project_dir']}")
     elif args.cmd == "assign":
         r = do_assign(args.target, _task_from_args(args), node_id=args.node)
         suffix = ""
@@ -1152,17 +990,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if "suggested" in r:
             sug = r["suggested"]
             if sug:
-                print(f"no fact_id given — candidate target facts for {r['project']}{paper_note} "
-                      f"(terminal facts; nothing depends on them):")
+                print(f"no fact_id given — candidate target facts for {r['project']}{paper_note} (terminal facts; nothing depends on them):")
                 for fid in sug:
                     print(f"  {fid}")
                 print(f"\nrun: danus finalize {r['project']}{paper_flag} <fact_id> [<fact_id> ...] to record")
             else:
-                print(f"no candidate terminal facts in {r['project']} "
-                      f"(is the fact graph empty?); nothing recorded")
+                print(f"no candidate terminal facts in {r['project']} (is the fact graph empty?); nothing recorded")
         else:
-            print(f"finalized target for {r['project']}{paper_note}: {', '.join(r['target_fact_ids'])}\n"
-                  f"  wrote {r['target_file']}")
+            print(f"finalized target for {r['project']}{paper_note}: {', '.join(r['target_fact_ids'])}\n  wrote {r['target_file']}")
     elif args.cmd == "start":
         for r in do_start(args.target):
             print(f"{r['worker']}: {r['result']}")
@@ -1173,12 +1008,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.watch:
             if args.complete_node or args.reopen_node:
                 raise SystemExit("--watch cannot be combined with node state mutation")
-            for r in watch_supervisor(
-                args.project,
-                heartbeat=args.heartbeat,
-                poll=args.poll,
-                token_budget=args.token_budget,
-            ):
+            for r in watch_supervisor(args.project, heartbeat=args.heartbeat, poll=args.poll, token_budget=args.token_budget):
                 print(json.dumps(r, ensure_ascii=False, sort_keys=True), flush=True)
         else:
             r = do_supervise(
