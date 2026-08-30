@@ -206,7 +206,7 @@ class ProgressLedger:
         plan_version: int,
         task: str,
     ) -> Dict[str, Any]:
-        """Atomically bind one worker task to one ACTIVE Plan node."""
+        """Atomically bind one worker task to one ACTIVE Plan node/role lane."""
         worker = self._required(worker, "worker")
         role = self._required(role, "role")
         node_id = self._required(node_id, "node_id")
@@ -250,9 +250,13 @@ class ProgressLedger:
                 for record in assignments.values():
                     if record["state"] in self._TERMINAL:
                         continue
-                    if record["node_id"] == node_id and record["worker"] != worker:
+                    if (
+                        record["node_id"] == node_id
+                        and str(record.get("role") or "").lower() == role.lower()
+                        and record["worker"] != worker
+                    ):
                         raise ValueError(
-                            f"plan node {node_id} already has active assignment "
+                            f"plan node {node_id} role {role} already has active assignment "
                             f"{record['assignment_id']} on worker {record['worker']}"
                         )
 
