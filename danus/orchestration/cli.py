@@ -919,11 +919,18 @@ def watch_supervisor(
                 trigger=trigger,
             )
             last_reconcile = now
-            # Actions themselves change pid/pause/progress/quota files; consume that
-            # new state now so the next poll does not replay our own action.
-            rows = _project_rows(project)
-            budget = _resource_snapshot(pdir, rows, token_budget)
-            last_signature = _control_signature(project, rows, budget)
+            autonomy_changed = any(
+                item.get("result") in {"assigned", "completed"}
+                for item in report.get("autonomy_applied", [])
+            )
+            if autonomy_changed:
+                # Let the next poll observe our durable assignment/completion
+                # transition so dependent nodes advance without waiting heartbeat.
+                last_signature = signature
+            else:
+                rows = _project_rows(project)
+                budget = _resource_snapshot(pdir, rows, token_budget)
+                last_signature = _control_signature(project, rows, budget)
             yield report
             if report.get("project_state") == "COMPLETE" and not report.get("decisions"):
                 return
