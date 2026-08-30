@@ -46,12 +46,25 @@ def _scientific_context(project: str, role_name: str) -> str:
             "No project RESEARCH_CHARTER.md exists. Do not invent project-specific "
             "constraints; surface the missing Charter before substantive scientific work.\n"
         )
+    guidance = ""
+    guidance_path = L.project_dir(project) / "HUMAN_GUIDANCE.md"
+    if guidance_path.is_file():
+        try:
+            guidance = guidance_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            guidance = ""
+    guidance_block = (
+        f"\n\n<CURRENT_HUMAN_GUIDANCE>\n{guidance}\n</CURRENT_HUMAN_GUIDANCE>"
+        if guidance
+        else ""
+    )
     return (
         f"\n\nYour Danus-R scientific ROLE is '{role_name}'. The role contract and "
         "project Research Charter below are binding for this round and supplement "
         "the minimal common AGENTS.md scientific-worker spine.\n\n"
         f"<SCIENTIFIC_ROLE_CONTRACT>\n{role_text}\n</SCIENTIFIC_ROLE_CONTRACT>\n\n"
         f"<PROJECT_RESEARCH_CHARTER>\n{charter_text}\n</PROJECT_RESEARCH_CHARTER>"
+        f"{guidance_block}"
     )
 
 
@@ -64,8 +77,8 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
             f"You are worker '{worker}' on project '{project}'. Continue the current "
             "scientific task; this is a continuation round, not a fresh start.\n"
             "1. Read TASK.md.\n"
-            "2. Follow AGENTS.md, your injected scientific role contract, and the project "
-            "Research Charter.\n"
+            "2. Follow AGENTS.md, your injected scientific role contract, the project "
+            "Research Charter, and injected current Human Guidance when present.\n"
             "3. Resume from only the relevant shared findings, verified facts/evidence, "
             "prior decisions, and your own local continuity; do not restart from zero.\n"
             "4. Perform only the work assigned to your role and current task; do not "
@@ -137,7 +150,6 @@ def _read_role(wl: L.WorkerLayout) -> dict:
 
 
 def write_status(wl: L.WorkerLayout, **fields) -> None:
-    """Atomic status write (so `danus status` never reads a half-written file)."""
     path = wl.status
     cur = {}
     if path.exists():
@@ -182,13 +194,11 @@ def _parse_last_fact_id(log_path: Path) -> Optional[str]:
 
 
 def _terminal_outcome(telemetry: dict) -> Optional[str]:
-    """Parse only the explicit machine marker; never infer terminal state from prose."""
     matches = _OUTCOME_RE.findall(str(telemetry.get("last_agent_message") or ""))
     return matches[0].upper() if len(matches) == 1 else None
 
 
 def _dsh_quota_exhausted(log_path: Path) -> bool:
-    """Recognize only DSH headless's stable machine code, never human error prose."""
     try:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -204,18 +214,41 @@ def _progress_ledger(wl: L.WorkerLayout) -> Optional[ProgressLedger]:
 # --- one round ------------------------------------------------------------- #
 
 class _Child:
-    """Holds the running codex subprocess so the SIGTERM handler can kill it."""
     proc: "subprocess.Popen | None" = None
 
 
-def _terminate_child() -> None:
-    if _Child.proc is None:
-        return
-    _Child.proc.terminate()
+def _send_tree_signal(proc, sig: int) -> bool:
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.killpg(os.getpgid(pid), sig)
+            return True
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
     try:
-        _Child.proc.wait(timeout=10)
+        if sig == signal.SIGTERM:
+            proc.terminate()
+        else:
+            proc.kill()
+        return True
+    except (AttributeError, ProcessLookupError, OSError):
+        return False
+
+
+def _terminate_process_tree(proc, grace: float = 2.0) -> None:
+    _send_tree_signal(proc, signal.SIGTERM)
+    wait = getattr(proc, "wait", None)
+    if not callable(wait):
+        return
+    try:
+        wait(timeout=grace)
     except subprocess.TimeoutExpired:
-        _Child.proc.kill()
+        _send_tree_signal(proc, signal.SIGKILL)
+
+
+def _terminate_child() -> None:
+    if _Child.proc is not None:
+        _terminate_process_tree(_Child.proc)
 
 
 def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
@@ -224,8 +257,6 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
     wdir = wl.dir
     codex_bin = codex.resolve_bin()
     tail = []
-    # Codex exposes documented JSONL event telemetry. DSH currently does not;
-    # leave its historical stdout untouched and degrade to runtime-only limits.
     if context_budget and codex.backend() != "dsh":
         tail.append("--json")
     tail += [
@@ -236,12 +267,14 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
     ]
     cmd = codex.exec_cmd(codex_bin, role["MODEL"], role["REASONING_EFFORT"], *tail)
     started = time.monotonic()
+    cursor = C.LogCursor()
     with open(log_path, "w", encoding="utf-8") as logf:
         try:
             _Child.proc = subprocess.Popen(
                 cmd, stdout=logf, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, cwd=str(wdir),
                 env=codex.subprocess_env(codex_bin),
+                start_new_session=True,
             )
         except FileNotFoundError:
             logf.write(f"[worker_loop] codex binary not found: {cmd[0]}\n")
@@ -264,11 +297,7 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
                         _terminate_child()
                         logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
                         return 124
-                    telemetry = C.inspect_log(log_path)
-                    # Codex reports token usage at turn.completed. Killing on that
-                    # final usage event can race a normally completed turn before the
-                    # process exits. Defer token-only rollover to the outer loop; keep
-                    # tool/compaction/time limits live.
+                    telemetry = C.inspect_log(log_path, cursor=cursor)
                     live_telemetry = dict(telemetry)
                     live_telemetry["tokens"] = 0
                     reason = C.budget_reason(live_telemetry, elapsed)
@@ -284,7 +313,6 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
 def _run_context_migration(
     wl: L.WorkerLayout, role: dict, reason: str, prior_log: Path, hard_timeout: int,
 ) -> Optional[dict]:
-    """One bounded housekeeping turn only when a scientific session rolls over."""
     out_path = C.migration_path(wl.dir)
     out_path.unlink(missing_ok=True)
     prompt = C.migration_prompt(wl.dir, reason, prior_log)
@@ -304,17 +332,14 @@ def _run_context_migration(
                 cmd, stdout=logf, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, cwd=str(wl.dir),
                 env=codex.subprocess_env(codex_bin),
+                start_new_session=True,
             )
         except FileNotFoundError:
             return None
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            _terminate_process_tree(proc)
             return None
     return C.load_migration(wl.dir)
 
@@ -324,7 +349,8 @@ def _run_context_migration(
 def _cleanup_pid(wl: L.WorkerLayout) -> None:
     pf = wl.pid
     try:
-        if pf.exists() and pf.read_text().strip() == str(os.getpid()):
+        parts = pf.read_text().split() if pf.exists() else []
+        if parts and parts[0] == str(os.getpid()):
             pf.unlink(missing_ok=True)
     except OSError:
         pass
@@ -355,8 +381,6 @@ def main(worker_dir: str) -> int:
         else:
             os.environ["CODEX_BACKEND"] = backend
 
-    # The role can change between starts. Rewire only Danus-managed harness links
-    # and the matching gateway surface before Codex/DSH enters the worker home.
     scaffold.sync_worker_harness(wl, role_name)
     scaffold.write_codex_config(wl, role_name)
 
@@ -392,8 +416,7 @@ def main(worker_dir: str) -> int:
         exit_recorded = True
 
     def _on_term(signum, _frame):
-        if _Child.proc is not None:
-            _Child.proc.terminate()
+        _terminate_child()
         write_status(wl, state="terminated")
         _record_exit("terminated", signal=int(signum))
         _cleanup_pid(wl)
@@ -501,8 +524,6 @@ def main(worker_dir: str) -> int:
                     trigger=trigger,
                 )
 
-                # A completed assignment, pending control stop, or DSH quota failure
-                # wins over context rollover: none may start another model turn.
                 if (
                     trigger
                     and not outcome
