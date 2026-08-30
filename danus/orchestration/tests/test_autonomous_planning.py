@@ -48,6 +48,21 @@ def _proposal(path: Path, version: int, suffix: str = "1"):
     }), encoding="utf-8")
 
 
+def _invalid_proposal(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "base_plan_version": 1,
+        "reason": "minimal route",
+        "post_hoc": False,
+        "evidence_refs": [],
+        "operations": [{
+            "op": "add_node", "node_id": "R1", "title": "Research",
+            "summary": "x" * 101, "parent": "P0", "depends_on": [],
+        }],
+        "tasks": [{"node_id": "R1", "role": "researcher", "task": "research task"}],
+    }), encoding="utf-8")
+
+
 def test_brief_proposal_review_commit_materializes_tasks(tmp_path: Path, monkeypatch):
     with _root(tmp_path):
         monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
@@ -108,18 +123,7 @@ def test_invalid_proposal_routes_deterministic_repair_to_researcher(tmp_path: Pa
         pdir = L.project_dir("P")
         _finish("P", "low")
         path = Path(init["proposal_handoff"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
-            "base_plan_version": 1,
-            "reason": "minimal route",
-            "post_hoc": False,
-            "evidence_refs": [],
-            "operations": [{
-                "op": "add_node", "node_id": "R1", "title": "Research",
-                "summary": "x" * 101, "parent": "P0", "depends_on": [],
-            }],
-            "tasks": [{"node_id": "R1", "role": "researcher", "task": "research task"}],
-        }), encoding="utf-8")
+        _invalid_proposal(path)
 
         actions = planning.planning_step("P")
         blocked = next(x for x in actions if x["action"] == "PLAN_PROPOSAL")
@@ -127,12 +131,40 @@ def test_invalid_proposal_routes_deterministic_repair_to_researcher(tmp_path: Pa
         assert blocked["result"] == "blocked"
         assert "summary exceeds 100 characters" in blocked["reason"]
         assert repair["result"] == "assigned"
+        assert repair["attempt"] == 1
         current = ProgressLedger(pdir).current("low")
         assert current and current["state"] == "ASSIGNED"
         task = L.WorkerLayout(L.worker_dir("P", "low")).task.read_text()
         assert "summary exceeds 100 characters" in task
         assert "summary` is at most 100 characters" in task
         assert ResearchPlanGraph(pdir).pending_changes() == []
+
+
+def test_repair_retries_once_then_stops_spending(tmp_path: Path, monkeypatch):
+    with _root(tmp_path):
+        monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+        init = planning.initialize_research("P", brief="Study a bounded scientific question.")
+        _finish("P", "low")
+        path = Path(init["proposal_handoff"])
+        _invalid_proposal(path)
+
+        first = next(x for x in planning.planning_step("P") if x["action"] == "PLAN_REPAIR")
+        assert first["result"] == "assigned" and first["attempt"] == 1
+        _finish("P", "low")
+
+        second = next(x for x in planning.planning_step("P") if x["action"] == "PLAN_REPAIR")
+        assert second["result"] == "assigned" and second["attempt"] == 2
+        assert second["assignment_id"] != first["assignment_id"]
+        _finish("P", "low")
+
+        third = next(x for x in planning.planning_step("P") if x["action"] == "PLAN_REPAIR")
+        assert third["result"] == "repair_exhausted"
+        assert third["assignment_id"] == second["assignment_id"]
+        repairs = [
+            a for a in ProgressLedger(L.project_dir("P")).assignments()
+            if a.get("task_sha256") == ProgressLedger.task_sha256(planning._repair_task(L.project_dir("P"), "summary exceeds 100 characters"))
+        ]
+        assert len(repairs) == 2
 
 
 def test_proposal_requires_exact_tasks_for_changed_leaves(tmp_path: Path, monkeypatch):
