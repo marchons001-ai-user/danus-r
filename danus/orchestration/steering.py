@@ -10,9 +10,11 @@ from typing import Any, Dict, List, Optional
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write
 
+from .cli import do_resume as _legacy_resume
 from .cli import do_start, do_status, do_stop
 
 _GUIDANCE_FILE = "HUMAN_GUIDANCE.md"
+_ACTIVE_PROGRESS = frozenset({"ASSIGNED", "RUNNING"})
 
 
 def guidance_path(project: str) -> Path:
@@ -59,6 +61,31 @@ def do_guide(project: str, text: str, *, interrupt: bool = False) -> Dict[str, A
     }
 
 
+def do_resume(target: str) -> List[Dict[str, str]]:
+    """Resume a project without starting planned workers that have no active assignment."""
+    project, worker = L.resolve_target(target)
+    if worker:
+        return _legacy_resume(target, stagger=0)
+
+    pdir = L.project_dir(project)
+    if not pdir.is_dir():
+        raise SystemExit(f"no such project: {project}")
+    ledger = pdir / "progress" / "ledger.jsonl"
+    if not ledger.is_file():
+        return _legacy_resume(target)
+
+    (pdir / L.PAUSE_FILE).unlink(missing_ok=True)
+    out: List[Dict[str, str]] = []
+    for row in do_status(project):
+        worker_name = str(row["worker"])
+        if row.get("progress_state") in _ACTIVE_PROGRESS:
+            result = do_start(f"{project}/{worker_name}", stagger=0)[0]["result"]
+        else:
+            result = "paused" if row.get("paused") else "idle"
+        out.append({"worker": worker_name, "result": str(result)})
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="danus guide",
@@ -78,4 +105,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     result = do_guide(args.project, args.text, interrupt=args.interrupt)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def resume_main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="danus resume",
+        description="Resume worker/project execution without starting unassigned planned workers.",
+    )
+    parser.add_argument("target", help="<project> or <project>/<worker>")
+    args = parser.parse_args(argv)
+    for row in do_resume(args.target):
+        print(f"{row['worker']}: {row['result']}")
     return 0
