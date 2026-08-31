@@ -170,10 +170,26 @@ def test_snapshot_reports_worker_assignment(tmp_path, monkeypatch):
             "node_id": "P0",
             "progress_state": "ASSIGNED",
             "round": 2,
-            "age_s": snapshot["workers"][0]["age_s"],
+            "age_s": None,
         }
     ]
-    assert snapshot["workers"][0]["age_s"] is not None
+
+
+def test_snapshot_reports_current_round_age_only_while_running(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    _worker(project)
+    started = time.time() - 12
+    status_path = project / "workers" / "r1" / ".status.json"
+    status_path.write_text(
+        json.dumps({"state": "running", "round": 3, "round_started_at": started}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("danus.tui.state.C._worker_alive", lambda wl: True)
+
+    row = load_project_snapshot("P")["workers"][0]
+
+    assert row["runtime"] == "working"
+    assert 11.0 <= row["age_s"] <= 13.0
 
 
 def test_snapshot_uses_checkpoint_safe_point_for_live_experiment(tmp_path, monkeypatch):
