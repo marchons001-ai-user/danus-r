@@ -8,6 +8,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, Footer, Header, Static, Tree
 
 from .state import load_project_snapshot
@@ -15,6 +16,7 @@ from .state import load_project_snapshot
 
 class DanusTUI(App[None]):
     TITLE = "Danus-R"
+    AUTO_FOCUS = "#plan"
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("0", "filter_all", "All activity", show=False),
@@ -212,7 +214,11 @@ class DanusTUI(App[None]):
     def _set_detail(self, kind: str, key: str, lines: list[str]) -> None:
         self._detail_kind = kind
         self._detail_key = key
-        self.query_one("#detail", Static).update(Text("\n".join(lines)))
+        try:
+            detail = self.query_one("#detail", Static)
+        except NoMatches:
+            return
+        detail.update(Text("\n".join(lines)))
 
     def _show_plan_detail(self, node_id: str) -> None:
         node = next((row for row in self.snapshot["nodes"] if row["node_id"] == node_id), None)
@@ -348,10 +354,13 @@ class DanusTUI(App[None]):
         self._set_activity_filter("supervisor")
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
-        if event.node.data:
+        tree = self.query_one("#plan", Tree)
+        if tree.has_focus and event.node.data:
             self._show_plan_detail(str(event.node.data))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if not event.data_table.has_focus:
+            return
         table_id = event.data_table.id
         if table_id == "workers":
             self._show_worker_detail(event.cursor_row)
