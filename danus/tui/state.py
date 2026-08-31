@@ -503,6 +503,7 @@ def load_project_snapshot(project: str) -> Dict[str, Any]:
             {
                 "node_id": node_id,
                 "title": str(node.get("title") or node_id),
+                "summary": str(node.get("summary") or ""),
                 "parent": node.get("parent"),
                 "depends_on": list(node.get("depends_on") or []),
                 "state": "DONE" if node_id in completed else ("OPEN" if plan_state == "ACTIVE" else plan_state),
