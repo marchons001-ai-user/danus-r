@@ -19,6 +19,7 @@ class DanusTUI(App[None]):
     #body { height: 1fr; }
     #plan { width: 2fr; border: round $primary; padding: 0 1; }
     #workers { width: 3fr; border: round $secondary; }
+    #experiments { height: 9; border: round $accent; }
     """
 
     def __init__(self, project: str) -> None:
@@ -56,7 +57,7 @@ class DanusTUI(App[None]):
 
     def _workers_table(self) -> DataTable:
         table = DataTable(id="workers")
-        table.add_columns("Worker", "Role", "Runtime", "Node", "Progress", "Round", "Age")
+        table.add_columns("Worker", "Role", "Runtime", "Node", "Progress", "Round", "Round age")
         for row in self.snapshot["workers"]:
             age = "—" if row["age_s"] is None else f"{row['age_s']:.0f}s"
             table.add_row(
@@ -68,6 +69,32 @@ class DanusTUI(App[None]):
                 str(row["round"]),
                 age,
             )
+        return table
+
+    @staticmethod
+    def _progress_bar(percent: float, width: int = 18) -> str:
+        filled = max(0, min(width, round(width * percent / 100.0)))
+        return "█" * filled + "░" * (width - filled)
+
+    def _experiments_table(self) -> DataTable:
+        table = DataTable(id="experiments")
+        table.add_columns("Experiment", "Progress", "State", "Current unit")
+        for row in self.snapshot["experiments"]:
+            progress = (
+                f"{self._progress_bar(row['percent'])}  {row['percent']:g}%  "
+                f"{row['completed_units']}/{row['total_units']}"
+            )
+            current = row["current_unit"] or "—"
+            if row["attempt"] is not None:
+                current = f"{current} · attempt {row['attempt']}"
+            table.add_row(
+                f"{row['protocol_id'][:8]}  {row['label']}",
+                progress,
+                row["state"].upper(),
+                current,
+            )
+        if not self.snapshot["experiments"]:
+            table.add_row("—", "—", "NONE", "No experiment runtime yet")
         return table
 
     def _quota_text(self) -> str:
@@ -86,5 +113,6 @@ class DanusTUI(App[None]):
         with Horizontal(id="body"):
             yield self._plan_tree()
             yield self._workers_table()
+        yield self._experiments_table()
         yield Static(self._quota_text(), id="quota")
         yield Footer()
