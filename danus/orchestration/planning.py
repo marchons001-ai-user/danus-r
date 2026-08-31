@@ -722,12 +722,36 @@ def planning_step(project: str) -> List[Dict[str, Any]]:
 
 def watch_research(project: str, *, heartbeat: float = 1800.0, poll: float = 1.0, token_budget: int = 0) -> Iterator[Dict[str, Any]]:
     pending = planning_step(project)
-    for report in cli.watch_supervisor(project, heartbeat=heartbeat, poll=poll, token_budget=token_budget):
-        actions = pending + planning_step(project)
-        pending = []
-        if actions:
-            report["planning_applied"] = actions
-        yield report
+    while True:
+        restart = False
+        for report in cli.watch_supervisor(
+            project, heartbeat=heartbeat, poll=poll, token_budget=token_budget
+        ):
+            supervisor_was_terminal = bool(
+                report.get("project_state") == "COMPLETE" and not report.get("decisions")
+            )
+            after = planning_step(project)
+            actions = pending + after
+            pending = []
+            if after:
+                report = cli.do_supervise(
+                    project,
+                    apply=True,
+                    token_budget=token_budget,
+                    trigger="research_planning",
+                )
+            if actions:
+                report["planning_applied"] = actions
+            yield report
+            if (
+                supervisor_was_terminal
+                and after
+                and report.get("project_state") != "COMPLETE"
+            ):
+                restart = True
+                break
+        if not restart:
+            return
 
 
 def _brief_from_args(args: argparse.Namespace) -> Optional[str]:
