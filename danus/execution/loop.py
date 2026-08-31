@@ -367,10 +367,11 @@ def main(worker_dir: str) -> int:
     worker = wl.name
     role = _read_role(wl)
     role_name = role.get("ROLE", "worker")
-    scientific = (role_name or "").strip().lower() in L.SCIENTIFIC_ROLES
+    role_key = str(role_name or "worker").strip().lower()
+    scientific = role_key in L.SCIENTIFIC_ROLES
     prior_status = _read_status(wl)
     backend = str(role.get("BACKEND") or "").strip().lower()
-    auto_reviewer = backend == "auto" and str(role_name).strip().lower() == "reviewer"
+    auto_reviewer = backend == "auto" and role_key == "reviewer"
     if backend:
         if auto_reviewer:
             selected = str(prior_status.get("reviewer_backend_selected") or "dsh").lower()
@@ -444,6 +445,30 @@ def main(worker_dir: str) -> int:
                 _record_exit(f"assignment_{current['state'].lower()}")
                 _cleanup_pid(wl)
                 return 0
+            assignment_role = str(current.get("role") or "").strip().lower()
+            if assignment_role and assignment_role != role_key:
+                ledger.update(
+                    worker=worker,
+                    state="BLOCKED",
+                    actor="runtime",
+                    note=f"worker role {role_key} does not match assignment role {assignment_role}",
+                    outcome="NEEDS_REVIEW",
+                )
+                write_status(
+                    wl,
+                    state="stopped",
+                    progress_state="BLOCKED",
+                    terminal_outcome="NEEDS_REVIEW",
+                    assignment_role=assignment_role,
+                    worker_role=role_key,
+                )
+                _record_exit(
+                    "assignment_role_mismatch",
+                    assignment_role=assignment_role,
+                    worker_role=role_key,
+                )
+                _cleanup_pid(wl)
+                return 0
             ledger.update(
                 worker=worker,
                 state="RUNNING",
@@ -452,6 +477,7 @@ def main(worker_dir: str) -> int:
             )
 
     consec_fail = 0
+    migration_failures = 0
     try:
         while True:
             if ledger is not None:
@@ -524,6 +550,7 @@ def main(worker_dir: str) -> int:
                     trigger=trigger,
                 )
 
+                migration_attempted = False
                 if (
                     trigger
                     and not outcome
@@ -531,6 +558,7 @@ def main(worker_dir: str) -> int:
                     and not wl.stop.exists()
                     and (not round_limit or rnd < round_limit)
                 ):
+                    migration_attempted = True
                     write_status(wl, state="migrating", context_trigger=trigger)
                     migration = _run_context_migration(
                         wl, role, trigger, log_path, hard_timeout,
@@ -542,6 +570,26 @@ def main(worker_dir: str) -> int:
                         wl.dir, role=role_name, round_no=rnd, telemetry=telemetry,
                         trigger=trigger, migration=migration,
                     )
+                    if migration is None:
+                        migration_failures += 1
+                        if max_fail and migration_failures >= max_fail:
+                            write_status(
+                                wl,
+                                state="error",
+                                error=f"{migration_failures} consecutive context migration failures",
+                                context_trigger=trigger,
+                                context_tokens_total=context_tokens_total,
+                            )
+                            _record_exit(
+                                "consecutive_context_migration_failures",
+                                count=migration_failures,
+                                trigger=trigger,
+                            )
+                            return 1
+                    else:
+                        migration_failures = 0
+                if not migration_attempted:
+                    migration_failures = 0
 
             if outcome and ledger is not None:
                 current = ledger.current(worker, refresh_stale=True)
@@ -556,13 +604,31 @@ def main(worker_dir: str) -> int:
                     break
                 if current is not None:
                     progress_state = "DONE" if outcome == "COMPLETE" else "BLOCKED"
-                    ledger.update(
-                        worker=worker,
-                        state=progress_state,
-                        actor="runtime",
-                        note=f"agent declared {outcome}",
-                        outcome=outcome,
-                    )
+                    assignment_id = str(current.get("assignment_id") or "")
+                    try:
+                        ledger.update(
+                            worker=worker,
+                            state=progress_state,
+                            actor="runtime",
+                            note=f"agent declared {outcome}",
+                            outcome=outcome,
+                        )
+                    except ValueError:
+                        latest = ledger.current(worker, refresh_stale=True)
+                        if (
+                            latest is not None
+                            and str(latest.get("assignment_id") or "") == assignment_id
+                            and latest.get("state") == "STALE"
+                        ):
+                            write_status(
+                                wl,
+                                state="stopped",
+                                progress_state="STALE",
+                                ignored_terminal_outcome=outcome,
+                            )
+                            _record_exit("assignment_stale_after_round")
+                            break
+                        raise
 
             status_fields = {
                 "state": "stopped" if outcome or dsh_quota else "idle",
