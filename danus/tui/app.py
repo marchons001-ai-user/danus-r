@@ -14,6 +14,8 @@ from .state import load_project_snapshot
 class DanusTUI(App[None]):
     TITLE = "Danus-R"
     BINDINGS = [("q", "quit", "Quit")]
+    HORIZONTAL_BREAKPOINTS = [(0, "-compact"), (100, "-medium"), (140, "-wide")]
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (32, "-medium-height"), (44, "-tall")]
     CSS = """
     #summary, #quota { height: 3; padding: 1 1; }
     #body { height: 1fr; }
@@ -21,6 +23,23 @@ class DanusTUI(App[None]):
     #workers { width: 3fr; border: round $secondary; }
     #experiments { height: 9; border: round $accent; }
     #activity { height: 9; border: round $warning; }
+
+    Screen.-medium #plan { width: 1fr; }
+    Screen.-medium #workers { width: 2fr; }
+
+    Screen.-compact #body { layout: vertical; }
+    Screen.-compact #plan, Screen.-compact #workers {
+        width: 100%;
+        height: 1fr;
+    }
+
+    Screen.-medium-height #summary, Screen.-medium-height #quota,
+    Screen.-short #summary, Screen.-short #quota {
+        height: 1;
+        padding: 0 1;
+    }
+    Screen.-medium-height #experiments, Screen.-medium-height #activity { height: 7; }
+    Screen.-short #experiments, Screen.-short #activity { height: 5; }
     """
 
     def __init__(self, project: str) -> None:
