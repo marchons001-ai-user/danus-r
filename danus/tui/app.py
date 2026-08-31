@@ -13,7 +13,6 @@ from .state import load_project_snapshot
 
 class DanusTUI(App[None]):
     TITLE = "Danus-R"
-    SUB_TITLE = "A2-9a-2"
     BINDINGS = [("q", "quit", "Quit")]
     CSS = """
     #summary, #quota { height: 3; padding: 1 1; }
