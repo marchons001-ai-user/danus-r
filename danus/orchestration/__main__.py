@@ -19,4 +19,8 @@ if __name__ == "__main__":
         from .steering import resume_main
 
         sys.exit(resume_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "tui":
+        from danus.tui import main as tui_main
+
+        sys.exit(tui_main(sys.argv[2:]))
     sys.exit(main())

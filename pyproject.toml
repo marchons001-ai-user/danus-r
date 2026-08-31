@@ -38,7 +38,8 @@ human-summary = ["mcp"]                                   # danus.human_summary 
 verify = ["fastapi", "uvicorn", "pydantic"]         # danus.verify  — cold-start verifier HTTP service
 observability = ["fastapi", "uvicorn", "pydantic"]  # danus.observability — read-only dashboard
 strategy = ["openai", "anthropic"]                  # danus.strategy — API consult transports
-dev = ["pytest", "mcp", "fastapi", "uvicorn", "pydantic", "openai", "anthropic"]  # full test suite (all modules)
+tui = ["textual"]                                    # danus.tui — optional terminal UI
+dev = ["pytest", "mcp", "fastapi", "uvicorn", "pydantic", "openai", "anthropic", "textual"]  # full test suite (all modules)
 
 [tool.setuptools.packages.find]
 include = ["danus*"]
