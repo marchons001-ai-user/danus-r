@@ -42,6 +42,10 @@ def _checkpoint_path(root: Path, protocol_id: str) -> Path:
     return _runtime_dir(root, protocol_id) / "checkpoint.json"
 
 
+def _status_path(root: Path, protocol_id: str) -> Path:
+    return _runtime_dir(root, protocol_id) / "status.json"
+
+
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -50,6 +54,25 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
         encoding="utf-8",
     )
     os.replace(tmp, path)
+
+
+def _write_status(
+    root: Path,
+    protocol_id: str,
+    state: str,
+    completed_units: int,
+    total_units: int,
+    **details: Any,
+) -> None:
+    payload: Dict[str, Any] = {
+        "protocol_id": protocol_id,
+        "state": state,
+        "completed_units": completed_units,
+        "total_units": total_units,
+        "updated_at": utc_now(),
+    }
+    payload.update(details)
+    _write_json(_status_path(root, protocol_id), payload)
 
 
 def _load_checkpoint(root: Path, protocol_id: str) -> Dict[str, Any]:
@@ -248,6 +271,11 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
         recomputed = reduce_metrics(root, protocol, artifacts)
         if not metrics_equal(record.get("primary_metrics"), recomputed):
             raise ValueError("completed Evidence primary_metrics do not match raw artifacts")
+        _write_status(
+            root, protocol_id, "complete", len(completed), len(units),
+            current_unit=None, attempt=None, unit_started_at=None,
+            returncode=0, evidence_id=str(evidence_id),
+        )
         return {
             "protocol_id": protocol_id,
             "evidence_id": str(evidence_id),
@@ -268,6 +296,16 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
             if isinstance(failure, dict) and failure.get("unit_id") == unit_id
         ) + 1
         log_path = logs_dir / f"{unit_id}.attempt{attempts}.log"
+        unit_started_at = utc_now()
+        _write_status(
+            root, protocol_id, "running", len(completed), len(units),
+            current_unit=unit_id,
+            attempt=attempts,
+            unit_started_at=unit_started_at,
+            returncode=None,
+            evidence_id=None,
+            log=str(log_path.relative_to(root)),
+        )
         with log_path.open("w", encoding="utf-8") as log:
             proc = subprocess.run(
                 unit["argv"],
@@ -288,6 +326,15 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
             })
             checkpoint["updated_at"] = utc_now()
             _write_json(_checkpoint_path(root, protocol_id), checkpoint)
+            _write_status(
+                root, protocol_id, "failed", len(completed), len(units),
+                current_unit=unit_id,
+                attempt=attempts,
+                unit_started_at=unit_started_at,
+                returncode=int(proc.returncode),
+                evidence_id=None,
+                log=str(log_path.relative_to(root)),
+            )
             raise RuntimeError(f"experiment unit {unit_id} failed with rc={proc.returncode}")
 
         refs = []
@@ -297,7 +344,21 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
         completed[unit_id] = refs
         checkpoint["updated_at"] = utc_now()
         _write_json(_checkpoint_path(root, protocol_id), checkpoint)
+        _write_status(
+            root, protocol_id, "running", len(completed), len(units),
+            current_unit=None,
+            attempt=None,
+            unit_started_at=None,
+            returncode=0,
+            evidence_id=None,
+            log=None,
+        )
 
+    _write_status(
+        root, protocol_id, "finalizing", len(completed), len(units),
+        current_unit=None, attempt=None, unit_started_at=None,
+        returncode=0, evidence_id=None, log=None,
+    )
     artifacts: List[Dict[str, Any]] = []
     for unit in units:
         artifacts.extend(completed[unit["id"]])
@@ -319,6 +380,11 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
     checkpoint["evidence_id"] = evidence_id
     checkpoint["updated_at"] = utc_now()
     _write_json(_checkpoint_path(root, protocol_id), checkpoint)
+    _write_status(
+        root, protocol_id, "complete", len(completed), len(units),
+        current_unit=None, attempt=None, unit_started_at=None,
+        returncode=0, evidence_id=evidence_id, log=None,
+    )
     return {
         "protocol_id": protocol_id,
         "evidence_id": evidence_id,

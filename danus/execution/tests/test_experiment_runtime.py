@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from danus.core import EvidenceStore
+from danus.execution import experiment as experiment_runtime
 from danus.execution.experiment import run_experiment
 from danus.verify.empirical import check_empirical_evidence
 
@@ -75,7 +76,8 @@ def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
     with pytest.raises(RuntimeError, match="u2 failed"):
         run_experiment(tmp_path, protocol_id)
 
-    checkpoint_path = tmp_path / "experiment_runtime" / protocol_id / "checkpoint.json"
+    runtime_dir = tmp_path / "experiment_runtime" / protocol_id
+    checkpoint_path = runtime_dir / "checkpoint.json"
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     assert set(checkpoint["completed"]) == {"u1"}
     assert checkpoint["failures"][-1]["unit_id"] == "u2"
@@ -83,13 +85,25 @@ def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
     assert (tmp_path / checkpoint["failures"][-1]["log"]).is_file()
     assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
 
+    status = json.loads((runtime_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "failed"
+    assert status["current_unit"] == "u2"
+    assert status["completed_units"] == 1 and status["total_units"] == 2
+    assert status["attempt"] == 1 and status["returncode"] == 7
+
     (tmp_path / "fail_u2").unlink()
     result = run_experiment(tmp_path, protocol_id)
     assert result["primary_metrics"] == {"mean_score": 2.0}
     assert result["completed_units"] == 2
     assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
     assert (tmp_path / "counts" / "u2.txt").read_text() == "2"
-    assert (tmp_path / "experiment_runtime" / protocol_id / "logs" / "u2.attempt2.log").is_file()
+    assert (runtime_dir / "logs" / "u2.attempt2.log").is_file()
+
+    status = json.loads((runtime_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "complete"
+    assert status["completed_units"] == 2 and status["total_units"] == 2
+    assert status["current_unit"] is None
+    assert status["evidence_id"] == result["evidence_id"]
 
     # Completed runtime is idempotent: neither unit is run again.
     again = run_experiment(tmp_path, protocol_id)
@@ -108,6 +122,35 @@ def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
     assert out["passed"] is True
     recompute = [c for c in out["checks"] if c["name"].endswith("primary_metrics_recompute")]
     assert len(recompute) == 1 and recompute[0]["passed"] is True
+
+
+def test_status_is_visible_before_each_unit_starts(tmp_path: Path, monkeypatch):
+    _, protocol_id = _fixture(tmp_path)
+    status_path = tmp_path / "experiment_runtime" / protocol_id / "status.json"
+    real_run = experiment_runtime.subprocess.run
+    seen = []
+
+    def run_and_observe(argv, *args, **kwargs):
+        if isinstance(argv, list) and len(argv) >= 3 and argv[1] == "runner.py":
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            seen.append((argv[2], status))
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(experiment_runtime.subprocess, "run", run_and_observe)
+    result = run_experiment(tmp_path, protocol_id)
+
+    assert [unit for unit, _ in seen] == ["u1", "u2"]
+    assert seen[0][1]["state"] == "running"
+    assert seen[0][1]["current_unit"] == "u1"
+    assert seen[0][1]["completed_units"] == 0 and seen[0][1]["total_units"] == 2
+    assert seen[0][1]["attempt"] == 1 and seen[0][1]["unit_started_at"]
+    assert seen[1][1]["current_unit"] == "u2"
+    assert seen[1][1]["completed_units"] == 1
+
+    final = json.loads(status_path.read_text(encoding="utf-8"))
+    assert final["state"] == "complete"
+    assert final["completed_units"] == final["total_units"] == 2
+    assert final["evidence_id"] == result["evidence_id"]
 
 
 def test_completed_artifact_change_blocks_resume(tmp_path: Path):
