@@ -28,7 +28,7 @@ from typing import Any, Dict, List
 
 from danus.core.evidence import EvidenceStore, _content_id, protocol_identity
 from danus.core.metrics import metrics_equal, reduce_metrics
-from danus.core._util import utc_now
+from danus.core._util import append_jsonl, utc_now
 from danus.execution import layout as L
 
 _UNIT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -64,15 +64,59 @@ def _write_status(
     total_units: int,
     **details: Any,
 ) -> None:
+    path = _status_path(root, protocol_id)
+    previous: Dict[str, Any] = {}
+    if path.is_file():
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            old = None
+        if isinstance(old, dict):
+            previous = old
+
+    now = utc_now()
     payload: Dict[str, Any] = {
         "protocol_id": protocol_id,
         "state": state,
         "completed_units": completed_units,
         "total_units": total_units,
-        "updated_at": utc_now(),
+        "updated_at": now,
     }
     payload.update(details)
-    _write_json(_status_path(root, protocol_id), payload)
+    _write_json(path, payload)
+
+    kind = None
+    if state == "running" and payload.get("current_unit"):
+        if (
+            previous.get("current_unit") != payload.get("current_unit")
+            or previous.get("attempt") != payload.get("attempt")
+        ):
+            kind = "UNIT_STARTED"
+    elif state == "running" and previous.get("state") == "running" and previous.get("current_unit"):
+        kind = "UNIT_COMPLETED"
+    elif state == "failed":
+        kind = "UNIT_FAILED"
+    elif state == "finalizing" and previous.get("state") != "finalizing":
+        kind = "FINALIZING"
+    elif state == "complete" and previous.get("state") != "complete":
+        kind = "COMPLETE"
+
+    if kind:
+        append_jsonl(
+            _runtime_dir(root, protocol_id) / "events.jsonl",
+            {
+                "event": kind,
+                "protocol_id": protocol_id,
+                "state": state,
+                "completed_units": completed_units,
+                "total_units": total_units,
+                "unit_id": payload.get("current_unit") or previous.get("current_unit"),
+                "attempt": payload.get("attempt") or previous.get("attempt"),
+                "returncode": payload.get("returncode"),
+                "evidence_id": payload.get("evidence_id"),
+                "at": now,
+            },
+        )
 
 
 def _load_checkpoint(root: Path, protocol_id: str) -> Dict[str, Any]:
