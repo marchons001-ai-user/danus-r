@@ -82,14 +82,18 @@ def _worker_row(project: str, worker: str, ledger: ProgressLedger) -> Dict[str, 
     progress = ledger.current(worker, refresh_stale=False)
     paused = C._pause_reason(wl)
     alive = C._worker_alive(wl)
-    last = status.get("last_round_at") or status.get("round_started_at") or status.get("updated_at")
-    age = time.time() - last if isinstance(last, (int, float)) else None
     if paused is not None:
         runtime = "paused"
     elif alive:
         runtime = "working"
     else:
         runtime = str(status.get("state") or "stopped")
+    round_started = status.get("round_started_at")
+    age = (
+        time.time() - round_started
+        if alive and status.get("state") == "running" and isinstance(round_started, (int, float))
+        else None
+    )
     return {
         "worker": worker,
         "role": C._read_worker_role(wl),
