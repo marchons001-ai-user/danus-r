@@ -9,6 +9,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.events import DescendantFocus
 from textual.widgets import DataTable, Footer, Header, Static, Tree
 
 from .state import load_project_snapshot
@@ -352,6 +353,19 @@ class DanusTUI(App[None]):
 
     def action_filter_supervisor(self) -> None:
         self._set_activity_filter("supervisor")
+
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
+        widget = event.widget
+        if isinstance(widget, Tree) and widget.id == "plan":
+            node = widget.cursor_node
+            if node is not None and node.data:
+                self._show_plan_detail(str(node.data))
+        elif isinstance(widget, DataTable) and widget.id == "workers":
+            self._show_worker_detail(widget.cursor_row)
+        elif isinstance(widget, DataTable) and widget.id == "experiments":
+            self._show_experiment_detail(widget.cursor_row)
+        elif isinstance(widget, DataTable) and widget.id == "activity":
+            self._show_activity_detail(widget.cursor_row)
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         tree = self.query_one("#plan", Tree)
