@@ -1,4 +1,4 @@
-"""Offline A2-9a TUI entry and read-only overview tests."""
+"""Offline A2-9a TUI entry, overview, and experiment-panel tests."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from textual.widgets import DataTable, Static, Tree
 
 from danus import tui
 from danus.core import ProgressLedger, ResearchPlanGraph
+from danus.core.evidence import EvidenceStore
 from danus.tui.app import DanusTUI
 from danus.tui.state import load_project_snapshot
 
@@ -41,6 +42,41 @@ def _worker(project, name="r1"):
         plan_version=1,
         task="inspect the research problem\n",
     )
+
+
+def _experiment(project, *, with_status=True, completed=2, total=4):
+    units = [{"id": f"case-{index}"} for index in range(1, total + 1)]
+    protocol_id = EvidenceStore(project).freeze_protocol(
+        question="Robustness sweep",
+        hypothesis="H",
+        matrix={"units": units},
+        primary_metrics=["score"],
+        decision_rule="compare score",
+        author="experimenter",
+    )
+    runtime = project / "experiment_runtime" / protocol_id
+    runtime.mkdir(parents=True)
+    checkpoint = {
+        "schema_version": 1,
+        "protocol_id": protocol_id,
+        "completed": {f"case-{index}": [] for index in range(1, completed + 1)},
+        "failures": [],
+        "evidence_id": None,
+    }
+    (runtime / "checkpoint.json").write_text(json.dumps(checkpoint), encoding="utf-8")
+    if with_status:
+        status = {
+            "protocol_id": protocol_id,
+            "state": "running",
+            "completed_units": completed + 1,
+            "total_units": total,
+            "current_unit": f"case-{completed + 1}",
+            "attempt": 2,
+            "unit_started_at": "2026-08-31T12:00:00Z",
+            "updated_at": "2026-08-31T12:00:01Z",
+        }
+        (runtime / "status.json").write_text(json.dumps(status), encoding="utf-8")
+    return protocol_id
 
 
 def test_tui_main_opens_existing_project(tmp_path, monkeypatch):
@@ -79,9 +115,13 @@ def test_project_snapshot_is_read_only(tmp_path, monkeypatch):
             "depends_on": [],
         }],
     )
+    protocol_id = _experiment(project)
     ledger_before = ledger.path.read_bytes()
     change_path = project / "plan" / "changes" / f"{change_id}.json"
     change_before = change_path.read_bytes()
+    runtime = project / "experiment_runtime" / protocol_id
+    checkpoint_before = (runtime / "checkpoint.json").read_bytes()
+    status_before = (runtime / "status.json").read_bytes()
 
     snapshot = load_project_snapshot("P")
 
@@ -89,23 +129,28 @@ def test_project_snapshot_is_read_only(tmp_path, monkeypatch):
     assert snapshot["quota"]["state"] == "UNKNOWN"
     assert ledger.path.read_bytes() == ledger_before
     assert change_path.read_bytes() == change_before
+    assert (runtime / "checkpoint.json").read_bytes() == checkpoint_before
+    assert (runtime / "status.json").read_bytes() == status_before
 
 
 def test_textual_overview_runs_headless(tmp_path, monkeypatch):
     project = _project(tmp_path, monkeypatch)
     _worker(project)
+    _experiment(project)
 
     async def check() -> None:
         app = DanusTUI("P")
-        async with app.run_test(size=(100, 30)):
+        async with app.run_test(size=(120, 36)):
             assert app.project_name == "P"
             assert app.snapshot["project_state"] == "RUNNING"
             assert app.query_one("#summary", Static)
             assert app.query_one("#quota", Static)
             tree = app.query_one("#plan", Tree)
-            table = app.query_one("#workers", DataTable)
+            workers = app.query_one("#workers", DataTable)
+            experiments = app.query_one("#experiments", DataTable)
             assert "P0" in str(tree.root.label)
-            assert table.row_count == 1
+            assert workers.row_count == 1
+            assert experiments.row_count == 1
 
     asyncio.run(check())
 
@@ -129,6 +174,39 @@ def test_snapshot_reports_worker_assignment(tmp_path, monkeypatch):
         }
     ]
     assert snapshot["workers"][0]["age_s"] is not None
+
+
+def test_snapshot_uses_checkpoint_safe_point_for_live_experiment(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    protocol_id = _experiment(project, completed=2, total=4)
+
+    row = load_project_snapshot("P")["experiments"][0]
+
+    assert row == {
+        "protocol_id": protocol_id,
+        "label": "Robustness sweep",
+        "state": "running",
+        "completed_units": 2,
+        "total_units": 4,
+        "percent": 50.0,
+        "current_unit": "case-3",
+        "attempt": 2,
+        "evidence_id": None,
+    }
+
+
+def test_snapshot_supports_legacy_checkpoint_without_status(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    protocol_id = _experiment(project, with_status=False, completed=1, total=2)
+
+    row = load_project_snapshot("P")["experiments"][0]
+
+    assert row["protocol_id"] == protocol_id
+    assert row["state"] == "checkpoint"
+    assert row["completed_units"] == 1
+    assert row["total_units"] == 2
+    assert row["percent"] == 50.0
+    assert row["current_unit"] is None
 
 
 def test_orchestration_dispatches_tui(monkeypatch):
