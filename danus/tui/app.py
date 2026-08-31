@@ -57,7 +57,7 @@ class DanusTUI(App[None]):
 
     def _workers_table(self) -> DataTable:
         table = DataTable(id="workers")
-        table.add_columns("Worker", "Role", "Runtime", "Node", "Progress", "Round", "Age")
+        table.add_columns("Worker", "Role", "Runtime", "Node", "Progress", "Round", "Round age")
         for row in self.snapshot["workers"]:
             age = "—" if row["age_s"] is None else f"{row['age_s']:.0f}s"
             table.add_row(
