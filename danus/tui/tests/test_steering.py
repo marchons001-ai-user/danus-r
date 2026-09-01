@@ -78,7 +78,8 @@ def test_tui_guidance_and_confirmed_interrupt_use_existing_steering_api(tmp_path
             await pilot.pause()
             assert calls == [("P", "Keep the scope narrow.", False)]
 
-            await pilot.press("shift+i")
+            # A real terminal encodes Shift+I as the printable character "I".
+            await pilot.press("I")
             await pilot.pause()
             assert isinstance(app.screen, GuidanceScreen)
             app.screen.query_one("#guidance-input", Input).value = "Switch direction now."
