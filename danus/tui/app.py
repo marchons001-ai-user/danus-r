@@ -102,7 +102,7 @@ class DanusTUI(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("p", "toggle_pause", "Pause/Resume"),
         Binding("g", "guide", "Guide"),
-        Binding("shift+i", "interrupt", "Interrupt"),
+        Binding("I", "interrupt", "Interrupt", key_display="shift+i"),
         Binding("0", "filter_all", "All activity", show=False),
         Binding("1", "filter_researcher", "Researcher activity", show=False),
         Binding("2", "filter_reviewer", "Reviewer activity", show=False),
