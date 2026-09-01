@@ -136,11 +136,7 @@ def _safe_exec_tail(tail: Sequence[str]) -> List[str]:
     i = 0
     while i < len(tail):
         arg = tail[i]
-        if arg == "--dangerously-bypass-approvals-and-sandbox":
-            sandbox = sandbox or "workspace-write"
-            i += 1
-            continue
-        if arg == "--full-auto":
+        if arg in {"--dangerously-bypass-approvals-and-sandbox", "--full-auto"}:
             sandbox = sandbox or "workspace-write"
             i += 1
             continue
@@ -155,13 +151,22 @@ def _safe_exec_tail(tail: Sequence[str]) -> List[str]:
                 raise ValueError("--ask-for-approval requires a policy")
             i += 2
             continue
+        if arg in {"--config", "-c"} and i + 1 < len(tail):
+            value = tail[i + 1].lstrip()
+            if value.startswith("approval_policy=") or value.startswith("sandbox_mode="):
+                i += 2
+                continue
         cleaned.append(arg)
         i += 1
 
     sandbox = sandbox or "workspace-write"
     if sandbox not in _SAFE_SANDBOXES:
         raise ValueError(f"unsafe codex sandbox mode refused: {sandbox}")
-    return ["--sandbox", sandbox, "--ask-for-approval", "never", *cleaned]
+    return [
+        "--sandbox", sandbox,
+        "--config", 'approval_policy="never"',
+        *cleaned,
+    ]
 
 
 def exec_cmd(codex_bin: str, model: str, effort: str, *tail: str) -> List[str]:
@@ -169,8 +174,8 @@ def exec_cmd(codex_bin: str, model: str, effort: str, *tail: str) -> List[str]:
 
     The caller may request ``read-only`` or ``workspace-write``. Historical
     full-access flags are downgraded to ``workspace-write`` and approval is
-    always ``never`` so a model cannot escape the sandbox by asking for more
-    privilege. Any other sandbox mode is rejected before process launch.
+    forced to ``never`` via Codex's current config-override surface. Any other
+    sandbox mode is rejected before process launch.
     """
     return get_adapter().exec_argv(
         codex_bin, model, effort, *_safe_exec_tail(tail)
