@@ -39,6 +39,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_EFFORT = "xhigh"
+_SAFE_SANDBOXES = {"read-only", "workspace-write"}
 
 
 def backend() -> str:
@@ -128,15 +129,52 @@ def subprocess_env(codex_bin: str) -> Dict[str, str]:
     return env
 
 
-def exec_cmd(codex_bin: str, model: str, effort: str, *tail: str) -> List[str]:
-    """The uniform ``codex exec`` command prefix + the caller's exact tail.
+def _safe_exec_tail(tail: Sequence[str]) -> List[str]:
+    """Force every proving exec into a non-escalating filesystem sandbox."""
+    cleaned: List[str] = []
+    sandbox = None
+    i = 0
+    while i < len(tail):
+        arg = tail[i]
+        if arg == "--dangerously-bypass-approvals-and-sandbox":
+            sandbox = sandbox or "workspace-write"
+            i += 1
+            continue
+        if arg == "--full-auto":
+            sandbox = sandbox or "workspace-write"
+            i += 1
+            continue
+        if arg == "--sandbox":
+            if i + 1 >= len(tail):
+                raise ValueError("--sandbox requires a mode")
+            sandbox = tail[i + 1]
+            i += 2
+            continue
+        if arg == "--ask-for-approval":
+            if i + 1 >= len(tail):
+                raise ValueError("--ask-for-approval requires a policy")
+            i += 2
+            continue
+        cleaned.append(arg)
+        i += 1
 
-    Standardizes on the QUOTED reasoning-effort config form
-    (``model_reasoning_effort="<effort>"``). The ``*tail`` is passed through
-    verbatim (each site keeps its own exact tail: sandbox flags, ``-C`` home,
-    MCP ``-c`` injection, output path, the ``-`` stdin sentinel, the prompt, …).
+    sandbox = sandbox or "workspace-write"
+    if sandbox not in _SAFE_SANDBOXES:
+        raise ValueError(f"unsafe codex sandbox mode refused: {sandbox}")
+    return ["--sandbox", sandbox, "--ask-for-approval", "never", *cleaned]
+
+
+def exec_cmd(codex_bin: str, model: str, effort: str, *tail: str) -> List[str]:
+    """The uniform ``codex exec`` command prefix + a fail-closed safe tail.
+
+    The caller may request ``read-only`` or ``workspace-write``. Historical
+    full-access flags are downgraded to ``workspace-write`` and approval is
+    always ``never`` so a model cannot escape the sandbox by asking for more
+    privilege. Any other sandbox mode is rejected before process launch.
     """
-    return get_adapter().exec_argv(codex_bin, model, effort, *tail)
+    return get_adapter().exec_argv(
+        codex_bin, model, effort, *_safe_exec_tail(tail)
+    )
 
 
 def prepare_prompt(
