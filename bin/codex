@@ -10,4 +10,41 @@ if [ -z "${DANUS_NODE:-}" ] || [ -z "${DANUS_CODEX_JS:-}" ]; then
   echo "codex not provisioned — run scripts/bootstrap.sh (sets DANUS_NODE/DANUS_CODEX_JS)" >&2
   exit 127
 fi
+
+if [ "${1:-}" = "exec" ]; then
+  sandbox=""
+  approval=""
+  args=("$@")
+  for ((i=0; i<${#args[@]}; i++)); do
+    case "${args[$i]}" in
+      --dangerously-bypass-approvals-and-sandbox|--full-auto)
+        echo "codex exec refused: unrestricted/escalating execution is disabled by Danus-R" >&2
+        exit 126
+        ;;
+      --sandbox)
+        sandbox="${args[$((i+1))]:-}"
+        ;;
+      --ask-for-approval)
+        approval="${args[$((i+1))]:-}"
+        ;;
+    esac
+  done
+  if [ "$sandbox" != "read-only" ] && [ "$sandbox" != "workspace-write" ]; then
+    echo "codex exec refused: sandbox must be read-only or workspace-write" >&2
+    exit 126
+  fi
+  if [ "$approval" != "never" ]; then
+    echo "codex exec refused: approval policy must be never (no privilege escalation)" >&2
+    exit 126
+  fi
+  case "$(uname -r 2>/dev/null || true)" in
+    *[Mm]icrosoft*)
+      if [ -n "${WSL_INTEROP:-}" ] || { [ -r /proc/sys/fs/binfmt_misc/WSLInterop ] && grep -q '^enabled' /proc/sys/fs/binfmt_misc/WSLInterop; }; then
+        echo "codex exec refused: WSL interoperability is enabled and can escape Linux filesystem sandboxes; disable [interop] enabled=false and appendWindowsPath=false in /etc/wsl.conf, then restart WSL" >&2
+        exit 126
+      fi
+      ;;
+  esac
+fi
+
 exec "$DANUS_NODE" "$DANUS_CODEX_JS" "$@"
