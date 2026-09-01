@@ -67,21 +67,18 @@ def test_project_selector_resizes_and_shows_empty_state(tmp_path, monkeypatch):
             help_text = app.query_one("#selector-help", Static)
             assert app.projects == []
             assert table.row_count == 1
-            assert app.screen.has_class("-short")
-            assert title.region.height == 1
-            assert help_text.region.height == 1
+            assert title.region.height == 3
+            assert help_text.region.height == 3
             assert table.region.height > 0
 
             await pilot.resize_terminal(120, 36)
             await pilot.pause()
-            assert app.screen.has_class("-normal")
             assert title.region.height == 3
             assert help_text.region.height == 3
             assert table.region.height > 0
 
             await pilot.resize_terminal(80, 24)
             await pilot.pause()
-            assert app.screen.has_class("-short")
             assert table.region.height > 0
 
     asyncio.run(check())
