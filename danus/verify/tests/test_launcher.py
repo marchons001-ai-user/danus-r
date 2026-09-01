@@ -60,6 +60,7 @@ def _write_stub(dirpath: Path, name: str, body: str) -> Path:
     return p
 
 
+# stub that writes a valid verification.json to the prompt's output path
 _STUB_OK = """\
 import re, sys, json
 from pathlib import Path
@@ -71,8 +72,13 @@ out.write_text(json.dumps({"verification_report": {"critical_errors": []},
 print("ok")
 """
 
+# stub that exits nonzero and writes nothing
 _STUB_FAIL = "import sys\nsys.stderr.write('boom\\n')\nsys.exit(7)\n"
+
+# stub that exits 0 but writes NO output file
 _STUB_NOOUT = "print('did nothing')\n"
+
+# stub that writes invalid JSON
 _STUB_BADJSON = """\
 import re, sys
 from pathlib import Path
@@ -81,6 +87,8 @@ out = Path(re.search(r'this exact path:\\s*(\\S+)', prompt).group(1).rstrip('.')
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text("{ this is not json ")
 """
+
+# stub that writes valid JSON that is NOT an object (a list)
 _STUB_NONDICT = """\
 import re, sys, json
 from pathlib import Path
@@ -89,6 +97,8 @@ out = Path(re.search(r'this exact path:\\s*(\\S+)', prompt).group(1).rstrip('.')
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(["not", "a", "dict"]))
 """
+
+# stub that sleeps long enough to trip a 1s timeout
 _STUB_SLOW = "import time\ntime.sleep(10)\n"
 
 
@@ -120,13 +130,15 @@ def test_build_codex_command_shape():
     assert cmd[0] == "/abs/codex" and cmd[1] == "exec"
     assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "m-test"
     assert '--config' in cmd and 'model_reasoning_effort="e-test"' in cmd
-    assert "-C" in cmd
+    assert "-C" in cmd  # agent home
+    # gateway injected via -c with role=verifier
     assert "-c" in cmd
     assert any('mcp_servers.danus=' in a and 'DANUS_ROLE="verifier"' in a for a in cmd)
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
     assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
     assert cmd[cmd.index("--ask-for-approval") + 1] == "never"
     assert "--add-dir" in cmd
+    # the prompt (final arg) names the exact output path
     assert cmd[-1].endswith("verification.json.")
     assert "Run_id: RID" in cmd[-1] and _STMT in cmd[-1]
 
@@ -141,6 +153,7 @@ def test_subprocess_env_prepends_dir_for_concrete_path():
 def test_subprocess_env_no_cwd_injection_for_bare_name():
     before = os.environ.get("PATH", "")
     env = codex.subprocess_env("codex")
+    # bare name has no dir component -> PATH must be untouched (no "." / cwd added)
     assert env["PATH"] == before
 
 
@@ -154,7 +167,11 @@ def test_allocate_run_id_retries_on_collision():
             base = launcher.generate_run_id(_STMT)
             root = launcher._results_root()
             root.mkdir(parents=True, exist_ok=True)
+            # pre-create the base dir so the first mkdir raises FileExistsError,
+            # forcing the numeric-suffix retry branch (lines 92-95).
             (root / base).mkdir()
+            # generate_run_id is timestamp-based; freeze it so the retry collides
+            # deterministically on `base`.
             orig = launcher.generate_run_id
             launcher.generate_run_id = lambda s: base  # type: ignore[assignment]
             try:
@@ -175,10 +192,12 @@ def test_verification_path_found_and_absent():
             rid = "RID1"
             d = launcher._results_dir(rid)
             d.mkdir(parents=True)
-            assert launcher._verification_path(rid) is None
+            assert launcher._verification_path(rid) is None  # nothing yet
             (d / launcher.VERIFICATION_FILENAMES[1]).write_text("{}")
+            # the alternate filename is also recognized
             assert launcher._verification_path(rid).name == launcher.VERIFICATION_FILENAMES[1]
             (d / launcher.VERIFICATION_FILENAMES[0]).write_text("{}")
+            # primary filename takes precedence
             assert launcher._verification_path(rid).name == launcher.VERIFICATION_FILENAMES[0]
 
 
@@ -258,6 +277,9 @@ def test_run_non_dict_json_500():
 
 
 def test_ensure_agent_home_provisions_missing_home():
+    # A fresh checkout has no verify agent home; ensure_agent_home builds it
+    # (AGENTS.md = verifier contract, .agents/skills = verify skills) so the codex
+    # -C dir exists. Regression for the live-found bug: service 500 on a missing home.
     with tempfile.TemporaryDirectory(prefix="verify_home_") as d:
         home = Path(d) / "agent"
         with _env(VERIFY_AGENT_HOME=str(home)):
@@ -267,8 +289,10 @@ def test_ensure_agent_home_provisions_missing_home():
             skills = home / ".agents" / "skills"
             assert agents_md.exists(), "AGENTS.md must be provisioned"
             assert skills.exists(), ".agents/skills must be provisioned"
+            # they point at the repo's canonical sources
             assert agents_md.resolve() == (launcher._REPO_ROOT / "agents" / "contracts" / "verifier.md").resolve()
             assert skills.resolve() == (launcher._REPO_ROOT / "agents" / "skills" / "verify").resolve()
+            # idempotent: a second call is a no-op and still valid
             launcher.ensure_agent_home()
             assert agents_md.exists() and skills.exists()
 
