@@ -11,10 +11,13 @@
 #   dsh --profile headless "<task>"
 #
 # Translation contract (see danus/codex.py + ARCHITECTURE.md):
-#   - flags the codex CLI understands but headless has no equivalent for are
+#   - flags the codex CLI understands but headless has no direct equivalent are
 #     dropped: -C <dir> (callers already set the process cwd), -c <mcp>,
-#     --skip-git-repo-check, --dangerously-bypass-approvals-and-sandbox,
-#     --sandbox <mode>, --config <non-effort toggles>
+#     --skip-git-repo-check, --add-dir <dir>, --config <non-effort toggles>
+#   - --sandbox read-only|workspace-write is mapped to DSH_PERMISSION_MODE;
+#     --ask-for-approval accepts only never; unrestricted/full-auto requests fail
+#   - DSH_TOOLS_MODE is forced to native because Code Mode's run_code path is not
+#     covered by the current DSH file-effect sandbox
 #   - the remaining positional arg is the task; a `-` sentinel means the task
 #     arrives on stdin (the authoring driver's prompt)
 #   - --model / --config model_reasoning_effort="E" are honored when they name
@@ -41,6 +44,8 @@ fi
 # --- parse the uniform codex argv -------------------------------------------
 model_arg=""
 effort_arg=""
+sandbox_arg=""
+approval_arg=""
 use_stdin=0
 task_args=()
 while [ $# -gt 0 ]; do
@@ -60,14 +65,37 @@ while [ $# -gt 0 ]; do
     -C) shift 2 ;;                                    # codex config home — cwd already set
     -c) mcp_arg="${2:-}"; shift 2 ;;                  # gateway injection (role parsed below)
     --skip-git-repo-check) shift ;;
-    --dangerously-bypass-approvals-and-sandbox) shift ;;
-    --sandbox) shift 2 ;;                             # read-only / auto: dropped
+    --add-dir) shift 2 ;;                             # DSH workspace root already contains its run dir
+    --sandbox) sandbox_arg="${2:-}"; shift 2 ;;
+    --ask-for-approval) approval_arg="${2:-}"; shift 2 ;;
+    --dangerously-bypass-approvals-and-sandbox|--full-auto)
+      echo "[codex-dsh] refusing unrestricted/escalating execution" >&2
+      exit 126
+      ;;
     --) shift; task_args+=("$@"); break ;;
     -) use_stdin=1; shift ;;                          # prompt arrives on stdin
     -*) echo "[codex-dsh] unsupported codex flag: $1" >&2; exit 2 ;;
     *) task_args+=("$1"); shift ;;
   esac
 done
+
+sandbox_arg="${sandbox_arg:-workspace-write}"
+case "$sandbox_arg" in
+  read-only|workspace-write) ;;
+  *) echo "[codex-dsh] unsafe sandbox mode refused: $sandbox_arg" >&2; exit 126 ;;
+esac
+if [ -n "$approval_arg" ] && [ "$approval_arg" != "never" ]; then
+  echo "[codex-dsh] approval escalation is disabled" >&2
+  exit 126
+fi
+case "$(uname -r 2>/dev/null || true)" in
+  *[Mm]icrosoft*)
+    if [ -n "${WSL_INTEROP:-}" ] || { [ -r /proc/sys/fs/binfmt_misc/WSLInterop ] && grep -q '^enabled' /proc/sys/fs/binfmt_misc/WSLInterop; }; then
+      echo "[codex-dsh] refusing agent exec: WSL interoperability can escape Linux filesystem sandboxes; disable [interop] enabled=false and appendWindowsPath=false in /etc/wsl.conf, then restart WSL" >&2
+      exit 126
+    fi
+    ;;
+esac
 
 if [ "$use_stdin" = "1" ]; then
   task="$(cat)"                                        # authoring drivers feed stdin
@@ -186,9 +214,9 @@ JSON
 # --- run one headless session; stdout + exit code pass through -----------------
 # Do not exec: the EXIT trap must run to reclaim RUN_HOME. Background the child
 # so TERM/INT can kill it, then reclaim.
-echo "[codex-dsh] DSH_HOME=$RUN_HOME model=$model_sel effort=${effort_sel:-default} gateway_role=$GW_ROLE" >&2
+echo "[codex-dsh] DSH_HOME=$RUN_HOME model=$model_sel effort=${effort_sel:-default} gateway_role=$GW_ROLE sandbox=$sandbox_arg" >&2
 set +e
-env DSH_HOME="$RUN_HOME" "${DANUS_DSH_NODE:-node}" "$DANUS_DSH_BIN" --profile headless "$task" &
+env DSH_HOME="$RUN_HOME" DSH_PERMISSION_MODE="$sandbox_arg" DSH_TOOLS_MODE="native" "${DANUS_DSH_NODE:-node}" "$DANUS_DSH_BIN" --profile headless "$task" &
 DSH_PID=$!
 wait "$DSH_PID"
 rc=$?
