@@ -13,7 +13,6 @@ class ProjectSelector(App[str | None]):
     TITLE = "Danus-R"
     AUTO_FOCUS = "#projects"
     BINDINGS = [
-        Binding("enter", "select", "Open"),
         Binding("escape", "cancel", "Cancel"),
         Binding("q", "cancel", "Quit"),
     ]
@@ -41,12 +40,9 @@ class ProjectSelector(App[str | None]):
         yield Static("↑/↓ select · Enter open · Esc/q quit", id="selector-help")
         yield Footer()
 
-    def action_select(self) -> None:
-        if not self.projects:
-            return
-        row = self.query_one("#projects", DataTable).cursor_row
-        if 0 <= row < len(self.projects):
-            self.exit(self.projects[row])
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "projects" and 0 <= event.cursor_row < len(self.projects):
+            self.exit(self.projects[event.cursor_row])
 
     def action_cancel(self) -> None:
         self.exit(None)
