@@ -15,7 +15,8 @@
 #     dropped: -C <dir> (callers already set the process cwd), -c <mcp>,
 #     --skip-git-repo-check, --add-dir <dir>, --config <non-effort toggles>
 #   - --sandbox read-only|workspace-write is mapped to DSH_PERMISSION_MODE;
-#     --ask-for-approval accepts only never; unrestricted/full-auto requests fail
+#     --ask-for-approval accepts only never; legacy full-access/full-auto requests
+#     are downgraded to workspace-write rather than honored
 #   - DSH_TOOLS_MODE is forced to native because Code Mode's run_code path is not
 #     covered by the current DSH file-effect sandbox
 #   - the remaining positional arg is the task; a `-` sentinel means the task
@@ -69,8 +70,8 @@ while [ $# -gt 0 ]; do
     --sandbox) sandbox_arg="${2:-}"; shift 2 ;;
     --ask-for-approval) approval_arg="${2:-}"; shift 2 ;;
     --dangerously-bypass-approvals-and-sandbox|--full-auto)
-      echo "[codex-dsh] refusing unrestricted/escalating execution" >&2
-      exit 126
+      sandbox_arg="${sandbox_arg:-workspace-write}"
+      shift
       ;;
     --) shift; task_args+=("$@"); break ;;
     -) use_stdin=1; shift ;;                          # prompt arrives on stdin
@@ -108,8 +109,6 @@ if [ -z "$task" ]; then
 fi
 
 # --- resolve model / effort for this call ------------------------------------
-# Source of truth: the deployment dsh home. Per-call overrides only win when the
-# argv names a deepseek-ish model, or an explicit DANUS_DSH_MODEL/EFFORT is set.
 SRC_HOME="${DANUS_DSH_HOME:-$HOME/.dsh}"
 provider=""
 if [ -f "$SRC_HOME/settings.yaml" ]; then
@@ -129,13 +128,11 @@ model_sel="${model_sel:-deepseek-v4-pro}"
 
 effort_sel="${DANUS_DSH_EFFORT:-}"
 if [ -z "$effort_sel" ]; then
-  # DeepSeek's reasoning-effort enum is off | high | max (no low/medium tiers),
-  # so the codex scale collapses onto it: anything below high -> high.
   case "${effort_arg:-}" in
     minimal|low|medium) effort_sel="high" ;;
     high)               effort_sel="high" ;;
     xhigh|max)          effort_sel="max" ;;
-    *)                  effort_sel="" ;;                 # keep the deployment default
+    *)                  effort_sel="" ;;
   esac
 fi
 
@@ -163,8 +160,6 @@ if [ ! -f "$RUN_HOME/settings.yaml" ]; then
   printf 'agent-default-model:\n  provider: %s\n  model: %s\n' "$provider" "$model_sel" > "$RUN_HOME/settings.yaml"
 fi
 
-# Do not invent a reasoning mode when neither the call nor the deployment asks
-# for one. An explicit per-call effort must win even if settings.yaml omits it.
 if [ -z "${DANUS_DSH_EFFORT:-}" ] && [ -z "${effort_arg:-}" ] && ! grep -q 'reasoningEffort' "$SRC_HOME/settings.yaml" 2>/dev/null; then
   effort_sel=""
 fi
@@ -172,13 +167,6 @@ fi
 "$PY" "$DSH_PY" rewrite-settings "$RUN_HOME/settings.yaml" "$provider" "$model_sel" "$effort_sel"
 
 # --- danus gateway MCP injection (headless has no codex -c) --------------------
-# codex mounts the role-gated danus gateway via `-c` (verify/renderers) or the
-# worker home's .codex/config.toml (workers). DSH headless has neither, so the
-# gateway is mounted as an mcp-client plugin in the per-run headless profile —
-# pre-created here, before the first boot (the launcher skips init for an
-# existing profile).
-# worker cwd = <project>/workers/<name>: author = the worker dir name, project
-# dir = the grandparent (the truth stores live at <project>/fact_graph etc.).
 GW_ROLE="worker"; GW_AUTHOR="$(basename "$PWD")"
 GW_PROJECT="$(dirname "$(dirname "$PWD")")"; GW_FAIL="true"
 if [ -z "${mcp_arg:-}" ] && [ -f "$PWD/.codex/config.toml" ]; then
@@ -191,7 +179,7 @@ if [ -n "${mcp_arg:-}" ]; then
   a="$(printf '%s' "$mcp_arg" | sed -n 's/.*DANUS_AUTHOR="\([^"]*\)".*/\1/p')"
   [ -n "$a" ] && GW_AUTHOR="$a"
   GW_PROJECT=""
-  GW_FAIL="false"           # verifier/renderer: the gateway is an enhancement, not a gate
+  GW_FAIL="false"
 fi
 mkdir -p "$RUN_HOME/profiles/headless"
 cat > "$RUN_HOME/profiles/headless/package.json" <<JSON
@@ -212,8 +200,6 @@ JSON
   --verify-url "${DANUS_VERIFY_URL:-http://127.0.0.1:8091/verify}"
 
 # --- run one headless session; stdout + exit code pass through -----------------
-# Do not exec: the EXIT trap must run to reclaim RUN_HOME. Background the child
-# so TERM/INT can kill it, then reclaim.
 echo "[codex-dsh] DSH_HOME=$RUN_HOME model=$model_sel effort=${effort_sel:-default} gateway_role=$GW_ROLE sandbox=$sandbox_arg" >&2
 set +e
 env DSH_HOME="$RUN_HOME" DSH_PERMISSION_MODE="$sandbox_arg" DSH_TOOLS_MODE="native" "${DANUS_DSH_NODE:-node}" "$DANUS_DSH_BIN" --profile headless "$task" &
