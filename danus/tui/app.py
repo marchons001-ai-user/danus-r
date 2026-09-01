@@ -1,4 +1,4 @@
-"""Read-only Textual dashboard for Danus-R."""
+"""Textual dashboard and human-steering surface for Danus-R."""
 
 from __future__ import annotations
 
@@ -10,9 +10,89 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.events import DescendantFocus
-from textual.widgets import DataTable, Footer, Header, Static, Tree
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Header, Input, Static, Tree
+
+from danus.orchestration import cli as C
+from danus.orchestration import steering as S
 
 from .state import load_project_snapshot
+
+
+class GuidanceScreen(ModalScreen):
+    """One-line durable human-guidance input; Esc cancels without mutation."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    CSS = """
+    GuidanceScreen { align: center middle; }
+    #guidance-dialog {
+        width: 72;
+        height: 9;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #guidance-title { height: 1; text-style: bold; }
+    #guidance-input { margin-top: 1; }
+    #guidance-help { height: 1; margin-top: 1; color: $text-muted; }
+    """
+
+    def __init__(self, *, interrupt: bool = False) -> None:
+        super().__init__()
+        self.interrupt = interrupt
+
+    def compose(self) -> ComposeResult:
+        title = "Interrupt current round + guidance" if self.interrupt else "Human Guidance"
+        with Vertical(id="guidance-dialog"):
+            yield Static(title, id="guidance-title")
+            yield Input(placeholder="Type guidance for the scientific roles…", id="guidance-input")
+            yield Static("Enter submit · Esc cancel", id="guidance-help")
+
+    def on_mount(self) -> None:
+        self.query_one("#guidance-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        if text:
+            self.dismiss(text)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class InterruptConfirmScreen(ModalScreen):
+    """Explicit confirmation before killing/restarting active model rounds."""
+
+    BINDINGS = [
+        Binding("enter", "confirm", "Interrupt", show=False),
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+    CSS = """
+    InterruptConfirmScreen { align: center middle; }
+    #interrupt-dialog {
+        width: 68;
+        height: 9;
+        border: round $error;
+        background: $surface;
+        padding: 1 2;
+    }
+    #interrupt-title { height: 1; text-style: bold; color: $error; }
+    #interrupt-help { height: 1; margin-top: 1; color: $text-muted; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="interrupt-dialog"):
+            yield Static("Interrupt active model round(s)?", id="interrupt-title")
+            yield Static(
+                "Active rounds will be terminated and restarted. Durable assignments remain unchanged."
+            )
+            yield Static("Enter interrupt · Esc cancel", id="interrupt-help")
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class DanusTUI(App[None]):
@@ -20,6 +100,9 @@ class DanusTUI(App[None]):
     AUTO_FOCUS = "#plan"
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("p", "toggle_pause", "Pause/Resume"),
+        Binding("g", "guide", "Guide"),
+        Binding("I", "interrupt", "Interrupt", key_display="shift+i"),
         Binding("0", "filter_all", "All activity", show=False),
         Binding("1", "filter_researcher", "Researcher activity", show=False),
         Binding("2", "filter_reviewer", "Reviewer activity", show=False),
@@ -331,6 +414,59 @@ class DanusTUI(App[None]):
         remaining = quota.get("weekly_remaining_percent")
         weekly = "" if remaining is None else f" · weekly {remaining:g}% remaining"
         return f"Quota: {quota['state']} · {quota['reason']}{weekly}"
+
+    def _control_succeeded(self, message: str) -> None:
+        self._refresh_snapshot()
+        self.notify(message)
+
+    def action_toggle_pause(self) -> None:
+        if self.snapshot["project_state"] == "COMPLETE":
+            self.notify("Project is already complete.", severity="warning")
+            return
+        try:
+            if self.snapshot["project_state"] == "PAUSED":
+                S.do_resume(self.project_name)
+                message = "Project resumed."
+            else:
+                C.do_pause(self.project_name)
+                message = "Project pause requested."
+        except SystemExit as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self._control_succeeded(message)
+
+    def action_guide(self) -> None:
+        self.push_screen(GuidanceScreen(), self._submit_guidance)
+
+    def _submit_guidance(self, text: str | None) -> None:
+        if not text:
+            return
+        try:
+            S.do_guide(self.project_name, text, interrupt=False)
+        except SystemExit as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self._control_succeeded("Human Guidance saved.")
+
+    def action_interrupt(self) -> None:
+        self.push_screen(GuidanceScreen(interrupt=True), self._confirm_interrupt)
+
+    def _confirm_interrupt(self, text: str | None) -> None:
+        if not text:
+            return
+        self.push_screen(
+            InterruptConfirmScreen(),
+            lambda confirmed: self._apply_interrupt(text) if confirmed else None,
+        )
+
+    def _apply_interrupt(self, text: str) -> None:
+        try:
+            result = S.do_guide(self.project_name, text, interrupt=True)
+        except SystemExit as exc:
+            self.notify(str(exc), severity="error")
+            return
+        count = len(result.get("interrupted") or [])
+        self._control_succeeded(f"Guidance saved; interrupted {count} active worker(s).")
 
     def _set_activity_filter(self, role: str) -> None:
         self.activity_role = role
