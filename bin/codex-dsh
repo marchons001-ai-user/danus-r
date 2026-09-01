@@ -91,8 +91,9 @@ if [ -n "$approval_arg" ] && [ "$approval_arg" != "never" ]; then
 fi
 case "$(uname -r 2>/dev/null || true)" in
   *[Mm]icrosoft*)
-    if [ -n "${WSL_INTEROP:-}" ] || { [ -r /proc/sys/fs/binfmt_misc/WSLInterop ] && grep -q '^enabled' /proc/sys/fs/binfmt_misc/WSLInterop; }; then
-      echo "[codex-dsh] refusing agent exec: WSL interoperability can escape Linux filesystem sandboxes; disable [interop] enabled=false and appendWindowsPath=false in /etc/wsl.conf, then restart WSL" >&2
+    interop_cfg_ok="$(awk 'BEGIN{s=0;e=0;p=0} /^[[:space:]]*\[/{x=tolower($0);s=(x~/^[[:space:]]*\[interop\][[:space:]]*$/);next} s{x=tolower($0);gsub(/[[:space:]]/,"",x);if(x~/^enabled=false([#;].*)?$/)e=1;if(x~/^appendwindowspath=false([#;].*)?$/)p=1} END{if(e&&p)print "yes"}' /etc/wsl.conf 2>/dev/null || true)"
+    if [ -n "${WSL_INTEROP:-}" ] || [ "$interop_cfg_ok" != "yes" ]; then
+      echo "[codex-dsh] refusing agent exec: WSL interoperability is not fully disabled; set [interop] enabled=false and appendWindowsPath=false in /etc/wsl.conf, then restart WSL" >&2
       exit 126
     fi
     ;;
