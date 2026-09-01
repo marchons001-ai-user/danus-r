@@ -179,6 +179,7 @@ def build_codex_command(run_id: str, statement: str, proof: str) -> List[str]:
     return codex.exec_cmd(
         codex.resolve_bin(), _model(), _effort(),
         "-C", str(_agent_home()),
+        "--add-dir", str(_results_dir(run_id)),
         "--skip-git-repo-check",
         "-c", _mcp_config_arg(),
         "--dangerously-bypass-approvals-and-sandbox",
@@ -228,9 +229,11 @@ def build_empirical_codex_command(
     evidence_summary: str,
     deterministic_bundle: Dict[str, Any],
 ) -> List[str]:
+    home = _empirical_agent_home()
     return codex.exec_cmd(
         codex.resolve_bin(), _empirical_model(), _empirical_effort(),
-        "-C", str(_empirical_agent_home()),
+        "-C", str(home),
+        "--add-dir", str(_results_dir(run_id, home)),
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
         build_empirical_prompt(
