@@ -13,7 +13,8 @@ fi
 
 if [ "${1:-}" = "exec" ]; then
   sandbox=""
-  approval=""
+  approval_ok=0
+  approval_bad=0
   args=("$@")
   for ((i=0; i<${#args[@]}; i++)); do
     case "${args[$i]}" in
@@ -24,8 +25,20 @@ if [ "${1:-}" = "exec" ]; then
       --sandbox)
         sandbox="${args[$((i+1))]:-}"
         ;;
-      --ask-for-approval)
-        approval="${args[$((i+1))]:-}"
+      --config|-c)
+        value="${args[$((i+1))]:-}"
+        case "$value" in
+          approval_policy=\"never\"|approval_policy=\'never\'|approval_policy=never)
+            approval_ok=1
+            ;;
+          approval_policy=*)
+            approval_bad=1
+            ;;
+          sandbox_mode=*)
+            echo "codex exec refused: sandbox_mode config overrides are disabled by Danus-R" >&2
+            exit 126
+            ;;
+        esac
         ;;
     esac
   done
@@ -33,8 +46,8 @@ if [ "${1:-}" = "exec" ]; then
     echo "codex exec refused: sandbox must be read-only or workspace-write" >&2
     exit 126
   fi
-  if [ "$approval" != "never" ]; then
-    echo "codex exec refused: approval policy must be never (no privilege escalation)" >&2
+  if [ "$approval_ok" != "1" ] || [ "$approval_bad" != "0" ]; then
+    echo "codex exec refused: approval_policy must be forced to never" >&2
     exit 126
   fi
   case "$(uname -r 2>/dev/null || true)" in
