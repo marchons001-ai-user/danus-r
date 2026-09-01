@@ -54,6 +54,25 @@ def test_tui_reports_corrupt_project_without_traceback(tmp_path, monkeypatch, ca
     assert "cannot open project broken" in capsys.readouterr().err
 
 
+def test_project_selector_enter_opens_highlighted_project(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    _project(root, "A")
+    _project(root, "B")
+    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
+
+    async def check() -> None:
+        app = ProjectSelector()
+        selected = []
+        monkeypatch.setattr(app, "exit", lambda result=None, *args, **kwargs: selected.append(result))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("down")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert selected == ["B"]
+
+    asyncio.run(check())
+
+
 def test_project_selector_resizes_and_shows_empty_state(tmp_path, monkeypatch):
     root = tmp_path / "projects"
     root.mkdir()
