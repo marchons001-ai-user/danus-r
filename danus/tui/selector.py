@@ -21,12 +21,7 @@ class ProjectSelector(App[str | None]):
     #selector-title { height: 3; padding: 1 2; text-style: bold; }
     #projects { height: 1fr; border: round $primary; }
     #selector-help { height: 3; padding: 1 2; color: $text-muted; }
-    Screen.-short #selector-title, Screen.-short #selector-help {
-        height: 1;
-        padding: 0 1;
-    }
     """
-    VERTICAL_BREAKPOINTS = [(0, "-short"), (32, "-normal")]
 
     def __init__(self) -> None:
         super().__init__()
