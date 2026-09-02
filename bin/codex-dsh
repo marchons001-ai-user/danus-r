@@ -11,10 +11,14 @@
 #   dsh --profile headless "<task>"
 #
 # Translation contract (see danus/codex.py + ARCHITECTURE.md):
-#   - flags the codex CLI understands but headless has no equivalent for are
+#   - flags the codex CLI understands but headless has no direct equivalent are
 #     dropped: -C <dir> (callers already set the process cwd), -c <mcp>,
-#     --skip-git-repo-check, --dangerously-bypass-approvals-and-sandbox,
-#     --sandbox <mode>, --config <non-effort toggles>
+#     --skip-git-repo-check, --add-dir <dir>, --config <non-effort toggles>
+#   - --sandbox read-only|workspace-write is mapped to DSH_PERMISSION_MODE;
+#     approval_policy="never" is accepted; legacy full-access/full-auto requests
+#     are downgraded to workspace-write rather than honored
+#   - DSH_TOOLS_MODE is forced to native because Code Mode's run_code path is not
+#     covered by the current DSH file-effect sandbox
 #   - the remaining positional arg is the task; a `-` sentinel means the task
 #     arrives on stdin (the authoring driver's prompt)
 #   - --model / --config model_reasoning_effort="E" are honored when they name
@@ -41,38 +45,71 @@ fi
 # --- parse the uniform codex argv -------------------------------------------
 model_arg=""
 effort_arg=""
+sandbox_arg=""
+approval_arg=""
 use_stdin=0
 task_args=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    exec) shift ;;                                     # subcommand: always exec
+    exec) shift ;;
     --model) model_arg="${2:-}"; shift 2 ;;
     --config)
       case "${2:-}" in
-        model_reasoning_effort=*)                      # the one codex config we honor
+        model_reasoning_effort=*)
           effort_arg="${2#model_reasoning_effort=}"
           effort_arg="${effort_arg%\"}"
           effort_arg="${effort_arg#\"}"
           ;;
-        *) ;;                                         # tools.web_search etc.: dropped
+        approval_policy=*)
+          approval_arg="${2#approval_policy=}"
+          approval_arg="${approval_arg%\"}"
+          approval_arg="${approval_arg#\"}"
+          approval_arg="${approval_arg%\'}"
+          approval_arg="${approval_arg#\'}"
+          ;;
+        *) ;;
       esac
       shift 2 ;;
-    -C) shift 2 ;;                                    # codex config home — cwd already set
-    -c) mcp_arg="${2:-}"; shift 2 ;;                  # gateway injection (role parsed below)
+    -C) shift 2 ;;
+    -c) mcp_arg="${2:-}"; shift 2 ;;
     --skip-git-repo-check) shift ;;
-    --dangerously-bypass-approvals-and-sandbox) shift ;;
-    --sandbox) shift 2 ;;                             # read-only / auto: dropped
+    --add-dir) shift 2 ;;
+    --sandbox) sandbox_arg="${2:-}"; shift 2 ;;
+    --ask-for-approval) approval_arg="${2:-}"; shift 2 ;;
+    --dangerously-bypass-approvals-and-sandbox|--full-auto)
+      sandbox_arg="${sandbox_arg:-workspace-write}"
+      shift
+      ;;
     --) shift; task_args+=("$@"); break ;;
-    -) use_stdin=1; shift ;;                          # prompt arrives on stdin
+    -) use_stdin=1; shift ;;
     -*) echo "[codex-dsh] unsupported codex flag: $1" >&2; exit 2 ;;
     *) task_args+=("$1"); shift ;;
   esac
 done
 
+sandbox_arg="${sandbox_arg:-workspace-write}"
+case "$sandbox_arg" in
+  read-only|workspace-write) ;;
+  *) echo "[codex-dsh] unsafe sandbox mode refused: $sandbox_arg" >&2; exit 126 ;;
+esac
+if [ -n "$approval_arg" ] && [ "$approval_arg" != "never" ]; then
+  echo "[codex-dsh] approval escalation is disabled" >&2
+  exit 126
+fi
+case "$(uname -r 2>/dev/null || true)" in
+  *[Mm]icrosoft*)
+    interop_cfg_ok="$(awk 'BEGIN{s=0;e=0;p=0} /^[[:space:]]*\[/{x=tolower($0);s=(x~/^[[:space:]]*\[interop\][[:space:]]*$/);next} s{x=tolower($0);gsub(/[[:space:]]/,"",x);if(x~/^enabled=false([#;].*)?$/)e=1;if(x~/^appendwindowspath=false([#;].*)?$/)p=1} END{if(e&&p)print "yes"}' /etc/wsl.conf 2>/dev/null || true)"
+    if [ -n "${WSL_INTEROP:-}" ] || [ "$interop_cfg_ok" != "yes" ]; then
+      echo "[codex-dsh] refusing agent exec: WSL interoperability is not fully disabled; set [interop] enabled=false and appendWindowsPath=false in /etc/wsl.conf, then restart WSL" >&2
+      exit 126
+    fi
+    ;;
+esac
+
 if [ "$use_stdin" = "1" ]; then
-  task="$(cat)"                                        # authoring drivers feed stdin
+  task="$(cat)"
 else
-  task="${task_args[*]}"                              # workers/verifier: positional prompt
+  task="${task_args[*]}"
 fi
 if [ -z "$task" ]; then
   echo "[codex-dsh] empty task (no prompt positional and no stdin)" >&2
@@ -107,7 +144,7 @@ if [ -z "$effort_sel" ]; then
     minimal|low|medium) effort_sel="high" ;;
     high)               effort_sel="high" ;;
     xhigh|max)          effort_sel="max" ;;
-    *)                  effort_sel="" ;;                 # keep the deployment default
+    *)                  effort_sel="" ;;
   esac
 fi
 
@@ -135,8 +172,6 @@ if [ ! -f "$RUN_HOME/settings.yaml" ]; then
   printf 'agent-default-model:\n  provider: %s\n  model: %s\n' "$provider" "$model_sel" > "$RUN_HOME/settings.yaml"
 fi
 
-# Do not invent a reasoning mode when neither the call nor the deployment asks
-# for one. An explicit per-call effort must win even if settings.yaml omits it.
 if [ -z "${DANUS_DSH_EFFORT:-}" ] && [ -z "${effort_arg:-}" ] && ! grep -q 'reasoningEffort' "$SRC_HOME/settings.yaml" 2>/dev/null; then
   effort_sel=""
 fi
@@ -144,13 +179,6 @@ fi
 "$PY" "$DSH_PY" rewrite-settings "$RUN_HOME/settings.yaml" "$provider" "$model_sel" "$effort_sel"
 
 # --- danus gateway MCP injection (headless has no codex -c) --------------------
-# codex mounts the role-gated danus gateway via `-c` (verify/renderers) or the
-# worker home's .codex/config.toml (workers). DSH headless has neither, so the
-# gateway is mounted as an mcp-client plugin in the per-run headless profile —
-# pre-created here, before the first boot (the launcher skips init for an
-# existing profile).
-# worker cwd = <project>/workers/<name>: author = the worker dir name, project
-# dir = the grandparent (the truth stores live at <project>/fact_graph etc.).
 GW_ROLE="worker"; GW_AUTHOR="$(basename "$PWD")"
 GW_PROJECT="$(dirname "$(dirname "$PWD")")"; GW_FAIL="true"
 if [ -z "${mcp_arg:-}" ] && [ -f "$PWD/.codex/config.toml" ]; then
@@ -163,7 +191,7 @@ if [ -n "${mcp_arg:-}" ]; then
   a="$(printf '%s' "$mcp_arg" | sed -n 's/.*DANUS_AUTHOR="\([^"]*\)".*/\1/p')"
   [ -n "$a" ] && GW_AUTHOR="$a"
   GW_PROJECT=""
-  GW_FAIL="false"           # verifier/renderer: the gateway is an enhancement, not a gate
+  GW_FAIL="false"
 fi
 mkdir -p "$RUN_HOME/profiles/headless"
 cat > "$RUN_HOME/profiles/headless/package.json" <<JSON
@@ -184,11 +212,9 @@ JSON
   --verify-url "${DANUS_VERIFY_URL:-http://127.0.0.1:8091/verify}"
 
 # --- run one headless session; stdout + exit code pass through -----------------
-# Do not exec: the EXIT trap must run to reclaim RUN_HOME. Background the child
-# so TERM/INT can kill it, then reclaim.
-echo "[codex-dsh] DSH_HOME=$RUN_HOME model=$model_sel effort=${effort_sel:-default} gateway_role=$GW_ROLE" >&2
+echo "[codex-dsh] DSH_HOME=$RUN_HOME model=$model_sel effort=${effort_sel:-default} gateway_role=$GW_ROLE sandbox=$sandbox_arg" >&2
 set +e
-env DSH_HOME="$RUN_HOME" "${DANUS_DSH_NODE:-node}" "$DANUS_DSH_BIN" --profile headless "$task" &
+env DSH_HOME="$RUN_HOME" DSH_PERMISSION_MODE="$sandbox_arg" DSH_TOOLS_MODE="native" "${DANUS_DSH_NODE:-node}" "$DANUS_DSH_BIN" --profile headless "$task" &
 DSH_PID=$!
 wait "$DSH_PID"
 rc=$?

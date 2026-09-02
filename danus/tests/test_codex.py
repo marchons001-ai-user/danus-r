@@ -5,7 +5,7 @@ legacy alias, the <repo>/bin/codex wrapper, and shutil.which), model/effort
 precedence (per-service overrides -> neutral DANUS_CODEX_* -> built-in default,
 override names), subprocess_env (prepend the binary DIR to PATH only for a
 concrete path; never inject the CWD for the bare "codex" fallback), and the
-exec_cmd shape (quoted model_reasoning_effort + verbatim tail).
+exec_cmd shape (quoted model_reasoning_effort + fail-closed sandbox tail).
 
 Zero network / API spend. Runs standalone
 (``python -m danus.tests.test_codex``) and under pytest.
@@ -41,8 +41,6 @@ def env(**kv):
                 os.environ[k] = v
 
 
-# All env names the launcher consults — cleared as the baseline so ambient config
-# never leaks into a precedence assertion.
 _ALL = dict(
     CODEX_BACKEND=None,
     DANUS_CODEX_BIN=None, CODEX_BIN=None,
@@ -53,16 +51,12 @@ _ALL = dict(
 )
 
 
-# --- resolve_bin precedence ------------------------------------------------- #
-
 def test_resolve_bin_prefers_danus_codex_bin_over_alias():
     with env(**{**_ALL, "DANUS_CODEX_BIN": "/x/primary", "CODEX_BIN": "/x/alias"}):
         assert codex.resolve_bin() == "/x/primary"
 
 
 def test_resolve_bin_falls_back_to_wrapper_then_which_then_bare():
-    # no env override → the <repo>/bin/codex wrapper wins if it exists, else
-    # shutil.which("codex"), else the bare string "codex".
     with env(**_ALL):
         got = codex.resolve_bin()
         import shutil
@@ -74,22 +68,17 @@ def test_resolve_bin_falls_back_to_wrapper_then_which_then_bare():
 
 
 def test_resolve_bin_bare_when_nothing_available(monkeypatch=None):
-    # simulate: no env, no wrapper, no codex on PATH → bare "codex"
     import shutil
     real_which = shutil.which
     shutil.which = lambda *a, **k: None  # type: ignore[assignment]
     try:
         with env(**_ALL):
-            # if the repo happens to ship a bin/codex wrapper, that legitimately
-            # wins; only assert the bare-string fallback when no wrapper exists.
             wrapper = Path(codex.__file__).resolve().parents[1] / "bin" / "codex"
             if not wrapper.exists():
                 assert codex.resolve_bin() == "codex"
     finally:
         shutil.which = real_which  # type: ignore[assignment]
 
-
-# --- model / effort precedence ---------------------------------------------- #
 
 def test_model_override_wins_then_neutral_then_default():
     with env(**{**_ALL, "DANUS_VERIFY_MODEL": "override-m", "DANUS_CODEX_MODEL": "neutral-m"}):
@@ -111,11 +100,8 @@ def test_effort_override_wins_then_neutral_then_default():
 
 def test_first_override_in_order_wins():
     with env(**{**_ALL, "DANUS_VERIFY_MODEL": "primary", "DANUS_WRITE_PAPER_MODEL": "other"}):
-        # the first listed override name wins
         assert codex.model("DANUS_VERIFY_MODEL", "DANUS_WRITE_PAPER_MODEL") == "primary"
 
-
-# --- subprocess_env --------------------------------------------------------- #
 
 def test_subprocess_env_prepends_dir_for_concrete_path():
     with env(**{**_ALL, "PATH": "/usr/bin:/bin"}):
@@ -127,8 +113,6 @@ def test_subprocess_env_prepends_dir_for_concrete_path():
 def test_subprocess_env_never_injects_cwd_for_bare_codex():
     with env(**{**_ALL, "PATH": "/usr/bin:/bin"}):
         out = codex.subprocess_env("codex")
-        # the bare-name fallback has no dir component → PATH is untouched, and the
-        # CWD ("" / ".") is NOT injected.
         assert out["PATH"] == "/usr/bin:/bin"
         assert "" not in out["PATH"].split(os.pathsep)
         assert "." not in out["PATH"].split(os.pathsep)
@@ -137,11 +121,8 @@ def test_subprocess_env_never_injects_cwd_for_bare_codex():
 def test_subprocess_env_idempotent_when_dir_already_on_path():
     with env(**{**_ALL, "PATH": "/opt/codex/bin:/usr/bin"}):
         out = codex.subprocess_env("/opt/codex/bin/codex")
-        # already present → not duplicated
         assert out["PATH"] == "/opt/codex/bin:/usr/bin"
 
-
-# --- exec_cmd shape --------------------------------------------------------- #
 
 def test_exec_cmd_shape_quoted_effort_and_verbatim_tail():
     cmd = codex.exec_cmd("/x/codex", "the-model", "xhigh", "-C", "/home", "-")
@@ -149,16 +130,49 @@ def test_exec_cmd_shape_quoted_effort_and_verbatim_tail():
         "/x/codex", "exec",
         "--model", "the-model",
         "--config", 'model_reasoning_effort="xhigh"',
+        "--sandbox", "workspace-write",
+        "--config", 'approval_policy="never"',
         "-C", "/home", "-",
     ]
 
 
 def test_exec_cmd_empty_tail():
     cmd = codex.exec_cmd("codex", "m", "e")
-    assert cmd == ["codex", "exec", "--model", "m", "--config", 'model_reasoning_effort="e"']
+    assert cmd == [
+        "codex", "exec", "--model", "m", "--config", 'model_reasoning_effort="e"',
+        "--sandbox", "workspace-write", "--config", 'approval_policy="never"',
+    ]
 
 
-# --- backend selection + dsh prompt embedding ------------------------------- #
+def test_exec_cmd_downgrades_full_access_and_preserves_read_only():
+    cmd = codex.exec_cmd(
+        "codex", "m", "e", "--dangerously-bypass-approvals-and-sandbox", "task"
+    )
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    assert 'approval_policy="never"' in cmd
+
+    cmd = codex.exec_cmd(
+        "codex", "m", "e", "--sandbox", "read-only",
+        "--ask-for-approval", "on-request",
+        "--config", 'approval_policy="on-request"',
+        "--config", 'sandbox_mode="danger-full-access"',
+        "task",
+    )
+    assert cmd[cmd.index("--sandbox") + 1] == "read-only"
+    assert cmd.count('approval_policy="never"') == 1
+    assert 'approval_policy="on-request"' not in cmd
+    assert 'sandbox_mode="danger-full-access"' not in cmd
+    assert "--ask-for-approval" not in cmd
+
+
+def test_exec_cmd_refuses_danger_full_access():
+    try:
+        codex.exec_cmd("codex", "m", "e", "--sandbox", "danger-full-access", "task")
+        assert False, "danger-full-access must be refused"
+    except ValueError as exc:
+        assert "unsafe codex sandbox mode refused" in str(exc)
+
 
 def test_backend_defaults_to_api():
     with env(**_ALL):
@@ -176,11 +190,10 @@ def test_resolve_bin_dsh_backend_prefers_shim():
     with env(**{**_ALL, "CODEX_BACKEND": "dsh"}):
         got = codex.resolve_bin()
         shim = Path(codex.__file__).resolve().parents[1] / "bin" / "codex-dsh"
-        assert got == str(shim)          # the repo ships bin/codex-dsh
+        assert got == str(shim)
 
 
 def test_resolve_bin_dsh_backend_honors_override():
-    # DANUS_CODEX_BIN still wins over the backend's own binary (tests rely on it)
     with env(**{**_ALL, "CODEX_BACKEND": "dsh", "DANUS_CODEX_BIN": "/x/fake-dsh"}):
         assert codex.resolve_bin() == "/x/fake-dsh"
 
@@ -205,7 +218,6 @@ def test_dsh_context_embeds_files_and_skills_for_dsh_backend():
         assert "CONTENT-CONTRACT" in out
         assert "CONTENT-SKILL-A" in out
         assert out.count("<instructions") == 2
-        # other backends never embed
         with env(**_ALL):
             out = codex.dsh_context("solve it", contract, root / "skills")
         assert out == "solve it"
@@ -224,6 +236,8 @@ def main() -> None:
         test_subprocess_env_idempotent_when_dir_already_on_path,
         test_exec_cmd_shape_quoted_effort_and_verbatim_tail,
         test_exec_cmd_empty_tail,
+        test_exec_cmd_downgrades_full_access_and_preserves_read_only,
+        test_exec_cmd_refuses_danger_full_access,
         test_backend_defaults_to_api,
         test_backend_reads_codex_backend_env,
         test_resolve_bin_dsh_backend_prefers_shim,
