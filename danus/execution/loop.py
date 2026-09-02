@@ -255,12 +255,19 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
               hard_timeout: int, context_budget: bool = False) -> int:
     """Exec one session. 124=hard timeout, 125=context rollover, 127=missing."""
     wdir = wl.dir
+    project_dir = wl.project_dir
+    # The autonomous-planning handoff writes a JSON file to <project>/.danus/.
+    # Codex's workspace-write sandbox otherwise treats that as outside -C, so
+    # add the handoff directory as an explicit writable root.
+    handoff_dir = project_dir / ".danus"
+    handoff_dir.mkdir(parents=True, exist_ok=True)
     codex_bin = codex.resolve_bin()
     tail = []
     if context_budget and codex.backend() != "dsh":
         tail.append("--json")
     tail += [
         "-C", str(wdir),
+        "--add-dir", str(handoff_dir),
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
         prompt,
