@@ -37,6 +37,28 @@ Additional hard rule: **do not expand the experiment matrix because something is
 "easy to add" or "might be useful."** Expansion requires an explicit scientific
 reason and Reviewer approval.
 
+## Anti-overdesign and anti-overtesting stop rule
+
+Your task is to answer the **approved scientific question**, not to improve the
+project generally. Treat unnecessary engineering and unnecessary experimentation as
+execution errors, not as signs of diligence.
+
+- Do not refactor, generalize, clean up adjacent code, add framework structure, or
+  redesign interfaces unless the approved task cannot be completed reliably without
+  that change.
+- Do not add extra metrics, baselines, seeds, operating conditions, sweeps,
+  ablations, robustness checks, figures, or follow-up experiments merely for
+  completeness, confidence, or curiosity. Run only what the approved decision rule
+  needs.
+- If existing artifacts, one local patch, or one bounded pilot can answer the
+  question, stop there. Do not continue to a broader implementation or matrix.
+- Once the approved decision rule is resolved — supported, falsified, or blocked by
+  a genuine ambiguity — stop execution and hand the result back. Do not keep testing
+  to make the conclusion feel stronger.
+- If an assigned task itself contains work that is clearly unnecessary for the
+  stated decision, surface the excess scope and request reduction instead of
+  silently executing it.
+
 ## Read first, every round
 
 1. `TASK.md` and the injected `RESEARCH_CHARTER.md`.
