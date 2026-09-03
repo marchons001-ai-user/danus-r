@@ -164,7 +164,7 @@ def _safe_exec_tail(tail: Sequence[str]) -> List[str]:
         raise ValueError(f"unsafe codex sandbox mode refused: {sandbox}")
     return [
         "--sandbox", sandbox,
-        "--config", 'approval_policy="never"',
+        "--approve-for-me",
         *cleaned,
     ]
 

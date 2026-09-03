@@ -131,7 +131,7 @@ def test_exec_cmd_shape_quoted_effort_and_verbatim_tail():
         "--model", "the-model",
         "--config", 'model_reasoning_effort="xhigh"',
         "--sandbox", "workspace-write",
-        "--config", 'approval_policy="never"',
+        "--approve-for-me",
         "-C", "/home", "-",
     ]
 
@@ -140,7 +140,7 @@ def test_exec_cmd_empty_tail():
     cmd = codex.exec_cmd("codex", "m", "e")
     assert cmd == [
         "codex", "exec", "--model", "m", "--config", 'model_reasoning_effort="e"',
-        "--sandbox", "workspace-write", "--config", 'approval_policy="never"',
+        "--sandbox", "workspace-write", "--approve-for-me",
     ]
 
 
@@ -150,7 +150,7 @@ def test_exec_cmd_downgrades_full_access_and_preserves_read_only():
     )
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
     assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
-    assert 'approval_policy="never"' in cmd
+    assert "--approve-for-me" in cmd
 
     cmd = codex.exec_cmd(
         "codex", "m", "e", "--sandbox", "read-only",
@@ -160,7 +160,7 @@ def test_exec_cmd_downgrades_full_access_and_preserves_read_only():
         "task",
     )
     assert cmd[cmd.index("--sandbox") + 1] == "read-only"
-    assert cmd.count('approval_policy="never"') == 1
+    assert cmd.count("--approve-for-me") == 1
     assert 'approval_policy="on-request"' not in cmd
     assert 'sandbox_mode="danger-full-access"' not in cmd
     assert "--ask-for-approval" not in cmd
