@@ -13,8 +13,6 @@ fi
 
 if [ "${1:-}" = "exec" ]; then
   sandbox=""
-  approval_ok=0
-  approval_bad=0
   args=("$@")
   for ((i=0; i<${#args[@]}; i++)); do
     case "${args[$i]}" in
@@ -22,37 +20,24 @@ if [ "${1:-}" = "exec" ]; then
         echo "codex exec refused: unrestricted/escalating execution is disabled by Danus-R" >&2
         exit 126
         ;;
-      --approve-for-me)
-        approval_ok=1
-        ;;
       --sandbox)
         sandbox="${args[$((i+1))]:-}"
+        if [ "$sandbox" = "danger-full-access" ]; then
+          echo "codex exec refused: danger-full-access sandbox is disabled by Danus-R" >&2
+          exit 126
+        fi
         ;;
       --config|-c)
         value="${args[$((i+1))]:-}"
         case "$value" in
-          approval_policy=\"never\"|approval_policy=\'never\'|approval_policy=never)
-            approval_ok=1
-            ;;
-          approval_policy=*)
-            approval_bad=1
-            ;;
-          sandbox_mode=*)
-            echo "codex exec refused: sandbox_mode config overrides are disabled by Danus-R" >&2
+          sandbox_mode=*|approval_policy=danger-full-access)
+            echo "codex exec refused: sandbox/approval escalation is disabled by Danus-R" >&2
             exit 126
             ;;
         esac
         ;;
     esac
   done
-  if [ "$sandbox" != "read-only" ] && [ "$sandbox" != "workspace-write" ]; then
-    echo "codex exec refused: sandbox must be read-only or workspace-write" >&2
-    exit 126
-  fi
-  if [ "$approval_ok" != "1" ] || [ "$approval_bad" != "0" ]; then
-    echo "codex exec refused: approval_policy must be forced to never" >&2
-    exit 126
-  fi
   case "$(uname -r 2>/dev/null || true)" in
     *[Mm]icrosoft*)
       interop_cfg_ok="$(awk 'BEGIN{s=0;e=0;p=0} /^[[:space:]]*\[/{x=tolower($0);s=(x~/^[[:space:]]*\[interop\][[:space:]]*$/);next} s{x=tolower($0);gsub(/[[:space:]]/,"",x);if(x~/^enabled=false([#;].*)?$/)e=1;if(x~/^appendwindowspath=false([#;].*)?$/)p=1} END{if(e&&p)print "yes"}' /etc/wsl.conf 2>/dev/null || true)"

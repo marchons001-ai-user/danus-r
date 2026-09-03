@@ -159,11 +159,25 @@ def _safe_exec_tail(tail: Sequence[str]) -> List[str]:
         cleaned.append(arg)
         i += 1
 
-    sandbox = sandbox or "workspace-write"
+    if sandbox is None:
+        sandbox = "workspace-write"
     if sandbox not in _SAFE_SANDBOXES:
         raise ValueError(f"unsafe codex sandbox mode refused: {sandbox}")
+
+    if sandbox == "read-only":
+        # Keep the historical read-only path.  Some services (verify) do not
+        # need MCP approval, and Codex rejects --approve-for-me together
+        # with an explicit --sandbox.
+        return [
+            "--sandbox", "read-only",
+            "--config", 'approval_policy="never"',
+            *cleaned,
+        ]
+
+    # workspace-write: --approve-for-me implies the workspace-write sandbox
+    # and routes approval requests through it.  This lets worker MCP tools
+    # such as gm_add and implementation_submit_contract run.
     return [
-        "--sandbox", sandbox,
         "--approve-for-me",
         *cleaned,
     ]
