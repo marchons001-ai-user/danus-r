@@ -196,7 +196,10 @@ def _idle_worker(
         if row.get("alive"):
             continue
         current = ledger.current(worker, refresh_stale=True)
-        if current and current.get("state") not in _TERMINAL_ASSIGNMENT_STATES:
+        if current and not (
+            current.get("state") in _TERMINAL_ASSIGNMENT_STATES
+            or (current.get("state") == "BLOCKED" and current.get("outcome") == "NEEDS_REVIEW")
+        ):
             continue
         return wl
     return None
