@@ -196,9 +196,32 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
                 completed.remove(node_id)
                 changed = True
 
+    latest_by_node: Dict[str, Dict[str, Any]] = {}
+    for assignment in all_assignments:
+        node_id = str(assignment.get("node_id") or "")
+        if not node_id:
+            continue
+        prev = latest_by_node.get(node_id)
+        if prev is None or str(assignment.get("assigned_at") or "") >= str(prev.get("assigned_at") or ""):
+            latest_by_node[node_id] = assignment
+
+    def _dependency_satisfied(dep: str) -> bool:
+        if dep in completed:
+            return True
+        dep_assignment = latest_by_node.get(dep)
+        return bool(
+            dep_assignment
+            and dep_assignment.get("state") == "BLOCKED"
+            and dep_assignment.get("outcome") == "NEEDS_REVIEW"
+        )
+
     def blocked_dependencies(node_id: str) -> List[str]:
         node = nodes.get(node_id) or {}
-        return [dep for dep in node.get("depends_on", []) if dep not in completed]
+        return [
+            dep
+            for dep in node.get("depends_on", [])
+            if not _dependency_satisfied(dep)
+        ]
 
     frontier = sorted(
         node_id
