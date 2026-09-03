@@ -205,6 +205,24 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         if prev is None or str(assignment.get("assigned_at") or "") >= str(prev.get("assigned_at") or ""):
             latest_by_node[node_id] = assignment
 
+    # Close an upstream NEEDS_REVIEW node after its downstream review
+    # node(s) have completed. This releases the researcher and allows the
+    # next node to be dispatched instead of being blocked by a stale pause.
+    for node_id, node in nodes.items():
+        if node_id in completed:
+            continue
+        children = active_children.get(node_id, [])
+        if not children:
+            continue
+        assignment = latest_by_node.get(node_id)
+        if (
+            assignment
+            and assignment.get("state") == "BLOCKED"
+            and assignment.get("outcome") == "NEEDS_REVIEW"
+            and all(child in completed for child in children)
+        ):
+            completed.add(node_id)
+
     def _dependency_satisfied(dep: str) -> bool:
         if dep in completed:
             return True
