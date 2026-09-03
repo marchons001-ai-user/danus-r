@@ -129,7 +129,11 @@ def subprocess_env(codex_bin: str) -> Dict[str, str]:
     return env
 
 
-def _safe_exec_tail(tail: Sequence[str]) -> List[str]:
+def _safe_exec_tail(
+    tail: Sequence[str],
+    *,
+    use_approve_for_me: bool = True,
+) -> List[str]:
     """Force every proving exec into a non-escalating filesystem sandbox."""
     cleaned: List[str] = []
     sandbox = None
@@ -164,19 +168,18 @@ def _safe_exec_tail(tail: Sequence[str]) -> List[str]:
     if sandbox not in _SAFE_SANDBOXES:
         raise ValueError(f"unsafe codex sandbox mode refused: {sandbox}")
 
-    if sandbox == "read-only":
-        # Keep the historical read-only path.  Some services (verify) do not
-        # need MCP approval, and Codex rejects --approve-for-me together
-        # with an explicit --sandbox.
+    # DSH does not support --approve-for-me; keep the explicit sandbox
+    # plus approval_policy="never" for that backend.
+    if not use_approve_for_me or sandbox == "read-only":
         return [
-            "--sandbox", "read-only",
+            "--sandbox", sandbox,
             "--config", 'approval_policy="never"',
             *cleaned,
         ]
 
-    # workspace-write: --approve-for-me implies the workspace-write sandbox
-    # and routes approval requests through it.  This lets worker MCP tools
-    # such as gm_add and implementation_submit_contract run.
+    # Codex workspace-write: --approve-for-me implies the workspace-write
+    # sandbox and routes approval requests through it.  This lets worker MCP
+    # tools such as gm_add and implementation_submit_contract run.
     return [
         "--approve-for-me",
         *cleaned,
@@ -191,8 +194,10 @@ def exec_cmd(codex_bin: str, model: str, effort: str, *tail: str) -> List[str]:
     forced to ``never`` via Codex's current config-override surface. Any other
     sandbox mode is rejected before process launch.
     """
+    use_approve_for_me = backend() != "dsh"
     return get_adapter().exec_argv(
-        codex_bin, model, effort, *_safe_exec_tail(tail)
+        codex_bin, model, effort,
+        *_safe_exec_tail(tail, use_approve_for_me=use_approve_for_me),
     )
 
 
