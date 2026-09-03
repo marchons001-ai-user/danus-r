@@ -192,9 +192,11 @@ class ProgressLedger:
         return out
 
     def _active_implementation_contract(self, node_id: str) -> Optional[Dict[str, Any]]:
-        for record in self.pending_implementation_contracts():
-            if record["node_id"] == node_id:
-                return record
+        records, order = self._replay_implementation_contracts()
+        for contract_id in reversed(order):
+            record = records.get(contract_id)
+            if record and record.get("node_id") == node_id:
+                return self._implementation_contract_view(record)
         return None
 
     def assign(
@@ -237,7 +239,10 @@ class ProgressLedger:
                     else None
                 )
                 if implementation_contract is not None:
-                    status = implementation_contract["status"]
+                    status = str(
+                        implementation_contract.get("gate_status")
+                        or implementation_contract["status"]
+                    )
                     if status != "APPROVE":
                         raise ValueError(
                             f"implementation contract {implementation_contract['contract_id']} "
@@ -500,12 +505,19 @@ class ProgressLedger:
 
     def _implementation_contract_view(self, record: Dict[str, Any]) -> Dict[str, Any]:
         view = dict(record)
-        if view.get("consumed_by_assignment_id"):
-            view["status"] = "CONSUMED"
-        elif self._implementation_contract_stale(view):
-            view["status"] = "STALE"
-        else:
-            view["status"] = str(view.get("verdict") or "PROPOSED")
+        gate_status = (
+            "STALE"
+            if self._implementation_contract_stale(view)
+            else str(view.get("verdict") or "PROPOSED")
+        )
+        view["gate_status"] = gate_status
+        # CONSUMED is execution provenance, not revocation of semantic approval.
+        # A stale contract must still fail closed even if it was used previously.
+        view["status"] = (
+            "CONSUMED"
+            if view.get("consumed_by_assignment_id") and gate_status == "APPROVE"
+            else gate_status
+        )
         return view
 
     def _implementation_contract_stale(self, record: Dict[str, Any]) -> bool:

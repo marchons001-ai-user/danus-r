@@ -481,15 +481,29 @@ def plan_propose_change(
     return {"change_id": change_id, "status": "PROPOSED"}
 
 
-def plan_review_change(change_id: str, approve: bool, rationale: str) -> Dict[str, Any]:
-    """Reviewer-only path: approve/reject one change without mutating Plan."""
+def plan_review_change(
+    change_id: str,
+    rationale: str,
+    verdict: str = "",
+    approve: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Reviewer-only verdict: APPROVE, REVISE, or REJECT.
+
+    ``approve`` remains a compatibility input for old tasks; new autonomous tasks
+    use the explicit three-way ``verdict``.
+    """
     record = _pg().review_change(
         change_id,
         reviewer=_author(),
-        approve=approve,
         rationale=rationale,
+        verdict=verdict or None,
+        approve=approve,
     )
-    return {"change_id": change_id, "status": record["status"]}
+    return {
+        "change_id": change_id,
+        "status": record["status"],
+        "verdict": record.get("review_verdict"),
+    }
 
 
 def plan_commit_change(change_id: str, project: Optional[str] = None) -> Dict[str, Any]:

@@ -118,8 +118,9 @@ def test_build_codex_command_shape():
     assert "-c" in cmd
     assert any('mcp_servers.danus=' in a and 'DANUS_ROLE="verifier"' in a for a in cmd)
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
-    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
-    assert 'approval_policy="never"' in cmd
+    assert "--approve-for-me" in cmd
+    assert "--sandbox" not in cmd
+    assert 'approval_policy="never"' not in cmd
     assert "--ask-for-approval" not in cmd
     assert "--add-dir" in cmd
     assert cmd[-1].endswith("verification.json.")

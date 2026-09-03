@@ -162,6 +162,7 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
     ledger = ProgressLedger(root)
     current_assignments = ledger.snapshot(refresh_stale=True)
     all_assignments = ledger.assignments()
+    pending_implementation_contracts = ledger.pending_implementation_contracts()
     nodes = plan["nodes"]
     status_by_worker = {str(row.get("worker") or ""): row for row in worker_rows}
 
@@ -205,33 +206,10 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         if prev is None or str(assignment.get("assigned_at") or "") >= str(prev.get("assigned_at") or ""):
             latest_by_node[node_id] = assignment
 
-    # Close an upstream NEEDS_REVIEW node after its downstream review
-    # node(s) have completed. This releases the researcher and allows the
-    # next node to be dispatched instead of being blocked by a stale pause.
-    for node_id, node in nodes.items():
-        if node_id in completed:
-            continue
-        children = active_children.get(node_id, [])
-        if not children:
-            continue
-        assignment = latest_by_node.get(node_id)
-        if (
-            assignment
-            and assignment.get("state") == "BLOCKED"
-            and assignment.get("outcome") == "NEEDS_REVIEW"
-            and all(child in completed for child in children)
-        ):
-            completed.add(node_id)
-
     def _dependency_satisfied(dep: str) -> bool:
-        if dep in completed:
-            return True
-        dep_assignment = latest_by_node.get(dep)
-        return bool(
-            dep_assignment
-            and dep_assignment.get("state") == "BLOCKED"
-            and dep_assignment.get("outcome") == "NEEDS_REVIEW"
-        )
+        # A review request is not scientific completion. S2 will route review via
+        # durable handoffs; until then downstream work remains closed.
+        return dep in completed
 
     def blocked_dependencies(node_id: str) -> List[str]:
         node = nodes.get(node_id) or {}
@@ -249,7 +227,22 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         and not active_children[node_id]
         and not blocked_dependencies(node_id)
     )
-    complete = plan.get("root_id") in completed and not frontier and not pending_plan_changes
+    unresolved_implementation_contracts = [
+        {
+            "contract_id": str(item.get("contract_id") or ""),
+            "node_id": str(item.get("node_id") or ""),
+            "status": str(item.get("gate_status") or item.get("status") or ""),
+        }
+        for item in pending_implementation_contracts
+        if active_route(str(item.get("node_id") or ""))
+        and str(item.get("gate_status") or item.get("status") or "") != "APPROVE"
+    ]
+    complete = bool(
+        plan.get("root_id") in completed
+        and not frontier
+        and not pending_plan_changes
+        and not unresolved_implementation_contracts
+    )
     project_paused = (root / L.PAUSE_FILE).is_file()
     project_state = "COMPLETE" if complete else "PAUSED" if project_paused else "RUNNING"
 
@@ -397,5 +390,6 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         "plan_changes": pending_plan_changes,
         "frontier": frontier,
         "completed_nodes": sorted(completed),
+        "unresolved_implementation_contracts": unresolved_implementation_contracts,
         "decisions": decisions,
     }

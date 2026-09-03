@@ -29,7 +29,8 @@ class ResearchPlanGraph:
     _TOP_FIELDS = {
         "schema_version", "plan_version", "committed_change_id", "root_id", "nodes"
     }
-    _CHANGE_STATUSES = {"PROPOSED", "APPROVED", "REJECTED", "STALE", "COMMITTED"}
+    REVIEW_VERDICTS = ("APPROVE", "REVISE", "REJECT")
+    _CHANGE_STATUSES = {"PROPOSED", "APPROVED", "REVISE", "REJECTED", "STALE", "COMMITTED"}
     _OPS = {"add_node", "set_dependencies", "set_state"}
 
     def __init__(self, root: Path) -> None:
@@ -156,6 +157,7 @@ class ResearchPlanGraph:
                 "status": "PROPOSED",
                 "created_at": utc_now(),
                 "reviewer": None,
+                "review_verdict": None,
                 "review_rationale": "",
                 "reviewed_at": None,
                 "committer": None,
@@ -198,10 +200,15 @@ class ResearchPlanGraph:
         change_id: str,
         *,
         reviewer: str,
-        approve: bool,
         rationale: str,
+        verdict: Optional[str] = None,
+        approve: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Record one Reviewer decision; reviewed requests cannot be re-reviewed."""
+        """Record one Reviewer verdict without collapsing REVISE into REJECT.
+
+        ``approve`` is retained only for old callers: ``True`` maps to APPROVE and
+        ``False`` maps to REVISE. New callers must use ``verdict``.
+        """
         record = self.get_change(change_id)
         if record["status"] != "PROPOSED":
             raise ValueError(f"change {change_id} is not awaiting review")
@@ -211,10 +218,26 @@ class ResearchPlanGraph:
             self._write_json(self._change_path(change_id), record)
             return record
 
+        if verdict is None or not str(verdict).strip():
+            if approve is None:
+                raise ValueError("plan review requires verdict APPROVE, REVISE, or REJECT")
+            normalized = "APPROVE" if bool(approve) else "REVISE"
+        else:
+            normalized = str(verdict).strip().upper()
+            if normalized not in self.REVIEW_VERDICTS:
+                raise ValueError(f"verdict must be one of {self.REVIEW_VERDICTS}")
+            if approve is not None and bool(approve) != (normalized == "APPROVE"):
+                raise ValueError("approve compatibility flag conflicts with explicit verdict")
+
         record["reviewer"] = self._required(reviewer, "reviewer")
+        record["review_verdict"] = normalized
         record["review_rationale"] = self._required(rationale, "rationale")
         record["reviewed_at"] = utc_now()
-        record["status"] = "APPROVED" if approve else "REJECTED"
+        record["status"] = {
+            "APPROVE": "APPROVED",
+            "REVISE": "REVISE",
+            "REJECT": "REJECTED",
+        }[normalized]
         self._write_json(self._change_path(change_id), record)
         return record
 

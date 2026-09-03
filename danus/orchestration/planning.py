@@ -481,9 +481,10 @@ def _review_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
         f"`{_proposal_record_path(pdir, proposal_id)}`. Approval covers both structural operations "
         "and exact role/task specs. Reject if the route is scientifically weak, unnecessarily large, "
         "post-hoc without required evidence, or bypasses role/review/experiment boundaries.\n\n"
-        f"Call `plan_review_change(change_id=\"{change['change_id']}\", approve=<true|false>, "
-        "rationale=<specific rationale>)` exactly once. Use approve=false for REVISE or REJECT. "
-        "Do not commit or write task files. After recording the verdict, end with COMPLETE.\n"
+        f"Call `plan_review_change(change_id=\"{change['change_id']}\", "
+        "verdict=<APPROVE|REVISE|REJECT>, rationale=<specific rationale>)` exactly once. "
+        "Do not use the deprecated approve boolean. Do not commit or write task files. "
+        "After recording the verdict, end with COMPLETE.\n"
     )
 
 
@@ -491,13 +492,26 @@ def _revision_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
     current = ResearchPlanGraph(pdir).snapshot()["plan_version"]
     return (
         "# Revise Autonomous Research Plan\n\n"
-        f"Reviewer rejected proposal `{proposal_id}` / change `{change['change_id']}`. Read the "
+        f"Reviewer requested revision of proposal `{proposal_id}` / change `{change['change_id']}`. Read the "
         f"immutable proposal at `{_proposal_record_path(pdir, proposal_id)}` and address only the "
         f"blocking rationale below.\n\nReviewer rationale:\n"
-        f"{str(change.get('review_rationale') or 'Reviewer rejected the proposal')}\n\n"
+        f"{str(change.get('review_rationale') or 'Reviewer requested revision')}\n\n"
         "Produce the smallest corrected replacement; do not broaden the project for non-blocking suggestions.\n\n"
         + _proposal_instructions(_proposal_path(pdir), current)
         + "\nAfter writing the replacement proposal, end with COMPLETE.\n"
+    )
+
+
+def _rethink_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
+    current = ResearchPlanGraph(pdir).snapshot()["plan_version"]
+    return (
+        "# Rethink Rejected Autonomous Research Plan\n\n"
+        f"Reviewer rejected proposal `{proposal_id}` / change `{change['change_id']}` as a route, not merely "
+        "as text needing local repair. Read the immutable proposal and blocking rationale below, then decide "
+        "the smallest scientifically distinct next route. Do not resubmit the rejected route with cosmetic edits.\n\n"
+        f"Reviewer rationale:\n{str(change.get('review_rationale') or 'Reviewer rejected the route')}\n\n"
+        + _proposal_instructions(_proposal_path(pdir), current)
+        + "\nAfter writing a genuinely reconsidered proposal, end with COMPLETE.\n"
     )
 
 
@@ -694,21 +708,41 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
     directory = _proposal_dir(pdir)
     if directory.is_dir():
         current_version = graph.snapshot()["plan_version"]
-        rejected: List[tuple[str, Dict[str, Any]]] = []
+        routed: List[tuple[str, Dict[str, Any], str]] = []
         for path in sorted(directory.glob("*.json")):
             try:
                 record = _load_proposal_record(pdir, path.stem)
                 change = graph.get_change(record["change_id"])
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
-            if change.get("status") == "REJECTED" and change.get("base_plan_version") == current_version:
-                rejected.append((path.stem, change))
-        if rejected:
-            proposal_id, change = rejected[-1]
+            if change.get("base_plan_version") != current_version:
+                continue
+            verdict = str(change.get("review_verdict") or "").upper()
+            if change.get("status") == "REVISE" or (
+                change.get("status") == "REJECTED" and verdict != "REJECT"
+            ):
+                # Old persisted REJECTED records had no three-way verdict; preserve
+                # their historical revision behavior rather than changing recovery.
+                routed.append((path.stem, change, "revise"))
+            elif change.get("status") == "REJECTED" and verdict == "REJECT":
+                routed.append((path.stem, change, "rethink"))
+        if routed:
+            proposal_id, change, route = routed[-1]
             review = _review_assignment(pdir, change, proposal_id)
             if review and review.get("state") == "DONE" and review.get("outcome") == "COMPLETE":
-                item = _assign_role(project, "researcher", _revision_task(pdir, change, proposal_id), graph.snapshot()["root_id"])
-                item.update({"change_id": change["change_id"], "proposal_id": proposal_id})
+                task = (
+                    _revision_task(pdir, change, proposal_id)
+                    if route == "revise"
+                    else _rethink_task(pdir, change, proposal_id)
+                )
+                item = _assign_role(
+                    project, "researcher", task, graph.snapshot()["root_id"]
+                )
+                item.update({
+                    "change_id": change["change_id"],
+                    "proposal_id": proposal_id,
+                    "review_verdict": change.get("review_verdict") or "REVISE",
+                })
                 actions.append(item)
     return actions
 
