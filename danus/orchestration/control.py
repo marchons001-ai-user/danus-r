@@ -14,6 +14,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from danus.core import ProgressLedger, ResearchPlanGraph
+from danus.core.handoff import HandoffRequests
 from danus.execution import layout as L
 
 _FIVE_HOURS_SECONDS = 5 * 60 * 60
@@ -163,6 +164,16 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
     current_assignments = ledger.snapshot(refresh_stale=True)
     all_assignments = ledger.assignments()
     pending_implementation_contracts = ledger.pending_implementation_contracts()
+    pending_handoffs = [
+        {
+            "handoff_id": item["handoff_id"],
+            "kind": item["kind"],
+            "status": item["status"],
+            "node_id": item["node_id"],
+            "target_role": item["target_role"],
+        }
+        for item in HandoffRequests(ledger).pending()
+    ]
     nodes = plan["nodes"]
     status_by_worker = {str(row.get("worker") or ""): row for row in worker_rows}
 
@@ -207,8 +218,6 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
             latest_by_node[node_id] = assignment
 
     def _dependency_satisfied(dep: str) -> bool:
-        # A review request is not scientific completion. S2 will route review via
-        # durable handoffs; until then downstream work remains closed.
         return dep in completed
 
     def blocked_dependencies(node_id: str) -> List[str]:
@@ -242,6 +251,7 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         and not frontier
         and not pending_plan_changes
         and not unresolved_implementation_contracts
+        and not pending_handoffs
     )
     project_paused = (root / L.PAUSE_FILE).is_file()
     project_state = "COMPLETE" if complete else "PAUSED" if project_paused else "RUNNING"
@@ -322,7 +332,7 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         add("CONTINUE", worker=worker, node_id=node_id, assignment_id=aid,
             reason="work_in_progress")
 
-    latest_by_node: Dict[str, Dict[str, Any]] = {}
+    latest_by_node = {}
     for assignment in all_assignments:
         latest_by_node[assignment["node_id"]] = assignment
 
@@ -391,5 +401,6 @@ def reconcile(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str,
         "frontier": frontier,
         "completed_nodes": sorted(completed),
         "unresolved_implementation_contracts": unresolved_implementation_contracts,
+        "pending_handoffs": pending_handoffs,
         "decisions": decisions,
     }

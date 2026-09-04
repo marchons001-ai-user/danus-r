@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 
 from danus._mcp import FastMCP
 from danus.core import FACT_TYPES, FactGraph, GlobalMemory, ProgressLedger, ResearchPlanGraph
+from danus.core.handoff import HandoffRequests
 from danus.integrations import search as _arxiv_search
 
 from .roles import tools_for
@@ -181,7 +182,7 @@ def gm_search(query: str, kinds: Optional[List[str]] = None, limit_per_kind: int
               project: Optional[str] = None) -> Dict[str, Any]:
     """BM25 over shared global-memory findings. Use to reuse others' results,
     avoid duplicate work, and learn which paths already died. Main agent: pass
-    ``project`` to search a specific project; workers omit it."""
+    ``project`` to search a specific project; workers omit it (pinned to their own project)."""
     return _gm(project).search(query, kinds=kinds, limit_per_kind=limit_per_kind)
 
 
@@ -397,6 +398,111 @@ def fact_revoke(
 
 
 # --------------------------------------------------------------------------- #
+# durable upward handoff                                                      #
+# --------------------------------------------------------------------------- #
+
+def handoff_request(kind: str, reason: str) -> Dict[str, Any]:
+    """Open the caller's one durable upward handoff for this assignment.
+
+    Experimenters may request INTERPRET or ESCALATE. Researchers and Reviewers may
+    request ESCALATE. Routing identity is derived from the authenticated role and
+    current Assignment; callers cannot choose another worker, node, target, or
+    subject. Repeating the same kind from the same Assignment returns the existing
+    handoff instead of creating a duplicate.
+    """
+    requested_kind = str(kind or "").strip().upper()
+    gateway_role = str(_role() or "").strip().lower()
+    allowed = {
+        "experimenter": {"INTERPRET", "ESCALATE"},
+        "researcher": {"ESCALATE"},
+        "reviewer": {"ESCALATE"},
+    }
+    ledger = _pl()
+    author = _author()
+    source = ledger.current(author, refresh_stale=True)
+    if source is None:
+        raise ValueError(f"worker {author} has no current assignment")
+    source_role = str(source.get("role") or "").strip().lower()
+    role = source_role if gateway_role == "all" else gateway_role
+    if role not in allowed or requested_kind not in allowed[role]:
+        raise ValueError(f"role {role or 'unknown'} cannot request {requested_kind or 'empty'} handoff")
+    if source_role != role:
+        raise ValueError(f"gateway role {role} does not match current assignment role {source_role}")
+    if source.get("state") not in {"ASSIGNED", "RUNNING"}:
+        raise ValueError(
+            f"handoff request requires active assignment; current state is {source.get('state')}"
+        )
+    reason_text = str(reason or "").strip()
+    if not reason_text:
+        raise ValueError("reason is required")
+
+    handoffs = HandoffRequests(ledger)
+    source_id = str(source["assignment_id"])
+    existing = next(
+        (
+            item
+            for item in handoffs.all()
+            if item.get("kind") == requested_kind
+            and item.get("subject_type") == "ASSIGNMENT"
+            and item.get("subject_id") == source_id
+            and item.get("source_assignment_id") == source_id
+        ),
+        None,
+    )
+    if existing is not None:
+        return {
+            "handoff_id": existing["handoff_id"],
+            "kind": existing["kind"],
+            "status": existing["status"],
+            "target_role": existing["target_role"],
+        }
+
+    if requested_kind == "INTERPRET":
+        request = (
+            "# Interpret Experiment Result\n\n"
+            f"Source assignment `{source_id}` on Plan node `{source['node_id']}` requested Researcher interpretation.\n\n"
+            f"Reason:\n{reason_text}\n\n"
+            "Inspect the source task/workspace and relevant persisted evidence. Determine the bounded scientific "
+            "meaning without re-running or broadening the experiment. Use only existing Researcher-authorized "
+            "knowledge, Plan, or Implementation Contract paths if a concrete follow-up is justified. Do not alter "
+            "the source Assignment or Handoff state. End with COMPLETE when this interpretation request itself is handled.\n"
+        )
+    else:
+        request = (
+            "# Escalation Request\n\n"
+            f"Source assignment `{source_id}` from role `{source_role}` on Plan node `{source['node_id']}` requires "
+            "Supervisor/control-plane attention.\n\n"
+            f"Reason:\n{reason_text}\n\n"
+            "This request records an unresolved control/scientific routing issue. Its existence does not authorize "
+            "an automatic Plan, Contract, or source-Assignment disposition.\n"
+        )
+
+    plan = _pg().snapshot()
+    node_id = str(source["node_id"])
+    node = plan["nodes"].get(node_id)
+    if node is None or node.get("state") != "ACTIVE":
+        raise ValueError(f"source plan node {node_id} is not ACTIVE")
+    opened = handoffs.open(
+        kind=requested_kind,
+        plan_version=int(plan["plan_version"]),
+        node_id=node_id,
+        subject_type="ASSIGNMENT",
+        subject_id=source_id,
+        requested_by=author,
+        source_role=source_role,
+        source_assignment_id=source_id,
+        request=request,
+        reason=reason_text,
+    )
+    return {
+        "handoff_id": opened["handoff_id"],
+        "kind": opened["kind"],
+        "status": opened["status"],
+        "target_role": opened["target_role"],
+    }
+
+
+# --------------------------------------------------------------------------- #
 # pre-code semantic alignment gate                                            #
 # --------------------------------------------------------------------------- #
 
@@ -537,6 +643,7 @@ _TOOLS = {
     "fact_submit": fact_submit,
     "fact_search": fact_search,
     "fact_revoke": fact_revoke,
+    "handoff_request": handoff_request,
     "implementation_pending_contracts": implementation_pending_contracts,
     "implementation_submit_contract": implementation_submit_contract,
     "implementation_review_contract": implementation_review_contract,

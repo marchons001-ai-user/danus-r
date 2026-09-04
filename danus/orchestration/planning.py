@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from danus.core import ProgressLedger, ResearchPlanGraph
 from danus.core._util import utc_now
+from danus.core.handoff import HandoffRequests
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write
 
@@ -393,27 +394,89 @@ def _normalize_proposal(graph: ResearchPlanGraph, raw: Dict[str, Any], proposal_
     }
 
 
-def _researcher_handoff_ready(pdir: Path, researcher: str) -> bool:
-    current = ProgressLedger(pdir).current(researcher, refresh_stale=True)
-    return bool(
-        current
-        and (
-            (current.get("state") == "DONE" and current.get("outcome") == "COMPLETE")
-            or (current.get("state") == "BLOCKED" and current.get("outcome") == "NEEDS_REVIEW")
-        )
+def _assignment_by_id(ledger: ProgressLedger, assignment_id: str) -> Optional[Dict[str, Any]]:
+    if not assignment_id:
+        return None
+    return next(
+        (item for item in ledger.assignments() if item.get("assignment_id") == assignment_id),
+        None,
     )
+
+
+def _researcher_handoff_ready(pdir: Path, researcher: str) -> bool:
+    ledger = ProgressLedger(pdir)
+    current = ledger.current(researcher, refresh_stale=True)
+    if not current:
+        return False
+    handoff_id = str(current.get("handoff_id") or "")
+    if handoff_id:
+        handoff = HandoffRequests(ledger).get(handoff_id)
+        if handoff and handoff.get("kind") in {"REVISION", "RETHINK"}:
+            return current.get("state") == "DONE" and current.get("outcome") == "COMPLETE"
+    return bool(
+        (current.get("state") == "DONE" and current.get("outcome") == "COMPLETE")
+        or (current.get("state") == "BLOCKED" and current.get("outcome") == "NEEDS_REVIEW")
+    )
+
+
+def _resolve_captured_handoff(pdir: Path, record: Dict[str, Any], proposal_id: str) -> None:
+    assignment_id = str(record.get("source_assignment_id") or "")
+    if not assignment_id:
+        return
+    ledger = ProgressLedger(pdir)
+    assignment = _assignment_by_id(ledger, assignment_id)
+    if not assignment or assignment.get("state") != "DONE" or assignment.get("outcome") != "COMPLETE":
+        return
+    handoff_id = str(assignment.get("handoff_id") or "")
+    if not handoff_id:
+        return
+    handoffs = HandoffRequests(ledger)
+    handoff = handoffs.get(handoff_id)
+    if not handoff or handoff.get("kind") not in {"REVISION", "RETHINK"}:
+        return
+    if handoff.get("status") == "ASSIGNED" and handoff.get("assigned_assignment_id") == assignment_id:
+        handoffs.resolve(
+            handoff_id,
+            assignment_id=assignment_id,
+            actor=str(assignment.get("worker") or "researcher"),
+            summary=f"replacement plan proposal {proposal_id} captured",
+        )
+
+
+def _stale_invalid_correction_handoff(pdir: Path, assignment: Optional[Dict[str, Any]], reason: str) -> None:
+    if not assignment:
+        return
+    handoff_id = str(assignment.get("handoff_id") or "")
+    if not handoff_id:
+        return
+    handoffs = HandoffRequests(ProgressLedger(pdir))
+    handoff = handoffs.get(handoff_id)
+    if (
+        handoff
+        and handoff.get("kind") in {"REVISION", "RETHINK"}
+        and handoff.get("status") == "ASSIGNED"
+        and handoff.get("assigned_assignment_id") == assignment.get("assignment_id")
+    ):
+        handoffs.stale(
+            handoff_id,
+            reason=f"replacement proposal validation failed: {reason}",
+        )
 
 
 def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
     pdir = L.project_dir(project)
     researcher = _validate_roster(project)["researcher"][0]
+    ledger = ProgressLedger(pdir)
+    source_assignment = ledger.current(researcher, refresh_stale=True)
     path = _proposal_path(pdir)
     if not path.is_file() or not _researcher_handoff_ready(pdir, researcher):
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        return {"action": "PLAN_PROPOSAL", "result": "blocked", "reason": f"invalid_json:{exc.msg}"}
+        reason = f"invalid_json:{exc.msg}"
+        _stale_invalid_correction_handoff(pdir, source_assignment, reason)
+        return {"action": "PLAN_PROPOSAL", "result": "blocked", "reason": reason}
 
     graph = ResearchPlanGraph(pdir)
     try:
@@ -423,6 +486,7 @@ def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
         if record_path.is_file():
             path.unlink(missing_ok=True)
             record = json.loads(record_path.read_text(encoding="utf-8"))
+            _resolve_captured_handoff(pdir, record, proposal_id)
             return {
                 "action": "PLAN_PROPOSAL",
                 "proposal_id": proposal_id,
@@ -441,14 +505,18 @@ def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
             "proposal_id": proposal_id,
             "change_id": change_id,
             "proposer": researcher,
+            "source_assignment_id": str(source_assignment.get("assignment_id") or "") if source_assignment else "",
             "captured_at": utc_now(),
             "proposal": proposal,
         }
         atomic_write(record_path, _json_text(record))
         path.unlink(missing_ok=True)
+        _resolve_captured_handoff(pdir, record, proposal_id)
         return {"action": "PLAN_PROPOSAL", "proposal_id": proposal_id, "change_id": change_id, "result": "captured"}
     except (OSError, ValueError) as exc:
-        return {"action": "PLAN_PROPOSAL", "result": "blocked", "reason": str(exc)}
+        reason = str(exc)
+        _stale_invalid_correction_handoff(pdir, source_assignment, reason)
+        return {"action": "PLAN_PROPOSAL", "result": "blocked", "reason": reason}
 
 
 def _proposal_id_from_change(change: Dict[str, Any]) -> Optional[str]:
@@ -542,6 +610,7 @@ def _assignment_for_task(pdir: Path, task: str) -> Optional[Dict[str, Any]]:
 
 
 def _assign_role(project: str, role: str, task: str, node_id: str) -> Dict[str, Any]:
+    """Legacy/hash identity retained only for deterministic proposal repair."""
     pdir = L.project_dir(project)
     matches = _task_assignments(pdir, task)
     existing = matches[-1] if matches else None
@@ -587,7 +656,181 @@ def _assign_role(project: str, role: str, task: str, node_id: str) -> Dict[str, 
 
 
 def _review_assignment(pdir: Path, change: Dict[str, Any], proposal_id: str) -> Optional[Dict[str, Any]]:
+    """Compatibility fallback for reviews created before S2-C handoffs existed."""
     return _assignment_for_task(pdir, _review_task(pdir, change, proposal_id))
+
+
+def _plan_handoff(pdir: Path, kind: str, change_id: str) -> Optional[Dict[str, Any]]:
+    matches = [
+        item
+        for item in HandoffRequests(ProgressLedger(pdir)).all()
+        if item.get("kind") == kind
+        and item.get("subject_type") == "PLAN_CHANGE"
+        and item.get("subject_id") == change_id
+    ]
+    matches.sort(key=lambda item: (str(item.get("created_at") or ""), item["handoff_id"]))
+    return matches[-1] if matches else None
+
+
+def _handoff_assignment(pdir: Path, handoff: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not handoff:
+        return None
+    assignment_id = str(
+        handoff.get("assigned_assignment_id")
+        or handoff.get("resolution_assignment_id")
+        or ""
+    )
+    return _assignment_by_id(ProgressLedger(pdir), assignment_id)
+
+
+def _assignment_complete(assignment: Optional[Dict[str, Any]]) -> bool:
+    return bool(
+        assignment
+        and assignment.get("state") == "DONE"
+        and assignment.get("outcome") == "COMPLETE"
+    )
+
+
+def _dispatch_handoff(project: str, handoff: Dict[str, Any]) -> Dict[str, Any]:
+    pdir = L.project_dir(project)
+    handoffs = HandoffRequests(ProgressLedger(pdir))
+    current = handoffs.get(handoff["handoff_id"]) or handoff
+    assignment = _handoff_assignment(pdir, current)
+    if current["status"] == "ASSIGNED" and assignment and assignment.get("state") == "STALE":
+        current = handoffs.reopen(
+            current["handoff_id"],
+            assignment_id=assignment["assignment_id"],
+            actor="supervisor",
+            reason="handoff assignment became stale",
+        )
+        assignment = None
+    if current["status"] == "ASSIGNED":
+        return {
+            "action": "PLAN_ASSIGN",
+            "role": current["target_role"],
+            "worker": assignment.get("worker") if assignment else None,
+            "assignment_id": current.get("assigned_assignment_id"),
+            "handoff_id": current["handoff_id"],
+            "result": "existing" if assignment else "missing_assignment",
+            "state": assignment.get("state") if assignment else None,
+            "outcome": assignment.get("outcome") if assignment else None,
+        }
+    if current["status"] != "OPEN":
+        return {
+            "action": "PLAN_ASSIGN",
+            "role": current["target_role"],
+            "handoff_id": current["handoff_id"],
+            "result": current["status"].lower(),
+        }
+    role = str(current["target_role"])
+    wl = A._idle_worker(project, role, cli._project_rows(project), set(), cli._read_worker_role)
+    if wl is None:
+        return {
+            "action": "PLAN_ASSIGN",
+            "role": role,
+            "handoff_id": current["handoff_id"],
+            "result": "no_idle_worker",
+        }
+    assignment = cli.do_assign(
+        f"{project}/{wl.name}",
+        current["request"],
+        node_id=current["node_id"],
+        handoff_id=current["handoff_id"],
+    )
+    return {
+        "action": "PLAN_ASSIGN",
+        "role": role,
+        "worker": wl.name,
+        "assignment_id": assignment.get("assignment_id"),
+        "handoff_id": current["handoff_id"],
+        "result": "assigned",
+        "start_result": cli._start_one(wl),
+    }
+
+
+def _open_review_handoff(
+    pdir: Path,
+    change: Dict[str, Any],
+    proposal_id: str,
+    record: Dict[str, Any],
+) -> Dict[str, Any]:
+    existing = _plan_handoff(pdir, "REVIEW", change["change_id"])
+    if existing:
+        return existing
+    plan = ResearchPlanGraph(pdir).snapshot()
+    return HandoffRequests(ProgressLedger(pdir)).open(
+        kind="REVIEW",
+        plan_version=change["base_plan_version"],
+        node_id=plan["root_id"],
+        subject_type="PLAN_CHANGE",
+        subject_id=change["change_id"],
+        requested_by=str(record.get("proposer") or change.get("proposer") or "researcher"),
+        source_role="researcher",
+        source_assignment_id=str(record.get("source_assignment_id") or ""),
+        request=_review_task(pdir, change, proposal_id),
+        reason="plan change requires independent review",
+    )
+
+
+def _resolve_review_handoff(
+    pdir: Path,
+    change: Dict[str, Any],
+    handoff: Optional[Dict[str, Any]],
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    if handoff is None:
+        return None, None
+    handoffs = HandoffRequests(ProgressLedger(pdir))
+    current = handoffs.get(handoff["handoff_id"]) or handoff
+    assignment = _handoff_assignment(pdir, current)
+    verdict = str(change.get("review_verdict") or "").upper()
+    if (
+        verdict in ResearchPlanGraph.REVIEW_VERDICTS
+        and current.get("status") == "ASSIGNED"
+        and _assignment_complete(assignment)
+    ):
+        current = handoffs.resolve(
+            current["handoff_id"],
+            assignment_id=assignment["assignment_id"],
+            actor=str(change.get("reviewer") or assignment.get("worker") or "reviewer"),
+            summary=f"plan review recorded {verdict}",
+        )
+    return current, assignment
+
+
+def _open_correction_handoff(
+    pdir: Path,
+    change: Dict[str, Any],
+    proposal_id: str,
+    kind: str,
+    review_handoff: Optional[Dict[str, Any]],
+    review_assignment: Dict[str, Any],
+) -> Dict[str, Any]:
+    existing = _plan_handoff(pdir, kind, change["change_id"])
+    if existing:
+        return existing
+    task = (
+        _revision_task(pdir, change, proposal_id)
+        if kind == "REVISION"
+        else _rethink_task(pdir, change, proposal_id)
+    )
+    plan = ResearchPlanGraph(pdir).snapshot()
+    return HandoffRequests(ProgressLedger(pdir)).open(
+        kind=kind,
+        plan_version=plan["plan_version"],
+        node_id=plan["root_id"],
+        subject_type="PLAN_CHANGE",
+        subject_id=change["change_id"],
+        requested_by=str(change.get("reviewer") or review_assignment.get("worker") or "reviewer"),
+        source_role="reviewer",
+        source_assignment_id=str(review_assignment.get("assignment_id") or ""),
+        parent_handoff_id=str(review_handoff.get("handoff_id") or "") if review_handoff else "",
+        request=task,
+        reason=(
+            "reviewer requested plan revision"
+            if kind == "REVISION"
+            else "reviewer rejected plan route"
+        ),
+    )
 
 
 def _materialize_tasks(pdir: Path, record: Dict[str, Any], version: int) -> List[str]:
@@ -669,13 +912,38 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
                 raise ValueError("proposal/change binding mismatch")
             if record["proposal"]["operations"] != change.get("operations"):
                 raise ValueError("approved change operations diverge from immutable proposal")
-            review = _review_assignment(pdir, change, proposal_id)
+
+            review_handoff = _plan_handoff(pdir, "REVIEW", change["change_id"])
+            legacy_review = None if review_handoff else _review_assignment(pdir, change, proposal_id)
             if change["status"] == "PROPOSED":
-                if review is None:
-                    item = _assign_role(project, "reviewer", _review_task(pdir, change, proposal_id), graph.snapshot()["root_id"])
-                    item.update({"change_id": change["change_id"], "proposal_id": proposal_id})
+                if review_handoff is None and legacy_review is None:
+                    review_handoff = _open_review_handoff(pdir, change, proposal_id, record)
+                    item = _dispatch_handoff(project, review_handoff)
+                    item.update({
+                        "change_id": change["change_id"],
+                        "proposal_id": proposal_id,
+                        "handoff_kind": "REVIEW",
+                    })
                     actions.append(item)
-                elif review.get("state") in {"DONE", "BLOCKED"}:
+                elif review_handoff is not None:
+                    item = _dispatch_handoff(project, review_handoff)
+                    review_assignment = _handoff_assignment(pdir, review_handoff)
+                    if item.get("result") in {"assigned", "no_idle_worker"}:
+                        item.update({
+                            "change_id": change["change_id"],
+                            "proposal_id": proposal_id,
+                            "handoff_kind": "REVIEW",
+                        })
+                        actions.append(item)
+                    elif review_assignment and review_assignment.get("state") in {"DONE", "BLOCKED"}:
+                        actions.append({
+                            "action": "PLAN_REVIEW",
+                            "change_id": change["change_id"],
+                            "proposal_id": proposal_id,
+                            "handoff_id": review_handoff["handoff_id"],
+                            "result": "verdict_not_recorded",
+                        })
+                elif legacy_review and legacy_review.get("state") in {"DONE", "BLOCKED"}:
                     actions.append({
                         "action": "PLAN_REVIEW",
                         "change_id": change["change_id"],
@@ -683,13 +951,26 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
                         "result": "verdict_not_recorded",
                     })
             elif change["status"] == "APPROVED":
-                if review and review.get("state") == "DONE" and review.get("outcome") == "COMPLETE":
+                review_assignment = legacy_review
+                if review_handoff is not None:
+                    review_handoff, review_assignment = _resolve_review_handoff(
+                        pdir, change, review_handoff
+                    )
+                review_complete = (
+                    review_handoff is not None
+                    and review_handoff.get("status") == "RESOLVED"
+                    and _assignment_complete(review_assignment)
+                ) or (
+                    review_handoff is None and _assignment_complete(legacy_review)
+                )
+                if review_complete:
                     version = graph.commit_change(change["change_id"], committer="supervisor")
                     written = _materialize_tasks(pdir, record, version)
                     actions.append({
                         "action": "PLAN_COMMIT",
                         "change_id": change["change_id"],
                         "proposal_id": proposal_id,
+                        "handoff_id": review_handoff.get("handoff_id") if review_handoff else None,
                         "plan_version": version,
                         "task_count": len(written),
                         "result": "committed",
@@ -699,6 +980,7 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
                         "action": "PLAN_COMMIT",
                         "change_id": change["change_id"],
                         "proposal_id": proposal_id,
+                        "handoff_id": review_handoff.get("handoff_id") if review_handoff else None,
                         "result": "awaiting_reviewer_completion",
                     })
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -723,27 +1005,44 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
             ):
                 # Old persisted REJECTED records had no three-way verdict; preserve
                 # their historical revision behavior rather than changing recovery.
-                routed.append((path.stem, change, "revise"))
+                routed.append((path.stem, change, "REVISION"))
             elif change.get("status") == "REJECTED" and verdict == "REJECT":
-                routed.append((path.stem, change, "rethink"))
+                routed.append((path.stem, change, "RETHINK"))
         if routed:
-            proposal_id, change, route = routed[-1]
-            review = _review_assignment(pdir, change, proposal_id)
-            if review and review.get("state") == "DONE" and review.get("outcome") == "COMPLETE":
-                task = (
-                    _revision_task(pdir, change, proposal_id)
-                    if route == "revise"
-                    else _rethink_task(pdir, change, proposal_id)
+            proposal_id, change, kind = routed[-1]
+            review_handoff = _plan_handoff(pdir, "REVIEW", change["change_id"])
+            review_assignment = None
+            if review_handoff is not None:
+                review_handoff, review_assignment = _resolve_review_handoff(
+                    pdir, change, review_handoff
                 )
-                item = _assign_role(
-                    project, "researcher", task, graph.snapshot()["root_id"]
+                review_ready = bool(
+                    review_handoff.get("status") == "RESOLVED"
+                    and _assignment_complete(review_assignment)
                 )
+            else:
+                review_assignment = _review_assignment(pdir, change, proposal_id)
+                review_ready = _assignment_complete(review_assignment)
+
+            if review_ready and review_assignment is not None:
+                correction = _open_correction_handoff(
+                    pdir,
+                    change,
+                    proposal_id,
+                    kind,
+                    review_handoff,
+                    review_assignment,
+                )
+                item = _dispatch_handoff(project, correction)
                 item.update({
                     "change_id": change["change_id"],
                     "proposal_id": proposal_id,
                     "review_verdict": change.get("review_verdict") or "REVISE",
+                    "handoff_kind": kind,
+                    "parent_handoff_id": correction.get("parent_handoff_id") or None,
                 })
-                actions.append(item)
+                if item.get("result") in {"assigned", "no_idle_worker"}:
+                    actions.append(item)
     return actions
 
 

@@ -314,7 +314,12 @@ def _project_pause(project: str) -> Path:
 # assign                                                                       #
 # --------------------------------------------------------------------------- #
 
-def do_assign(target: str, task: str, node_id: Optional[str] = None) -> Dict:
+def do_assign(
+    target: str,
+    task: str,
+    node_id: Optional[str] = None,
+    handoff_id: str = "",
+) -> Dict:
     """Replace one worker TASK.md and, for planned projects, bind it to Plan."""
     project, worker = L.resolve_target(target)
     if not worker:
@@ -329,8 +334,8 @@ def do_assign(target: str, task: str, node_id: Optional[str] = None) -> Dict:
     pdir = wl.project_dir
     planned = (pdir / "plan" / "current.json").is_file()
     if not planned:
-        if node_id:
-            raise SystemExit("cannot use --node: project has no Research Plan")
+        if node_id or handoff_id:
+            raise SystemExit("cannot bind node/handoff: project has no Research Plan")
         atomic_write(wl.task, text)
         return {"worker": f"{project}/{worker}", "task_file": str(wl.task)}
     if not node_id:
@@ -355,6 +360,7 @@ def do_assign(target: str, task: str, node_id: Optional[str] = None) -> Dict:
             node_id=node_id,
             plan_version=plan_version,
             task=text,
+            handoff_id=handoff_id,
         )
     except ValueError as exc:
         if old_task is None:
@@ -369,6 +375,7 @@ def do_assign(target: str, task: str, node_id: Optional[str] = None) -> Dict:
         "assignment_id": assignment["assignment_id"],
         "node_id": assignment["node_id"],
         "plan_version": assignment["plan_version"],
+        "handoff_id": assignment.get("handoff_id"),
     }
 
 

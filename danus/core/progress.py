@@ -108,13 +108,57 @@ class ProgressLedger:
             forbidden_behaviors=forbidden,
             acceptance_conditions=acceptance,
         )
+        task_hash = self.task_sha256(task)
+
+        # A Researcher correction assignment already has durable lineage through
+        # its REVISION/RETHINK handoff. Reuse that binding instead of adding a new
+        # gateway argument or asking the model to copy a parent contract id.
+        replaces_contract_id = ""
+        current_assignment = self.current(proposer, refresh_stale=True)
+        if (
+            current_assignment
+            and current_assignment.get("node_id") == node_id
+            and int(current_assignment.get("plan_version") or 0) == version
+        ):
+            handoff_id = str(current_assignment.get("handoff_id") or "")
+            if handoff_id:
+                from .handoff import HandoffRequests
+
+                correction = HandoffRequests(self).get(handoff_id)
+                if (
+                    correction
+                    and correction.get("status") == "ASSIGNED"
+                    and correction.get("kind") in {"REVISION", "RETHINK"}
+                    and correction.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                    and correction.get("node_id") == node_id
+                    and int(correction.get("plan_version") or 0) == version
+                ):
+                    replaces_contract_id = str(correction.get("subject_id") or "")
+
+        # Retried writes of the same logical contract return the original record.
+        # Historical ids remain valid because dedupe is semantic, not id-format based.
+        records, order = self._replay_implementation_contracts()
+        for contract_id in reversed(order):
+            record = records.get(contract_id)
+            if not record:
+                continue
+            if (
+                record.get("node_id") == node_id
+                and int(record.get("plan_version") or 0) == version
+                and record.get("task_sha256") == task_hash
+                and record.get("proposer") == proposer
+                and str(record.get("replaces_contract_id") or "") == replaces_contract_id
+            ):
+                return self._implementation_contract_view(record)
+
         submitted_at = utc_now()
         contract_id = self._content_id(
             {
                 "node_id": node_id,
                 "plan_version": version,
-                "task_sha256": self.task_sha256(task),
+                "task_sha256": task_hash,
                 "proposer": proposer,
+                "replaces_contract_id": replaces_contract_id,
                 "submitted_at": submitted_at,
             }
         )
@@ -123,7 +167,7 @@ class ProgressLedger:
             "contract_id": contract_id,
             "node_id": node_id,
             "plan_version": version,
-            "task_sha256": self.task_sha256(task),
+            "task_sha256": task_hash,
             "task": task,
             "goal": self._required(goal, "goal"),
             "must_preserve_invariants": preserve,
@@ -132,6 +176,8 @@ class ProgressLedger:
             "proposer": proposer,
             "at": submitted_at,
         }
+        if replaces_contract_id:
+            event["replaces_contract_id"] = replaces_contract_id
         append_jsonl(self.path, event)
         return self.implementation_contract(contract_id) or event
 
@@ -175,6 +221,15 @@ class ProgressLedger:
         record = records.get(str(contract_id).strip())
         return self._implementation_contract_view(record) if record else None
 
+    def implementation_contracts(self) -> List[Dict[str, Any]]:
+        """Return all implementation contracts in append order."""
+        records, order = self._replay_implementation_contracts()
+        return [
+            self._implementation_contract_view(records[contract_id])
+            for contract_id in order
+            if contract_id in records
+        ]
+
     def pending_implementation_contracts(self) -> List[Dict[str, Any]]:
         """Return the latest unconsumed semantic gate per plan node."""
         records, order = self._replay_implementation_contracts()
@@ -207,11 +262,13 @@ class ProgressLedger:
         node_id: str,
         plan_version: int,
         task: str,
+        handoff_id: str = "",
     ) -> Dict[str, Any]:
         """Atomically bind one worker task to one ACTIVE Plan node/role lane."""
         worker = self._required(worker, "worker")
         role = self._required(role, "role")
         node_id = self._required(node_id, "node_id")
+        handoff_id = str(handoff_id or "").strip()
         if not str(task).strip():
             raise ValueError("task is required")
 
@@ -233,6 +290,43 @@ class ProgressLedger:
                 if node["state"] != "ACTIVE":
                     raise ValueError(f"plan node {node_id} is not ACTIVE")
 
+                task_hash = self.task_sha256(task)
+                assignments, _ = self._replay_assignments()
+                if handoff_id:
+                    from .handoff import HandoffRequests
+
+                    handoff = HandoffRequests(self).get(handoff_id)
+                    if handoff is None:
+                        raise ValueError(f"unknown handoff: {handoff_id}")
+                    if handoff["status"] == "ASSIGNED":
+                        existing = assignments.get(
+                            str(handoff.get("assigned_assignment_id") or "")
+                        )
+                        if (
+                            existing is not None
+                            and existing.get("handoff_id") == handoff_id
+                            and existing.get("state") != "STALE"
+                            and existing.get("worker") == worker
+                            and str(existing.get("role") or "").lower() == role.lower()
+                            and existing.get("node_id") == node_id
+                            and int(existing.get("plan_version")) == version
+                            and existing.get("task_sha256") == task_hash
+                        ):
+                            return existing
+                        raise ValueError(f"handoff {handoff_id} is already ASSIGNED")
+                    if handoff["status"] != "OPEN":
+                        raise ValueError(
+                            f"handoff {handoff_id} is {handoff['status']}; expected OPEN"
+                        )
+                    if int(handoff["plan_version"]) != version:
+                        raise ValueError("handoff plan_version does not match assignment")
+                    if handoff["node_id"] != node_id:
+                        raise ValueError("handoff node does not match assignment")
+                    if str(handoff["target_role"]).lower() != role.lower():
+                        raise ValueError("handoff target role does not match assignment role")
+                    if handoff["request_sha256"] != task_hash:
+                        raise ValueError("assigned task does not match handoff request")
+
                 implementation_contract = (
                     self._active_implementation_contract(node_id)
                     if role.lower() == "experimenter"
@@ -248,12 +342,33 @@ class ProgressLedger:
                             f"implementation contract {implementation_contract['contract_id']} "
                             f"requires APPROVE; current status is {status}"
                         )
-                    if self.task_sha256(task) != implementation_contract["task_sha256"]:
+                    if task_hash != implementation_contract["task_sha256"]:
                         raise ValueError("assigned task does not match approved implementation contract")
+                    from .handoff import HandoffRequests
 
-                assignments, _ = self._replay_assignments()
+                    reviews = [
+                        item
+                        for item in HandoffRequests(self).all()
+                        if item.get("kind") == "REVIEW"
+                        and item.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                        and item.get("subject_id") == implementation_contract["contract_id"]
+                    ]
+                    if reviews:
+                        reviews.sort(
+                            key=lambda item: (
+                                str(item.get("created_at") or ""),
+                                item["handoff_id"],
+                            )
+                        )
+                        if reviews[-1].get("status") != "RESOLVED":
+                            raise ValueError(
+                                "implementation contract review handoff requires RESOLVED"
+                            )
+
                 for record in assignments.values():
                     if record["state"] in self._TERMINAL:
+                        continue
+                    if handoff_id and record.get("handoff_id") == handoff_id:
                         continue
                     if (
                         record["node_id"] == node_id
@@ -265,11 +380,14 @@ class ProgressLedger:
                             f"{record['assignment_id']} on worker {record['worker']}"
                         )
 
-                # A worker may be deliberately rebound. Serialize that transition
-                # and stale every surviving nonterminal assignment from any legacy
-                # race before creating the new one.
+                # A worker may be deliberately rebound. A reopened handoff may also
+                # replace its previous attempt on a different worker.
                 for record in assignments.values():
-                    if record["worker"] == worker and record["state"] not in self._TERMINAL:
+                    if record["state"] in self._TERMINAL:
+                        continue
+                    if record["worker"] == worker or (
+                        handoff_id and record.get("handoff_id") == handoff_id
+                    ):
                         self._append_state(
                             record,
                             state="STALE",
@@ -278,7 +396,6 @@ class ProgressLedger:
                         )
 
                 assigned_at = utc_now()
-                task_hash = self.task_sha256(task)
                 identity = {
                     "worker": worker,
                     "role": role,
@@ -289,6 +406,8 @@ class ProgressLedger:
                 }
                 if implementation_contract is not None:
                     identity["implementation_contract_id"] = implementation_contract["contract_id"]
+                if handoff_id:
+                    identity["handoff_id"] = handoff_id
                 assignment_id = self._content_id(identity)
                 event = {
                     "event": "ASSIGNED",
@@ -628,6 +747,9 @@ class ProgressLedger:
                 )
                 if implementation_contract_id:
                     record["implementation_contract_id"] = implementation_contract_id
+                handoff_id = str(event.get("handoff_id") or "")
+                if handoff_id:
+                    record["handoff_id"] = handoff_id
                 if not record["worker"] or not record["node_id"]:
                     continue
                 assignments[aid] = record

@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import os
+from contextlib import contextmanager
+from pathlib import Path
+
+import pytest
+
+from danus.core import ProgressLedger
+from danus.core.handoff import HandoffRequests
+from danus.execution import layout as L
+from danus.gateway import server, tools_for
+from danus.orchestration import autonomy as A
+from danus.orchestration import cli, planning
+from danus.orchestration.control import reconcile
+
+
+@contextmanager
+def _root(tmp_path: Path):
+    old = os.environ.get("DANUS_AGENTS_ROOT")
+    os.environ["DANUS_AGENTS_ROOT"] = str(tmp_path / "projects")
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("DANUS_AGENTS_ROOT", None)
+        else:
+            os.environ["DANUS_AGENTS_ROOT"] = old
+
+
+@contextmanager
+def _gateway(pdir: Path, worker: str, role: str):
+    keys = {
+        "DANUS_PROJECT_DIR": str(pdir),
+        "DANUS_AUTHOR": worker,
+        "DANUS_ROLE": role,
+    }
+    old = {key: os.environ.get(key) for key in keys}
+    os.environ.update(keys)
+    try:
+        yield
+    finally:
+        for key, value in old.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _rows(project: str):
+    return [
+        {"worker": worker, "alive": False, "paused": False}
+        for worker in L.list_workers(project)
+    ]
+
+
+def _setup(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+    planning.initialize_research("P", brief="Study one bounded question.")
+    pdir = L.project_dir("P")
+    ledger = ProgressLedger(pdir)
+    ledger.update(worker="low", state="DONE", actor="runtime", outcome="COMPLETE")
+    cli.do_assign("P/low3", "run bounded experiment", node_id="P0")
+    ledger.update(worker="low3", state="RUNNING", actor="runtime")
+    return pdir, ledger
+
+
+def _apply(project: str, decisions=None):
+    return A.apply_autonomy(
+        project,
+        decisions or [],
+        rows=_rows(project),
+        assign=cli.do_assign,
+        start=lambda wl: "started",
+        role_of=cli._read_worker_role,
+    )
+
+
+def test_handoff_request_permissions_and_subject_dedupe(tmp_path: Path, monkeypatch):
+    with _root(tmp_path):
+        pdir, ledger = _setup(tmp_path, monkeypatch)
+        assert "handoff_request" in tools_for("experimenter")
+        assert "handoff_request" in tools_for("researcher")
+        assert "handoff_request" in tools_for("reviewer")
+        assert "handoff_request" not in tools_for("main")
+        assert "handoff_request" not in tools_for("worker")
+        assert "handoff_request" not in tools_for("verifier")
+
+        source = ledger.current("low3")
+        assert source is not None
+        with _gateway(pdir, "low3", "experimenter"):
+            first = server.handoff_request("INTERPRET", "unexpected result needs scientific interpretation")
+            repeated = server.handoff_request("INTERPRET", "different wording must not duplicate the request")
+        assert repeated["handoff_id"] == first["handoff_id"]
+
+        handoff = HandoffRequests(ProgressLedger(pdir)).get(first["handoff_id"])
+        assert handoff is not None
+        assert handoff["subject_type"] == "ASSIGNMENT"
+        assert handoff["subject_id"] == source["assignment_id"]
+        assert handoff["source_assignment_id"] == source["assignment_id"]
+        assert handoff["target_role"] == "researcher"
+
+        cli.do_assign("P/low", "research follow-up", node_id="P0")
+        ledger.update(worker="low", state="RUNNING", actor="runtime")
+        with _gateway(pdir, "low", "researcher"):
+            with pytest.raises(ValueError, match="cannot request INTERPRET"):
+                server.handoff_request("INTERPRET", "not allowed")
+
+
+def test_interpret_dispatches_to_researcher_and_resolves(tmp_path: Path, monkeypatch):
+    with _root(tmp_path):
+        pdir, ledger = _setup(tmp_path, monkeypatch)
+        with _gateway(pdir, "low3", "experimenter"):
+            opened = server.handoff_request("INTERPRET", "result contradicts the expected mechanism")
+
+        applied = _apply("P")
+        routed = next(item for item in applied if item.get("action") == "INTERPRET")
+        assert routed["result"] == "assigned"
+        assert routed["worker"] == "low"
+
+        fresh_ledger = ProgressLedger(pdir)
+        fresh_handoffs = HandoffRequests(fresh_ledger)
+        current = fresh_handoffs.get(opened["handoff_id"])
+        assert current is not None and current["status"] == "ASSIGNED"
+        assignment = fresh_ledger.current("low")
+        assert assignment is not None
+        assert assignment["handoff_id"] == opened["handoff_id"]
+
+        fresh_ledger.update(worker="low", state="DONE", actor="runtime", outcome="COMPLETE")
+        applied = _apply("P")
+        assert any(
+            item.get("action") == "INTERPRET"
+            and item.get("handoff_id") == opened["handoff_id"]
+            and item.get("result") == "resolved"
+            for item in applied
+        )
+        assert HandoffRequests(ProgressLedger(pdir)).get(opened["handoff_id"])["status"] == "RESOLVED"
+        assert ledger.current("low3")["state"] == "RUNNING"
+
+
+def test_interpret_suppresses_generic_review_and_cold_start_reuses_assignment(tmp_path: Path, monkeypatch):
+    with _root(tmp_path):
+        pdir, ledger = _setup(tmp_path, monkeypatch)
+        with _gateway(pdir, "low3", "experimenter"):
+            opened = server.handoff_request("INTERPRET", "needs researcher judgment")
+        ledger.update(
+            worker="low3",
+            state="BLOCKED",
+            actor="runtime",
+            outcome="NEEDS_REVIEW",
+        )
+
+        report = reconcile(pdir, _rows("P"))
+        assert any(
+            item.get("assignment_id") == ledger.current("low3")["assignment_id"]
+            and item.get("reason") == "assignment_needs_review"
+            for item in report["decisions"]
+        )
+        _apply("P", report["decisions"])
+
+        fresh_ledger = ProgressLedger(pdir)
+        fresh_handoffs = HandoffRequests(fresh_ledger)
+        current = fresh_handoffs.get(opened["handoff_id"])
+        assert current is not None and current["status"] == "ASSIGNED"
+        interpret_assignment_id = current["assigned_assignment_id"]
+        assert not any(
+            item.get("kind") == "REVIEW"
+            and item.get("subject_type") == "ASSIGNMENT"
+            and item.get("subject_id") == ledger.current("low3")["assignment_id"]
+            for item in fresh_handoffs.all()
+        )
+
+        # Cold start: reconstruct all state. A dead process with a live Assignment
+        # becomes RETASK; the same Assignment/handoff is restarted, not duplicated.
+        cold_report = reconcile(pdir, _rows("P"))
+        retry = next(
+            item
+            for item in cold_report["decisions"]
+            if item.get("assignment_id") == interpret_assignment_id
+            and item.get("reason") == "worker_not_running"
+        )
+        started = []
+        monkeypatch.setattr(cli, "_start_one", lambda wl: started.append(wl.name) or "started")
+        cli._apply_supervisor_decisions("P", [retry])
+        assert started == ["low"]
+        after = HandoffRequests(ProgressLedger(pdir)).get(opened["handoff_id"])
+        assert after is not None and after["assigned_assignment_id"] == interpret_assignment_id
+        assert len(
+            [a for a in ProgressLedger(pdir).assignments() if a.get("handoff_id") == opened["handoff_id"]]
+        ) == 1
+
+
+def test_escalate_persists_for_main_and_blocks_false_complete(tmp_path: Path, monkeypatch):
+    with _root(tmp_path):
+        pdir, ledger = _setup(tmp_path, monkeypatch)
+        with _gateway(pdir, "low3", "experimenter"):
+            opened = server.handoff_request("ESCALATE", "control-plane decision is required")
+
+        # Simulate a cold start by rebuilding the stores from disk only.
+        handoff = HandoffRequests(ProgressLedger(pdir)).get(opened["handoff_id"])
+        assert handoff is not None
+        assert handoff["status"] == "OPEN"
+        assert handoff["target_role"] == "main"
+
+        ledger.set_node_state("P0", state="DONE", actor="supervisor")
+        report = reconcile(pdir, _rows("P"))
+        assert report["project_state"] == "RUNNING"
+        pending = next(item for item in report["pending_handoffs"] if item["handoff_id"] == opened["handoff_id"])
+        assert pending["kind"] == "ESCALATE"
+        assert pending["target_role"] == "main"
+
+        applied = _apply("P")
+        escalation = next(item for item in applied if item.get("action") == "ESCALATE")
+        assert escalation["handoff_id"] == opened["handoff_id"]
+        assert escalation["result"] == "pending_main"
+        assert not any(a.get("handoff_id") == opened["handoff_id"] for a in ProgressLedger(pdir).assignments())
