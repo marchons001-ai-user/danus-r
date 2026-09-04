@@ -696,14 +696,6 @@ def _dispatch_handoff(project: str, handoff: Dict[str, Any]) -> Dict[str, Any]:
     handoffs = HandoffRequests(ProgressLedger(pdir))
     current = handoffs.get(handoff["handoff_id"]) or handoff
     assignment = _handoff_assignment(pdir, current)
-    if current["status"] == "ASSIGNED" and assignment and assignment.get("state") == "STALE":
-        current = handoffs.reopen(
-            current["handoff_id"],
-            assignment_id=assignment["assignment_id"],
-            actor="supervisor",
-            reason="handoff assignment became stale",
-        )
-        assignment = None
     if current["status"] == "ASSIGNED":
         return {
             "action": "PLAN_ASSIGN",
@@ -873,6 +865,52 @@ def _recover_materialized_tasks(pdir: Path) -> List[Dict[str, Any]]:
     return actions
 
 
+def _route_action(
+    actions: List[Dict[str, Any]],
+    kind: str,
+    *,
+    change_id: str = "",
+    handoff_id: str = "",
+    handoff_kind: str = "",
+) -> Optional[Dict[str, Any]]:
+    for action in actions:
+        if action.get("kind") != kind:
+            continue
+        if change_id and str(action.get("subject_id") or action.get("change_id") or "") != change_id:
+            continue
+        if handoff_id and str(action.get("handoff_id") or "") != handoff_id:
+            continue
+        if handoff_kind and str(action.get("handoff_kind") or "") != handoff_kind:
+            continue
+        if action.get("subject_type") not in {None, "PLAN_CHANGE"} and kind != "COMMIT_PLAN_CHANGE":
+            continue
+        return action
+    return None
+
+
+def _reopen_plan_handoff(
+    pdir: Path,
+    handoff: Dict[str, Any],
+    route_actions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    action = _route_action(
+        route_actions,
+        "REOPEN_HANDOFF",
+        handoff_id=str(handoff.get("handoff_id") or ""),
+    )
+    if action is None:
+        return handoff
+    assignment = _handoff_assignment(pdir, handoff)
+    if not assignment or handoff.get("status") != "ASSIGNED":
+        return handoff
+    return HandoffRequests(ProgressLedger(pdir)).reopen(
+        handoff["handoff_id"],
+        assignment_id=assignment["assignment_id"],
+        actor="supervisor",
+        reason="handoff assignment became stale",
+    )
+
+
 def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
     pdir = L.project_dir(project)
     if (pdir / L.PAUSE_FILE).is_file():
@@ -901,6 +939,7 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
         _repair_error_path(pdir).unlink(missing_ok=True)
 
     graph = ResearchPlanGraph(pdir)
+    route_actions = cli.reconcile(pdir, cli._project_rows(project))["actions"]
     linked = [item for item in graph.pending_changes() if _proposal_id_from_change(item)]
     if linked:
         change = linked[0]
@@ -913,32 +952,46 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
             if record["proposal"]["operations"] != change.get("operations"):
                 raise ValueError("approved change operations diverge from immutable proposal")
 
-            review_handoff = _plan_handoff(pdir, "REVIEW", change["change_id"])
+            change_id = str(change["change_id"])
+            review_handoff = _plan_handoff(pdir, "REVIEW", change_id)
             legacy_review = None if review_handoff else _review_assignment(pdir, change, proposal_id)
             if change["status"] == "PROPOSED":
-                if review_handoff is None and legacy_review is None:
+                open_action = _route_action(
+                    route_actions,
+                    "OPEN_HANDOFF",
+                    change_id=change_id,
+                    handoff_kind="REVIEW",
+                )
+                if review_handoff is None and legacy_review is None and open_action is not None:
                     review_handoff = _open_review_handoff(pdir, change, proposal_id, record)
                     item = _dispatch_handoff(project, review_handoff)
                     item.update({
-                        "change_id": change["change_id"],
+                        "change_id": change_id,
                         "proposal_id": proposal_id,
                         "handoff_kind": "REVIEW",
                     })
                     actions.append(item)
                 elif review_handoff is not None:
-                    item = _dispatch_handoff(project, review_handoff)
+                    review_handoff = _reopen_plan_handoff(pdir, review_handoff, route_actions)
+                    assign_action = _route_action(
+                        route_actions,
+                        "ASSIGN_HANDOFF",
+                        handoff_id=review_handoff["handoff_id"],
+                    )
                     review_assignment = _handoff_assignment(pdir, review_handoff)
-                    if item.get("result") in {"assigned", "no_idle_worker"}:
-                        item.update({
-                            "change_id": change["change_id"],
-                            "proposal_id": proposal_id,
-                            "handoff_kind": "REVIEW",
-                        })
-                        actions.append(item)
+                    if assign_action is not None:
+                        item = _dispatch_handoff(project, review_handoff)
+                        if item.get("result") in {"assigned", "no_idle_worker"}:
+                            item.update({
+                                "change_id": change_id,
+                                "proposal_id": proposal_id,
+                                "handoff_kind": "REVIEW",
+                            })
+                            actions.append(item)
                     elif review_assignment and review_assignment.get("state") in {"DONE", "BLOCKED"}:
                         actions.append({
                             "action": "PLAN_REVIEW",
-                            "change_id": change["change_id"],
+                            "change_id": change_id,
                             "proposal_id": proposal_id,
                             "handoff_id": review_handoff["handoff_id"],
                             "result": "verdict_not_recorded",
@@ -946,16 +999,22 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
                 elif legacy_review and legacy_review.get("state") in {"DONE", "BLOCKED"}:
                     actions.append({
                         "action": "PLAN_REVIEW",
-                        "change_id": change["change_id"],
+                        "change_id": change_id,
                         "proposal_id": proposal_id,
                         "result": "verdict_not_recorded",
                     })
             elif change["status"] == "APPROVED":
                 review_assignment = legacy_review
-                if review_handoff is not None:
+                if review_handoff is not None and _route_action(
+                    route_actions,
+                    "RESOLVE_HANDOFF",
+                    handoff_id=review_handoff["handoff_id"],
+                ) is not None:
                     review_handoff, review_assignment = _resolve_review_handoff(
                         pdir, change, review_handoff
                     )
+                elif review_handoff is not None:
+                    review_assignment = _handoff_assignment(pdir, review_handoff)
                 review_complete = (
                     review_handoff is not None
                     and review_handoff.get("status") == "RESOLVED"
@@ -963,12 +1022,17 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
                 ) or (
                     review_handoff is None and _assignment_complete(legacy_review)
                 )
-                if review_complete:
-                    version = graph.commit_change(change["change_id"], committer="supervisor")
+                commit_action = _route_action(
+                    route_actions,
+                    "COMMIT_PLAN_CHANGE",
+                    change_id=change_id,
+                )
+                if review_complete and (commit_action is not None or review_handoff is None):
+                    version = graph.commit_change(change_id, committer="supervisor")
                     written = _materialize_tasks(pdir, record, version)
                     actions.append({
                         "action": "PLAN_COMMIT",
-                        "change_id": change["change_id"],
+                        "change_id": change_id,
                         "proposal_id": proposal_id,
                         "handoff_id": review_handoff.get("handoff_id") if review_handoff else None,
                         "plan_version": version,
@@ -978,7 +1042,7 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
                 else:
                     actions.append({
                         "action": "PLAN_COMMIT",
-                        "change_id": change["change_id"],
+                        "change_id": change_id,
                         "proposal_id": proposal_id,
                         "handoff_id": review_handoff.get("handoff_id") if review_handoff else None,
                         "result": "awaiting_reviewer_completion",
@@ -1003,19 +1067,25 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
             if change.get("status") == "REVISE" or (
                 change.get("status") == "REJECTED" and verdict != "REJECT"
             ):
-                # Old persisted REJECTED records had no three-way verdict; preserve
-                # their historical revision behavior rather than changing recovery.
                 routed.append((path.stem, change, "REVISION"))
             elif change.get("status") == "REJECTED" and verdict == "REJECT":
                 routed.append((path.stem, change, "RETHINK"))
         if routed:
             proposal_id, change, kind = routed[-1]
-            review_handoff = _plan_handoff(pdir, "REVIEW", change["change_id"])
+            change_id = str(change["change_id"])
+            review_handoff = _plan_handoff(pdir, "REVIEW", change_id)
             review_assignment = None
             if review_handoff is not None:
-                review_handoff, review_assignment = _resolve_review_handoff(
-                    pdir, change, review_handoff
-                )
+                if _route_action(
+                    route_actions,
+                    "RESOLVE_HANDOFF",
+                    handoff_id=review_handoff["handoff_id"],
+                ) is not None:
+                    review_handoff, review_assignment = _resolve_review_handoff(
+                        pdir, change, review_handoff
+                    )
+                else:
+                    review_assignment = _handoff_assignment(pdir, review_handoff)
                 review_ready = bool(
                     review_handoff.get("status") == "RESOLVED"
                     and _assignment_complete(review_assignment)
@@ -1025,24 +1095,50 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
                 review_ready = _assignment_complete(review_assignment)
 
             if review_ready and review_assignment is not None:
-                correction = _open_correction_handoff(
-                    pdir,
-                    change,
-                    proposal_id,
-                    kind,
-                    review_handoff,
-                    review_assignment,
+                correction = _plan_handoff(pdir, kind, change_id)
+                open_action = _route_action(
+                    route_actions,
+                    "OPEN_HANDOFF",
+                    change_id=change_id,
+                    handoff_kind=kind,
                 )
-                item = _dispatch_handoff(project, correction)
-                item.update({
-                    "change_id": change["change_id"],
-                    "proposal_id": proposal_id,
-                    "review_verdict": change.get("review_verdict") or "REVISE",
-                    "handoff_kind": kind,
-                    "parent_handoff_id": correction.get("parent_handoff_id") or None,
-                })
-                if item.get("result") in {"assigned", "no_idle_worker"}:
-                    actions.append(item)
+                legacy_route = review_handoff is None
+                if correction is None and (open_action is not None or legacy_route):
+                    correction = _open_correction_handoff(
+                        pdir,
+                        change,
+                        proposal_id,
+                        kind,
+                        review_handoff,
+                        review_assignment,
+                    )
+                    item = _dispatch_handoff(project, correction)
+                    item.update({
+                        "change_id": change_id,
+                        "proposal_id": proposal_id,
+                        "review_verdict": change.get("review_verdict") or "REVISE",
+                        "handoff_kind": kind,
+                        "parent_handoff_id": correction.get("parent_handoff_id") or None,
+                    })
+                    if item.get("result") in {"assigned", "no_idle_worker"}:
+                        actions.append(item)
+                elif correction is not None:
+                    correction = _reopen_plan_handoff(pdir, correction, route_actions)
+                    if _route_action(
+                        route_actions,
+                        "ASSIGN_HANDOFF",
+                        handoff_id=correction["handoff_id"],
+                    ) is not None:
+                        item = _dispatch_handoff(project, correction)
+                        item.update({
+                            "change_id": change_id,
+                            "proposal_id": proposal_id,
+                            "review_verdict": change.get("review_verdict") or "REVISE",
+                            "handoff_kind": kind,
+                            "parent_handoff_id": correction.get("parent_handoff_id") or None,
+                        })
+                        if item.get("result") in {"assigned", "no_idle_worker"}:
+                            actions.append(item)
     return actions
 
 

@@ -47,6 +47,7 @@ _QUOTA_REFRESH_SECONDS = 5 * 60
 _REVIEWER_TERRA_MODEL = "gpt-5.6-terra"
 _REVIEWER_DSH_DEFAULT_MODEL = "deepseek-v4-flash"
 _TOKEN_USAGE_SEMANTICS = "completed_turn_usage_not_context_window"
+_SUPERVISOR_MAX_PASSES = 8
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
@@ -780,6 +781,29 @@ def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -
     return applied
 
 
+def _reduction_key(report: Dict[str, Any]) -> str:
+    """Compare semantic reducer output, not file mtimes or process bookkeeping."""
+    return json.dumps(
+        {
+            key: report.get(key)
+            for key in (
+                "project_state",
+                "plan_version",
+                "plan_changes",
+                "frontier",
+                "completed_nodes",
+                "unresolved_implementation_contracts",
+                "pending_handoffs",
+                "decisions",
+                "actions",
+                "budget_stop",
+            )
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -> None:
     append_jsonl(
         pdir / "supervisor" / "events.jsonl",
@@ -797,9 +821,30 @@ def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -
             "quota_applied": report.get("quota_applied", []),
             "reviewer_cost_policy": report.get("reviewer_cost_policy", []),
             "reviewer_cost_applied": report.get("reviewer_cost_applied", []),
+            "convergence": report.get("convergence", {}),
             "at": utc_now(),
         },
     )
+
+
+def _decorate_supervisor_report(
+    project: str,
+    pdir: Path,
+    rows: List[Dict[str, Any]],
+    report: Dict[str, Any],
+    token_budget: int,
+) -> tuple[Dict[str, Any], Dict[str, Any], bool]:
+    quiescent = report.get("project_state") in {"PAUSED", "COMPLETE"}
+    budget = _resource_snapshot(pdir, rows, token_budget)
+    report["budget"] = budget
+    if not quiescent:
+        _apply_resource_budget(report, rows, budget)
+    policy = quota_policy(Q.load_quota(pdir))
+    report["quota_policy"] = policy
+    report["reviewer_cost_policy"] = (
+        [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=False)
+    )
+    return report, policy, quiescent
 
 
 def _do_supervise_unlocked(
@@ -827,33 +872,58 @@ def _do_supervise_unlocked(
             ledger.set_node_state(complete_node, state="DONE", actor="supervisor")
         elif reopen_node:
             ledger.set_node_state(reopen_node, state="OPEN", actor="supervisor")
+
         rows = _project_rows(project)
-        report = reconcile(pdir, rows)
-        quiescent = report.get("project_state") in {"PAUSED", "COMPLETE"}
-        budget = _resource_snapshot(pdir, rows, token_budget)
-        report["budget"] = budget
-        if not quiescent:
-            _apply_resource_budget(report, rows, budget)
-        policy = quota_policy(Q.load_quota(pdir))
-        report["quota_policy"] = policy
-        report["reviewer_cost_policy"] = (
-            [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=False)
+        report, policy, quiescent = _decorate_supervisor_report(
+            project, pdir, rows, reconcile(pdir, rows), token_budget
         )
-        if apply:
-            report["reviewer_cost_applied"] = (
-                [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=True)
+        if not apply:
+            return report
+
+        applied: List[Dict[str, Any]] = []
+        autonomy_applied: List[Dict[str, Any]] = []
+        reviewer_cost_applied = (
+            [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=True)
+        )
+        quota_applied = [] if quiescent else _apply_quota_gate(project, rows, policy)
+        stable = False
+        passes = 0
+
+        while passes < _SUPERVISOR_MAX_PASSES:
+            before = _reduction_key(report)
+            applied.extend(_apply_supervisor_decisions(project, report["decisions"]))
+            if not quiescent and not report.get("budget_stop"):
+                autonomy_applied.extend(
+                    A.apply_autonomy(
+                        project,
+                        report["decisions"],
+                        rows=rows,
+                        assign=do_assign,
+                        start=_start_one,
+                        role_of=_read_worker_role,
+                    )
+                )
+            passes += 1
+
+            rows = _project_rows(project)
+            report, policy, quiescent = _decorate_supervisor_report(
+                project, pdir, rows, reconcile(pdir, rows), token_budget
             )
-            report["quota_applied"] = [] if quiescent else _apply_quota_gate(project, rows, policy)
-            report["applied"] = _apply_supervisor_decisions(project, report["decisions"])
-            report["autonomy_applied"] = [] if quiescent else A.apply_autonomy(
-                project,
-                report["decisions"],
-                rows=rows,
-                assign=do_assign,
-                start=_start_one,
-                role_of=_read_worker_role,
-            )
-            _record_supervisor_event(pdir, trigger, report)
+            if _reduction_key(report) == before:
+                stable = True
+                break
+
+        report["applied"] = applied
+        report["autonomy_applied"] = autonomy_applied
+        report["reviewer_cost_applied"] = reviewer_cost_applied
+        report["quota_applied"] = quota_applied
+        report["convergence"] = {
+            "passes": passes,
+            "stable": stable,
+            "max_passes": _SUPERVISOR_MAX_PASSES,
+            "reason": "fixed_point" if stable else "pass_limit",
+        }
+        _record_supervisor_event(pdir, trigger, report)
         return report
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"cannot reconcile project: {exc}") from exc
@@ -868,7 +938,7 @@ def do_supervise(
     token_budget: int = 0,
     trigger: str = "manual",
 ) -> Dict:
-    """Run one serialized deterministic Supervisor reconciliation pass."""
+    """Run one serialized deterministic Supervisor reconciliation to a bounded fixed point."""
     pdir = L.project_dir(project)
     if not pdir.is_dir():
         return _do_supervise_unlocked(
