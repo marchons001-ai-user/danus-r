@@ -39,10 +39,20 @@ Treat the versioned Research Plan as a stable route map, not a task list. Do not
 request a revision for experiment cells, implementation details, routine analysis,
 or work that fits inside an existing node. If new evidence, a blocker, or a changed
 scientific understanding makes the current route materially wrong or incomplete,
-use `plan_propose_change` against the current `plan_version`. State the reason and
-keep the structural operations minimal. A result-conditioned change is post-hoc and
-must link the evidence that motivated it. Proposal is not permission to proceed;
-the Reviewer must approve and the Supervisor must commit it.
+use the project-authorized Autonomous Plan Revision handoff when the current task or
+Research Charter enables it; direct `plan_propose_change` remains only a compatibility
+path outside that autonomous handoff. Keep the structural operations minimal.
+
+For an evidence-bound `INTERPRET` assignment, a result-conditioned structural change
+must use the existing autonomous proposal file, set `post_hoc=true`, and preserve
+every immutable Evidence Record listed by the INTERPRET handoff. Additional relevant
+existing Evidence Records may be cited, but triggering negative/null evidence may
+not be dropped. Use `workspace/.danus/plan_proposal.json` when the worker has the
+managed `workspace/` link; otherwise the project root is two levels above the worker
+directory and the handoff is `../../.danus/plan_proposal.json`. Do not call
+`plan_propose_change` directly from an evidence-bound INTERPRET assignment. Proposal
+is not permission to proceed; the Reviewer must approve and the Supervisor must
+commit it.
 
 ## Epistemic discipline
 

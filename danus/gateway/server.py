@@ -37,7 +37,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from danus._mcp import FastMCP
-from danus.core import FACT_TYPES, FactGraph, GlobalMemory, ProgressLedger, ResearchPlanGraph
+from danus.core import (
+    FACT_TYPES,
+    EvidenceStore,
+    FactGraph,
+    GlobalMemory,
+    ProgressLedger,
+    ResearchPlanGraph,
+)
 from danus.core.handoff import HandoffRequests
 from danus.integrations import search as _arxiv_search
 
@@ -401,14 +408,21 @@ def fact_revoke(
 # durable upward handoff                                                      #
 # --------------------------------------------------------------------------- #
 
-def handoff_request(kind: str, reason: str) -> Dict[str, Any]:
+def handoff_request(
+    kind: str,
+    reason: str,
+    evidence_refs: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Open the caller's one durable upward handoff for this assignment.
 
     Experimenters may request INTERPRET or ESCALATE. Researchers and Reviewers may
-    request ESCALATE. Routing identity is derived from the authenticated role and
-    current Assignment; callers cannot choose another worker, node, target, or
-    subject. Repeating the same kind from the same Assignment returns the existing
-    handoff instead of creating a duplicate.
+    request ESCALATE. ``evidence_refs`` is optional and valid only for INTERPRET;
+    when an Experiment Runtime already produced Evidence Records, pass their ids so
+    the Researcher receives exact immutable evidence instead of searching broadly.
+    Routing identity is derived from the authenticated role and current Assignment;
+    callers cannot choose another worker, node, target, or subject. Repeating the
+    same kind from the same Assignment returns the existing handoff only when its
+    Evidence refs match exactly.
     """
     requested_kind = str(kind or "").strip().upper()
     gateway_role = str(_role() or "").strip().lower()
@@ -436,6 +450,17 @@ def handoff_request(kind: str, reason: str) -> Dict[str, Any]:
     if not reason_text:
         raise ValueError("reason is required")
 
+    refs = list(dict.fromkeys(
+        str(value).strip() for value in (evidence_refs or []) if str(value).strip()
+    ))
+    if refs and requested_kind != "INTERPRET":
+        raise ValueError("evidence_refs are supported only for INTERPRET handoffs")
+    if refs:
+        store = EvidenceStore(_project())
+        missing = [evidence_id for evidence_id in refs if store.get_record(evidence_id) is None]
+        if missing:
+            raise ValueError(f"unknown evidence_refs: {missing}")
+
     handoffs = HandoffRequests(ledger)
     source_id = str(source["assignment_id"])
     existing = next(
@@ -450,20 +475,34 @@ def handoff_request(kind: str, reason: str) -> Dict[str, Any]:
         None,
     )
     if existing is not None:
+        existing_refs = list(existing.get("evidence_refs") or [])
+        if existing_refs != refs:
+            raise ValueError(
+                "existing handoff for this assignment has different evidence_refs"
+            )
         return {
             "handoff_id": existing["handoff_id"],
             "kind": existing["kind"],
             "status": existing["status"],
             "target_role": existing["target_role"],
+            "evidence_refs": existing_refs,
         }
 
     if requested_kind == "INTERPRET":
+        evidence_block = ""
+        if refs:
+            evidence_block = (
+                "Evidence Records (immutable):\n"
+                + "".join(f"- `{evidence_id}`\n" for evidence_id in refs)
+                + "\n"
+            )
         request = (
             "# Interpret Experiment Result\n\n"
             f"Source assignment `{source_id}` on Plan node `{source['node_id']}` requested Researcher interpretation.\n\n"
             f"Reason:\n{reason_text}\n\n"
-            "Inspect the source task/workspace and relevant persisted evidence. Determine the bounded scientific "
-            "meaning without re-running or broadening the experiment. Use only existing Researcher-authorized "
+            f"{evidence_block}"
+            "Inspect the source task/workspace and the listed persisted evidence when present. Determine the bounded "
+            "scientific meaning without re-running or broadening the experiment. Use only existing Researcher-authorized "
             "knowledge, Plan, or Implementation Contract paths if a concrete follow-up is justified. Do not alter "
             "the source Assignment or Handoff state. End with COMPLETE when this interpretation request itself is handled.\n"
         )
@@ -493,12 +532,14 @@ def handoff_request(kind: str, reason: str) -> Dict[str, Any]:
         source_assignment_id=source_id,
         request=request,
         reason=reason_text,
+        evidence_refs=refs,
     )
     return {
         "handoff_id": opened["handoff_id"],
         "kind": opened["kind"],
         "status": opened["status"],
         "target_role": opened["target_role"],
+        "evidence_refs": list(opened.get("evidence_refs") or []),
     }
 
 

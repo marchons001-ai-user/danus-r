@@ -97,6 +97,34 @@ class ResearchPlanGraph:
         self._validate(payload)
         return payload
 
+    def _required_post_hoc_refs(self, proposer: str) -> List[str]:
+        """Evidence that the proposer's current scientific handoff may not drop."""
+        from .handoff import HandoffRequests
+        from .progress import ProgressLedger
+
+        ledger = ProgressLedger(self.root)
+        assignment = ledger.current(proposer, refresh_stale=False)
+        if not assignment:
+            return []
+        handoff_id = str(assignment.get("handoff_id") or "")
+        if not handoff_id:
+            return []
+        handoff = HandoffRequests(ledger).get(handoff_id)
+        if not handoff:
+            return []
+
+        kind = str(handoff.get("kind") or "")
+        if kind == "INTERPRET":
+            return self._clean_refs(list(handoff.get("evidence_refs") or []))
+        if (
+            kind in {"REVISION", "RETHINK"}
+            and handoff.get("subject_type") == "PLAN_CHANGE"
+        ):
+            prior = self.get_change(str(handoff.get("subject_id") or ""))
+            if prior.get("post_hoc"):
+                return self._clean_refs(list(prior.get("evidence_refs") or []))
+        return []
+
     def propose_change(
         self,
         *,
@@ -117,6 +145,24 @@ class ResearchPlanGraph:
         proposer = self._required(proposer, "proposer")
         reason = self._required(reason, "reason")
         refs = self._clean_refs(evidence_refs or [])
+
+        required_refs = self._required_post_hoc_refs(proposer)
+        if required_refs:
+            if not reason.startswith("[proposal:"):
+                raise ValueError(
+                    "evidence-bound interpretation must use the autonomous plan proposal handoff"
+                )
+            if not post_hoc:
+                raise ValueError(
+                    "evidence-bound plan change requires post_hoc=true"
+                )
+            missing_required = [ref for ref in required_refs if ref not in refs]
+            if missing_required:
+                raise ValueError(
+                    "post_hoc plan change must preserve triggering evidence_refs: "
+                    + ", ".join(missing_required)
+                )
+
         if post_hoc:
             if not refs:
                 raise ValueError("post_hoc plan change requires evidence_refs")

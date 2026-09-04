@@ -43,6 +43,7 @@ class HandoffRequests:
         reason: str,
         source_assignment_id: str = "",
         parent_handoff_id: str = "",
+        evidence_refs: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         kind = str(kind).strip().upper()
         if kind not in self.KINDS:
@@ -59,6 +60,9 @@ class HandoffRequests:
         reason = self.progress._required(reason, "reason")
         source_assignment_id = str(source_assignment_id or "").strip()
         parent_handoff_id = str(parent_handoff_id or "").strip()
+        refs = list(dict.fromkeys(
+            str(value).strip() for value in (evidence_refs or []) if str(value).strip()
+        ))
 
         plan = ResearchPlanGraph(self.root).snapshot()
         version = int(plan_version)
@@ -90,6 +94,8 @@ class HandoffRequests:
             "request_sha256": request_sha256,
             "reason": reason,
         }
+        if refs:
+            identity["evidence_refs"] = refs
         handoff_id = self.progress._content_id(identity)
         existing = self.get(handoff_id)
         if existing is not None:
