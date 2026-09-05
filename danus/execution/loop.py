@@ -9,6 +9,7 @@ Researcher/Reviewer have no default skills; the Experimenter gets only Ponytail.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
@@ -28,6 +29,7 @@ from danus.gateway.roles import tools_for
 
 _FACT_ID_RE = re.compile(r"(?i:fact(?:_|\s+)id)\b[\"'`\s]*[:=]?\s*[\"'`]?([0-9a-f]{16})[\"'`]?")
 _OUTCOME_RE = re.compile(r"(?im)^DANUS_OUTCOME:\s*(COMPLETE|BLOCKED|NEEDS_REVIEW)\s*$")
+_LIBC = ctypes.CDLL(None, use_errno=True) if sys.platform.startswith("linux") else None
 
 
 # --- the per-round prompt -------------------------------------------------- #
@@ -217,6 +219,16 @@ class _Child:
     proc: "subprocess.Popen | None" = None
 
 
+def _arm_parent_death(expected_parent_pid: int) -> None:
+    """Linux: a scientific model/migration process must not outlive its worker."""
+    if _LIBC is None:
+        return
+    if _LIBC.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+        os._exit(126)
+    if os.getppid() != expected_parent_pid:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
 def _send_tree_signal(proc, sig: int) -> bool:
     pid = getattr(proc, "pid", None)
     if isinstance(pid, int) and pid > 0:
@@ -275,6 +287,7 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
     cmd = codex.exec_cmd(codex_bin, role["MODEL"], role["REASONING_EFFORT"], *tail)
     started = time.monotonic()
     cursor = C.LogCursor()
+    parent_pid = os.getpid()
     with open(log_path, "w", encoding="utf-8") as logf:
         try:
             _Child.proc = subprocess.Popen(
@@ -282,6 +295,7 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
                 stdin=subprocess.DEVNULL, cwd=str(wdir),
                 env=codex.subprocess_env(codex_bin),
                 start_new_session=True,
+                preexec_fn=(lambda: _arm_parent_death(parent_pid)) if context_budget else None,
             )
         except FileNotFoundError:
             logf.write(f"[worker_loop] codex binary not found: {cmd[0]}\n")
@@ -333,6 +347,7 @@ def _run_context_migration(
     )
     log_path = wl.logs / f"migration_{prior_log.stem.removeprefix('round_')}.log"
     timeout = min(hard_timeout, 300) if hard_timeout > 0 else 300
+    parent_pid = os.getpid()
     with open(log_path, "w", encoding="utf-8") as logf:
         try:
             proc = subprocess.Popen(
@@ -340,6 +355,7 @@ def _run_context_migration(
                 stdin=subprocess.DEVNULL, cwd=str(wl.dir),
                 env=codex.subprocess_env(codex_bin),
                 start_new_session=True,
+                preexec_fn=lambda: _arm_parent_death(parent_pid),
             )
         except FileNotFoundError:
             return None
@@ -431,6 +447,7 @@ def main(worker_dir: str) -> int:
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _on_term)
+    signal.signal(signal.SIGINT, _on_term)
 
     write_status(wl, state="running", round=rnd, started_at=time.time(),
                  context_tokens_total=context_tokens_total)
@@ -675,7 +692,11 @@ def main(worker_dir: str) -> int:
                 write_status(wl, state="error", error="codex binary not found")
                 _record_exit("codex_binary_not_found", returncode=rc)
                 return 127
-            consec_fail = consec_fail + 1 if rc not in (0, 124, 125) else 0
+            consec_fail = (
+                consec_fail + 1
+                if rc not in (0, 125) and (scientific or rc != 124)
+                else 0
+            )
             if max_fail and consec_fail >= max_fail:
                 write_status(wl, state="error", error=f"{consec_fail} consecutive failed rounds")
                 _record_exit("consecutive_failed_rounds", returncode=rc, count=consec_fail)

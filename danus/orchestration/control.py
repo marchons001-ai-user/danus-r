@@ -619,6 +619,54 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                     **extra,
                 )
                 resolve_ids.add(hid)
+                continue
+
+            required_effect = (
+                kind == "REVIEW"
+                and subject_type in {"IMPLEMENTATION_CONTRACT", "PLAN_CHANGE"}
+            ) or (
+                kind in {"REVISION", "RETHINK"}
+                and subject_type in {"IMPLEMENTATION_CONTRACT", "PLAN_CHANGE"}
+            )
+            if not required_effect:
+                continue
+            if int(handoff.get("attempt") or 0) < 2:
+                route(
+                    "REOPEN_HANDOFF",
+                    node_id=handoff.get("node_id"),
+                    assignment_id=assignment.get("assignment_id"),
+                    worker=assignment.get("worker"),
+                    reason="required_side_effect_missing",
+                    handoff_id=hid,
+                    handoff_kind=kind,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    target_role=target,
+                )
+                if target != "main":
+                    route(
+                        "ASSIGN_HANDOFF",
+                        node_id=handoff.get("node_id"),
+                        reason="governance_retry_ready",
+                        handoff_id=hid,
+                        handoff_kind=kind,
+                        subject_type=subject_type,
+                        subject_id=subject_id,
+                        target_role=target,
+                    )
+            else:
+                route(
+                    "WAIT",
+                    node_id=handoff.get("node_id"),
+                    assignment_id=assignment.get("assignment_id"),
+                    worker=assignment.get("worker"),
+                    reason="required_side_effect_missing_after_retry",
+                    handoff_id=hid,
+                    handoff_kind=kind,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    target_role=target,
+                )
 
         def review_ready(review: Optional[Dict[str, Any]]) -> bool:
             return bool(

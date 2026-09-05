@@ -842,6 +842,7 @@ def _materialize_tasks(pdir: Path, record: Dict[str, Any], version: int) -> List
 def _recover_materialized_tasks(pdir: Path) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     graph = ResearchPlanGraph(pdir)
+    current = graph.snapshot()
     directory = _proposal_dir(pdir)
     if not directory.is_dir():
         return actions
@@ -849,6 +850,13 @@ def _recover_materialized_tasks(pdir: Path) -> List[Dict[str, Any]]:
         try:
             record = _load_proposal_record(pdir, path.stem)
             change = graph.get_change(record["change_id"])
+            if (
+                change.get("status") != "COMMITTED"
+                and current.get("committed_change_id") == change.get("change_id")
+                and int(current["plan_version"]) == int(change.get("base_plan_version") or 0) + 1
+            ):
+                graph.commit_change(change["change_id"], committer="supervisor")
+                change = graph.get_change(change["change_id"])
             if change.get("status") != "COMMITTED" or not change.get("committed_version"):
                 continue
             written = _materialize_tasks(pdir, record, int(change["committed_version"]))

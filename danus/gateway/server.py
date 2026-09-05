@@ -589,12 +589,31 @@ def implementation_review_contract(
     verdict: str,
     rationale: str,
 ) -> Dict[str, Any]:
-    """Reviewer-only semantic verdict: APPROVE, REVISE, or REJECT."""
-    record = _pl().review_implementation_contract(
+    """Reviewer-only semantic verdict; exact retries return the durable verdict."""
+    ledger = _pl()
+    reviewer = _author()
+    normalized = str(verdict or "").strip().upper()
+    if normalized not in ProgressLedger.IMPLEMENTATION_VERDICTS:
+        raise ValueError(f"verdict must be one of {ProgressLedger.IMPLEMENTATION_VERDICTS}")
+    rationale_text = str(rationale or "").strip()
+    if not rationale_text:
+        raise ValueError("rationale is required")
+    current = ledger.implementation_contract(contract_id)
+    if current is not None:
+        existing_verdict = str(current.get("verdict") or "").upper()
+        if existing_verdict in ProgressLedger.IMPLEMENTATION_VERDICTS:
+            if (
+                existing_verdict == normalized
+                and str(current.get("reviewer") or "") == reviewer
+                and str(current.get("rationale") or "") == rationale_text
+            ):
+                return {"contract_id": contract_id, "status": current["status"]}
+            raise ValueError(f"conflicting replay for reviewed implementation contract {contract_id}")
+    record = ledger.review_implementation_contract(
         contract_id,
-        reviewer=_author(),
-        verdict=verdict,
-        rationale=rationale,
+        reviewer=reviewer,
+        verdict=normalized,
+        rationale=rationale_text,
     )
     return {"contract_id": contract_id, "status": record["status"]}
 
@@ -634,17 +653,42 @@ def plan_review_change(
     verdict: str = "",
     approve: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Reviewer-only verdict: APPROVE, REVISE, or REJECT.
-
-    ``approve`` remains a compatibility input for old tasks; new autonomous tasks
-    use the explicit three-way ``verdict``.
-    """
-    record = _pg().review_change(
+    """Reviewer-only verdict; exact retries return the already durable review."""
+    graph = _pg()
+    reviewer = _author()
+    if verdict and str(verdict).strip():
+        normalized = str(verdict).strip().upper()
+        if normalized not in ResearchPlanGraph.REVIEW_VERDICTS:
+            raise ValueError(f"verdict must be one of {ResearchPlanGraph.REVIEW_VERDICTS}")
+        if approve is not None and bool(approve) != (normalized == "APPROVE"):
+            raise ValueError("approve compatibility flag conflicts with explicit verdict")
+    else:
+        if approve is None:
+            raise ValueError("plan review requires verdict APPROVE, REVISE, or REJECT")
+        normalized = "APPROVE" if bool(approve) else "REVISE"
+    rationale_text = str(rationale or "").strip()
+    if not rationale_text:
+        raise ValueError("rationale is required")
+    current = graph.get_change(change_id)
+    existing_verdict = str(current.get("review_verdict") or "").upper()
+    if existing_verdict in ResearchPlanGraph.REVIEW_VERDICTS:
+        if (
+            existing_verdict == normalized
+            and str(current.get("reviewer") or "") == reviewer
+            and str(current.get("review_rationale") or "") == rationale_text
+        ):
+            return {
+                "change_id": change_id,
+                "status": current["status"],
+                "verdict": existing_verdict,
+            }
+        raise ValueError(f"conflicting replay for reviewed plan change {change_id}")
+    record = graph.review_change(
         change_id,
-        reviewer=_author(),
-        rationale=rationale,
-        verdict=verdict or None,
-        approve=approve,
+        reviewer=reviewer,
+        rationale=rationale_text,
+        verdict=normalized,
+        approve=None,
     )
     return {
         "change_id": change_id,

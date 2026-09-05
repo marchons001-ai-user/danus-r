@@ -701,6 +701,21 @@ def _apply_resource_budget(report: Dict[str, Any], rows: List[Dict[str, Any]], b
     report["budget_stop"] = reason
 
 
+def _clear_recovered_budget_pauses(
+    project: str,
+    rows: List[Dict[str, Any]],
+    budget: Dict[str, Any],
+) -> None:
+    """Clear only Supervisor-owned budget pauses after both budget checks are clear."""
+    if budget["time"]["exceeded"] or budget["tokens"]["exceeded"] is not False:
+        return
+    for row in rows:
+        wl = L.WorkerLayout(L.worker_dir(project, row["worker"]))
+        pause_reason = _pause_reason(wl)
+        if pause_reason and pause_reason.startswith("budget:"):
+            wl.pause.unlink(missing_ok=True)
+
+
 def _apply_quota_gate(project: str, rows: List[Dict[str, Any]], policy: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Persist/clear only quota-owned pauses; active rounds are never signalled."""
     block = bool(policy.get("block_new_codex_rounds"))
@@ -885,6 +900,8 @@ def _do_supervise_unlocked(
         reviewer_cost_applied = (
             [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=True)
         )
+        if not quiescent:
+            _clear_recovered_budget_pauses(project, rows, report["budget"])
         quota_applied = [] if quiescent else _apply_quota_gate(project, rows, policy)
         stable = False
         passes = 0

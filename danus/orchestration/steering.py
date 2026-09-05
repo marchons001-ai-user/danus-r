@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from danus.core import ProgressLedger
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write
 
@@ -69,11 +70,34 @@ def do_guide(project: str, text: str, *, interrupt: bool = False) -> Dict[str, A
     }
 
 
+def _resume_worker(project: str, worker: str) -> List[Dict[str, str]]:
+    pdir = L.project_dir(project)
+    ledger_path = pdir / "progress" / "ledger.jsonl"
+    row = do_status(f"{project}/{worker}")[0]
+    current = ProgressLedger(pdir).current(worker, refresh_stale=True) if ledger_path.is_file() else None
+
+    if current and current.get("state") == "BLOCKED":
+        outcome = str(current.get("outcome") or "").upper()
+        if outcome != "BLOCKED":
+            result = "needs-review" if outcome == "NEEDS_REVIEW" else "blocked"
+            return [{"worker": worker, "result": result}]
+        ProgressLedger(pdir).update(
+            worker=worker,
+            state="RUNNING",
+            actor="operator",
+            note="external prerequisite restored by explicit worker resume",
+        )
+    elif str(row.get("pause_reason") or "").startswith(("quota:", "budget:", "review:")):
+        return [{"worker": worker, "result": "system-paused"}]
+
+    return _legacy_resume(f"{project}/{worker}", stagger=0)
+
+
 def do_resume(target: str) -> List[Dict[str, str]]:
-    """Resume a project without starting planned workers that have no active assignment."""
+    """Resume explicit external blockers or active project work without broad unblock."""
     project, worker = L.resolve_target(target)
     if worker:
-        return _legacy_resume(target, stagger=0)
+        return _resume_worker(project, worker)
 
     pdir = L.project_dir(project)
     if not pdir.is_dir():
