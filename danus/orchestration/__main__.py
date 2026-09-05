@@ -19,6 +19,10 @@ if __name__ == "__main__":
         from .steering import resume_main
 
         sys.exit(resume_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "supervise":
+        from .supervisor_llm import supervise_main
+
+        sys.exit(supervise_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "tui":
         from danus.tui import main as tui_main
 
