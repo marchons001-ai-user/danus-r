@@ -836,6 +836,13 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                         review_assignment_id=str((review_assignment or {}).get("assignment_id") or ""),
                     )
 
+        competing_approved_change_ids = sorted(
+            str(item.get("change_id") or "")
+            for item in all_plan_changes
+            if _proposal_id_from_change(item)
+            and int(item.get("base_plan_version") or 0) == plan_version
+            and str(item.get("status") or "") == "APPROVED"
+        )
         for change in sorted(
             all_plan_changes,
             key=lambda item: (str(item.get("created_at") or ""), str(item.get("change_id") or "")),
@@ -869,7 +876,18 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                     )
                 continue
             if status == "APPROVED":
-                if review_ready(review):
+                if len(competing_approved_change_ids) > 1:
+                    route(
+                        "WAIT",
+                        node_id=plan.get("root_id"),
+                        reason="competing_approved_plan_changes",
+                        change_id=change_id,
+                        proposal_id=proposal_id,
+                        subject_type="PLAN_CHANGE",
+                        subject_id=change_id,
+                        competing_change_ids=competing_approved_change_ids,
+                    )
+                elif review_ready(review):
                     route(
                         "COMMIT_PLAN_CHANGE",
                         node_id=plan.get("root_id"),

@@ -995,12 +995,24 @@ def supervise_main(argv: List[str]) -> int:
     if args.watch:
         if args.complete_node or args.reopen_node:
             raise SystemExit("--watch cannot be combined with node state mutation")
-        for report in CLI.watch_supervisor(
-            args.project,
-            heartbeat=args.heartbeat,
-            poll=args.poll,
-            token_budget=args.token_budget,
-        ):
+        from . import planning
+
+        watcher = (
+            planning.watch_research(
+                args.project,
+                heartbeat=args.heartbeat,
+                poll=args.poll,
+                token_budget=args.token_budget,
+            )
+            if (L.project_dir(args.project) / planning.BRIEF_FILE).is_file()
+            else CLI.watch_supervisor(
+                args.project,
+                heartbeat=args.heartbeat,
+                poll=args.poll,
+                token_budget=args.token_budget,
+            )
+        )
+        for report in watcher:
             routed = _route_report(args.project, report, args.token_budget)
             print(json.dumps(routed, ensure_ascii=False, sort_keys=True), flush=True)
         return 0

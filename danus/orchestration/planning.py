@@ -949,6 +949,15 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
     graph = ResearchPlanGraph(pdir)
     route_actions = cli.reconcile(pdir, cli._project_rows(project))["actions"]
     linked = [item for item in graph.pending_changes() if _proposal_id_from_change(item)]
+    approved = [item for item in linked if item.get("status") == "APPROVED"]
+    if len(approved) > 1:
+        actions.append({
+            "action": "PLAN_GOVERNANCE",
+            "result": "blocked",
+            "reason": "competing_approved_plan_changes",
+            "change_ids": sorted(str(item["change_id"]) for item in approved),
+        })
+        return actions
     if linked:
         change = linked[0]
         proposal_id = _proposal_id_from_change(change)
