@@ -184,7 +184,7 @@ def test_manual_apply_consults_only_after_stable_deterministic_supervision(monke
     calls = []
     monkeypatch.setattr(
         S,
-        "consult_scientific_routes",
+        "resolve_scientific_routes",
         lambda root, actions: calls.append((root, actions)) or [{"status": "valid", "route": "INTERPRET"}],
     )
 
@@ -215,7 +215,7 @@ def test_manual_apply_gates_prevent_llm_call(monkeypatch, capsys, override):
     monkeypatch.setattr(CLI, "do_supervise", lambda *args, **kwargs: dict(report))
     monkeypatch.setattr(
         S,
-        "consult_scientific_routes",
+        "resolve_scientific_routes",
         lambda *args, **kwargs: pytest.fail("restricted LLM must not run behind this gate"),
     )
 
@@ -224,15 +224,14 @@ def test_manual_apply_gates_prevent_llm_call(monkeypatch, capsys, override):
     assert rendered["scientific_route_decisions"] == []
 
 
-@pytest.mark.parametrize("argv", [["project-x"], ["project-x", "--watch"]])
-def test_dry_run_and_watch_delegate_without_llm(monkeypatch, argv):
+def test_dry_run_delegates_without_llm(monkeypatch):
     delegated = []
     monkeypatch.setattr(CLI, "main", lambda passed: delegated.append(passed) or 0)
     monkeypatch.setattr(
         S,
-        "consult_scientific_routes",
-        lambda *args, **kwargs: pytest.fail("dry-run/watch must not call restricted LLM"),
+        "resolve_scientific_routes",
+        lambda *args, **kwargs: pytest.fail("dry-run must not call restricted LLM"),
     )
 
-    assert S.supervise_main(argv) == 0
-    assert delegated == [["supervise", *argv]]
+    assert S.supervise_main(["project-x"]) == 0
+    assert delegated == [["supervise", "project-x"]]

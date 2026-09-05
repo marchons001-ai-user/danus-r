@@ -31,7 +31,9 @@ danus/orchestration/
 - Liveness is **zombie-aware** (`os.kill(pid,0)` + a `/proc/<pid>/stat` Z-state
   check), so `status`/`list` don't lie and `start` can restart a crashed worker.
 - `supervise --watch` polls only small control/liveness state and reconciles on a
-  change; unchanged projects use the coarse heartbeat. It does not run an LLM.
+  change; unchanged projects use the coarse heartbeat. Deterministic paths do not
+  run an LLM. Only `SCIENTIFIC_ROUTE_REQUIRED` may invoke the restricted Luna/low
+  router, and its durable decision is replayed instead of calling Luna again.
 - Per-session context budgets/rollover remain in `danus.execution.context`; frozen
   experiment `matrix.units` remains the experiment execution budget. Supervisor
   observes both rather than duplicating either mechanism.

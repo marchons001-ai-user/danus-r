@@ -360,8 +360,8 @@ def _generic_review_task(source: Dict[str, Any]) -> str:
 def _routing_label(action: Dict[str, Any]) -> str:
     subject_type = str(action.get("subject_type") or "")
     kind = str(action.get("handoff_kind") or "")
-    if kind == "INTERPRET":
-        return "INTERPRET"
+    if kind in {"INTERPRET", "RETHINK"}:
+        return kind
     if subject_type == "IMPLEMENTATION_CONTRACT":
         return "IMPLEMENTATION_REVIEW" if kind == "REVIEW" else "IMPLEMENTATION_CORRECTION"
     if subject_type == "ASSIGNMENT":

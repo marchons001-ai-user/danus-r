@@ -585,6 +585,8 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             extra: Dict[str, Any] = {}
             if kind == "INTERPRET":
                 summary = "interpretation request completed; source disposition remains explicit"
+            elif kind == "RETHINK" and subject_type == "ASSIGNMENT":
+                summary = "assignment rethink completed; source disposition remains explicit"
             elif kind == "REVIEW" and subject_type == "ASSIGNMENT":
                 summary = "generic assignment review completed; source disposition remains explicit"
             elif kind == "REVIEW" and subject_type == "IMPLEMENTATION_CONTRACT":
@@ -759,8 +761,7 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             source_id = str(source["assignment_id"])
             if any(
-                item.get("status") in {"OPEN", "ASSIGNED"}
-                and item.get("kind") in {"INTERPRET", "RETHINK", "ESCALATE"}
+                item.get("kind") in {"INTERPRET", "RETHINK", "ESCALATE"}
                 and item.get("subject_type") == "ASSIGNMENT"
                 and item.get("subject_id") == source_id
                 for item in handoffs
