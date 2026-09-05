@@ -427,6 +427,17 @@ def _cleanup_pid(wl: L.WorkerLayout) -> None:
         pass
 
 
+def _assignment_task_matches(wl: L.WorkerLayout, assignment: dict) -> bool:
+    expected = str(assignment.get("task_sha256") or "")
+    if not expected:
+        return False
+    try:
+        task = wl.task.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return ProgressLedger.task_sha256(task) == expected
+
+
 def main(worker_dir: str) -> int:
     wdir = Path(worker_dir).resolve()
     if not wdir.is_dir():
@@ -581,6 +592,33 @@ def main(worker_dir: str) -> int:
             if round_limit and rnd >= round_limit:
                 write_status(wl, state="max_rounds")
                 _record_exit("max_rounds")
+                break
+            if round_assignment is not None and not _assignment_task_matches(wl, round_assignment):
+                assignment_id = str(round_assignment.get("assignment_id") or "")
+                try:
+                    ledger.update(
+                        worker=worker,
+                        state="BLOCKED",
+                        actor="runtime",
+                        note="TASK.md does not match assignment task_sha256",
+                        outcome="BLOCKED",
+                        expected_assignment_id=assignment_id,
+                    )
+                except ValueError:
+                    latest = ledger.current(worker, refresh_stale=True)
+                    latest_id = str((latest or {}).get("assignment_id") or "")
+                    if assignment_id and latest_id != assignment_id:
+                        continue
+                    raise
+                write_status(
+                    wl,
+                    state="stopped",
+                    progress_state="BLOCKED",
+                    terminal_outcome="BLOCKED",
+                    assignment_id=assignment_id,
+                    error="assignment_task_mismatch",
+                )
+                _record_exit("assignment_task_mismatch", assignment_id=assignment_id)
                 break
 
             rnd += 1

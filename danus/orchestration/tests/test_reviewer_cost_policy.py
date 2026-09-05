@@ -103,7 +103,12 @@ def test_dsh_quota_failure_is_bound_to_current_assignment(tmp_path: Path, monkey
 
     class Ledger:
         def current(self, worker, refresh_stale=True):
-            return {"assignment_id": "assignment-1", "state": "RUNNING", "outcome": None}
+            return {
+                "assignment_id": "assignment-1",
+                "state": "RUNNING",
+                "outcome": None,
+                "task_sha256": loop.ProgressLedger.task_sha256(wl.task.read_text(encoding="utf-8")),
+            }
 
         def runtime_event(self, **event):
             events.append(event)
