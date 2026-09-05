@@ -72,7 +72,17 @@ def _setup_ambiguity(root: Path):
         task=review["request"],
         handoff_id=review["handoff_id"],
     )
-    ledger.update(worker="reviewer", state="DONE", actor="runtime", outcome="COMPLETE")
+    ledger.update(
+        worker="reviewer",
+        state="DONE",
+        actor="runtime",
+        outcome="COMPLETE",
+        result=(
+            "review complete; disposition remains ambiguous\n"
+            "DANUS_REVIEW_CLASS: SCIENTIFIC_AMBIGUITY\n"
+            "DANUS_OUTCOME: COMPLETE"
+        ),
+    )
     C.write_checkpoint(
         reviewer_dir,
         role="reviewer",

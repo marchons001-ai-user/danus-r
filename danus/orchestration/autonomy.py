@@ -353,7 +353,11 @@ def _generic_review_task(source: Dict[str, Any]) -> str:
         f"Source note:\n{note}\n\n"
         "Inspect the source task/workspace and use only your existing role-authorized tools when a concrete action "
         "is already justified. This generic review has no universal APPROVE/REVISE/REJECT semantics: do not invent "
-        "a generic verdict or mutate unrelated Plan/Contract state. End with COMPLETE when the review itself is done.\n"
+        "a generic verdict or mutate unrelated Plan/Contract state. Classify only whether a bounded scientific route "
+        "choice remains after deterministic handling: end with exactly one standalone line "
+        "`DANUS_REVIEW_CLASS: SCIENTIFIC_AMBIGUITY` when INTERPRET/RETHINK/ESCALATE still requires scientific "
+        "judgment, otherwise `DANUS_REVIEW_CLASS: DETERMINISTIC` for engineering/runtime/data/evidence/governance "
+        "cases or any case with an existing deterministic path. Then end with COMPLETE.\n"
     )
 
 

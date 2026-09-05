@@ -114,7 +114,10 @@ class ResearchPlanGraph:
             return []
 
         kind = str(handoff.get("kind") or "")
-        if kind == "INTERPRET":
+        if (
+            kind in {"INTERPRET", "RETHINK"}
+            and handoff.get("subject_type") == "ASSIGNMENT"
+        ):
             return self._clean_refs(list(handoff.get("evidence_refs") or []))
         if (
             kind in {"REVISION", "RETHINK"}

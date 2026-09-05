@@ -88,7 +88,17 @@ def _ambiguity(root: Path, *, source_role: str = "experimenter"):
         task=review["request"],
         handoff_id=review["handoff_id"],
     )
-    ledger.update(worker="reviewer", state="DONE", actor="runtime", outcome="COMPLETE")
+    ledger.update(
+        worker="reviewer",
+        state="DONE",
+        actor="runtime",
+        outcome="COMPLETE",
+        result=(
+            "REVIEW: evidence valid, conclusion ambiguous\n"
+            "DANUS_REVIEW_CLASS: SCIENTIFIC_AMBIGUITY\n"
+            "DANUS_OUTCOME: COMPLETE"
+        ),
+    )
     C.write_checkpoint(
         reviewer_dir,
         role="reviewer",

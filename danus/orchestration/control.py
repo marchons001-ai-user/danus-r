@@ -19,6 +19,8 @@ from danus.execution import layout as L
 
 _FIVE_HOURS_SECONDS = 5 * 60 * 60
 _QUOTA_SNAPSHOT_MAX_AGE_SECONDS = 15 * 60
+_GENERIC_REVIEW_PREFIX = "DANUS_REVIEW_CLASS:"
+_GENERIC_REVIEW_CLASSES = {"SCIENTIFIC_AMBIGUITY", "DETERMINISTIC"}
 
 
 def _snapshot_age(snapshot: Dict[str, Any], now: float) -> Optional[float]:
@@ -232,6 +234,20 @@ def _latest_handoff(
 
 def _contract_status(contract: Dict[str, Any]) -> str:
     return str(contract.get("gate_status") or contract.get("status") or "").upper()
+
+
+def generic_review_class(assignment: Optional[Dict[str, Any]]) -> str:
+    """Return the one explicit generic-review routing class, or fail closed."""
+    if not assignment:
+        return ""
+    markers = []
+    for raw in str(assignment.get("result") or "").splitlines():
+        line = raw.strip()
+        if line.startswith(_GENERIC_REVIEW_PREFIX):
+            markers.append(line[len(_GENERIC_REVIEW_PREFIX):].strip())
+    if len(markers) != 1 or markers[0] not in _GENERIC_REVIEW_CLASSES:
+        return ""
+    return markers[0]
 
 
 def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -788,19 +804,37 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 )
             elif review_ready(review):
                 review_assignment = handoff_assignment(review)
-                route(
-                    "SCIENTIFIC_ROUTE_REQUIRED",
-                    node_id=source.get("node_id"),
-                    assignment_id=source_id,
-                    worker=source.get("worker"),
-                    reason="review_completed_source_disposition_ambiguous",
-                    subject_type="ASSIGNMENT",
-                    subject_id=source_id,
-                    source_role=str(source.get("role") or "researcher"),
-                    review_handoff_id=str(review.get("handoff_id") or ""),
-                    review_assignment_id=str((review_assignment or {}).get("assignment_id") or ""),
-                    candidate_routes=["INTERPRET", "RETHINK", "ESCALATE"],
-                )
+                review_class = generic_review_class(review_assignment)
+                if review_class == "SCIENTIFIC_AMBIGUITY":
+                    route(
+                        "SCIENTIFIC_ROUTE_REQUIRED",
+                        node_id=source.get("node_id"),
+                        assignment_id=source_id,
+                        worker=source.get("worker"),
+                        reason="review_completed_source_disposition_ambiguous",
+                        subject_type="ASSIGNMENT",
+                        subject_id=source_id,
+                        source_role=str(source.get("role") or "researcher"),
+                        review_handoff_id=str(review.get("handoff_id") or ""),
+                        review_assignment_id=str((review_assignment or {}).get("assignment_id") or ""),
+                        candidate_routes=["INTERPRET", "RETHINK", "ESCALATE"],
+                    )
+                else:
+                    route(
+                        "WAIT",
+                        node_id=source.get("node_id"),
+                        assignment_id=source_id,
+                        worker=source.get("worker"),
+                        reason=(
+                            "generic_review_deterministic"
+                            if review_class == "DETERMINISTIC"
+                            else "generic_review_class_invalid"
+                        ),
+                        subject_type="ASSIGNMENT",
+                        subject_id=source_id,
+                        review_handoff_id=str(review.get("handoff_id") or ""),
+                        review_assignment_id=str((review_assignment or {}).get("assignment_id") or ""),
+                    )
 
         for change in sorted(
             all_plan_changes,

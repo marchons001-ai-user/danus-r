@@ -23,6 +23,7 @@ from danus.core._util import append_jsonl, read_jsonl, utc_now
 from danus.core.handoff import HandoffRequests
 from danus.execution import context as C
 from danus.execution import layout as L
+from danus.orchestration.control import generic_review_class
 
 _MODEL = "gpt-5.6-luna"
 _EFFORT = "low"
@@ -59,43 +60,42 @@ def _checkpoint_message(root: Path, assignment: Dict[str, Any]) -> str:
     return message[-_MAX_MESSAGE_CHARS:]
 
 
-def build_route_packet(root: Path, action: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the smallest verified context needed for one bounded route choice."""
-    root = Path(root)
+def _route_context(root: Path, action: Dict[str, Any]) -> Dict[str, Any]:
+    """Revalidate the durable Assignment/Review authority for one S6 route."""
     if action.get("kind") != "SCIENTIFIC_ROUTE_REQUIRED":
         raise ValueError("action is not a scientific routing ambiguity")
     if action.get("candidate_routes") != list(_ROUTES):
         raise ValueError("scientific route candidates do not match the S6-A contract")
 
-    plan = ResearchPlanGraph(root).snapshot()
-    plan_version = int(action.get("plan_version") or 0)
-    if plan_version != int(plan["plan_version"]):
-        raise ValueError("scientific routing action has stale plan_version")
-    node_id = str(action.get("node_id") or "")
-    node = plan["nodes"].get(node_id)
-    if not node or node.get("state") != "ACTIVE":
-        raise ValueError("scientific routing action does not target an active plan node")
-
     ledger = ProgressLedger(root)
     assignments = ledger.assignments()
     source_id = str(action.get("subject_id") or "")
     source = _assignment(assignments, source_id)
+    worker = str(source.get("worker") or "")
+    current = ledger.current(worker, refresh_stale=False) if worker else None
+    node_id = str(action.get("node_id") or "")
+    plan_version = int(action.get("plan_version") or 0)
     if (
-        source.get("state") != "BLOCKED"
+        not current
+        or current.get("assignment_id") != source_id
+        or source.get("state") != "BLOCKED"
         or source.get("outcome") != "NEEDS_REVIEW"
         or source.get("node_id") != node_id
         or int(source.get("plan_version") or 0) != plan_version
     ):
         raise ValueError("source assignment no longer matches the scientific ambiguity")
 
+    handoffs = HandoffRequests(ledger)
     review_id = str(action.get("review_handoff_id") or "")
-    review = HandoffRequests(ledger).get(review_id)
+    review = handoffs.get(review_id)
     if (
         not review
         or review.get("status") != "RESOLVED"
         or review.get("kind") != "REVIEW"
         or review.get("subject_type") != "ASSIGNMENT"
         or review.get("subject_id") != source_id
+        or review.get("node_id") != node_id
+        or int(review.get("plan_version") or 0) != plan_version
     ):
         raise ValueError("completed generic review is unavailable")
 
@@ -108,7 +108,48 @@ def build_route_packet(root: Path, action: Dict[str, Any]) -> Dict[str, Any]:
         or str(review_assignment.get("role") or "").lower() != "reviewer"
     ):
         raise ValueError("review assignment is not a completed Reviewer result")
+    if generic_review_class(review_assignment) != "SCIENTIFIC_AMBIGUITY":
+        raise ValueError("generic review did not authorize scientific routing")
 
+    evidence_refs: List[str] = []
+    source_handoff_id = str(source.get("handoff_id") or "")
+    if source_handoff_id:
+        source_handoff = handoffs.get(source_handoff_id)
+        if source_handoff:
+            evidence_refs = list(dict.fromkeys(
+                str(value).strip()
+                for value in (source_handoff.get("evidence_refs") or [])
+                if str(value).strip()
+            ))
+    return {
+        "ledger": ledger,
+        "source": source,
+        "review": review,
+        "review_assignment": review_assignment,
+        "evidence_refs": evidence_refs,
+    }
+
+
+def build_route_packet(root: Path, action: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the smallest verified context needed for one bounded route choice."""
+    root = Path(root)
+    context = _route_context(root, action)
+
+    plan = ResearchPlanGraph(root).snapshot()
+    plan_version = int(action.get("plan_version") or 0)
+    if plan_version != int(plan["plan_version"]):
+        raise ValueError("scientific routing action has stale plan_version")
+    node_id = str(action.get("node_id") or "")
+    node = plan["nodes"].get(node_id)
+    if not node or node.get("state") != "ACTIVE":
+        raise ValueError("scientific routing action does not target an active plan node")
+
+    source = context["source"]
+    review = context["review"]
+    review_assignment = context["review_assignment"]
+    source_id = str(source["assignment_id"])
+    review_id = str(review["handoff_id"])
+    review_assignment_id = str(review_assignment["assignment_id"])
     basis = [
         f"node:{node_id}",
         f"source_assignment:{source_id}",
@@ -125,6 +166,7 @@ def build_route_packet(root: Path, action: Dict[str, Any]) -> Dict[str, Any]:
             "role": source.get("role"),
             "worker": source.get("worker"),
             "note": source.get("note"),
+            "evidence_refs": list(context["evidence_refs"]),
             "final_message": _checkpoint_message(root, source),
         },
         "review": {
@@ -349,6 +391,7 @@ def _handoff_request(
     review_id = str(action.get("review_handoff_id") or "")
     evidence = ""
     if packet:
+        refs = list(packet["source"].get("evidence_refs") or [])
         evidence = (
             "\nSource final result:\n"
             + str(packet["source"].get("final_message") or "")
@@ -356,6 +399,10 @@ def _handoff_request(
             + str(packet["review"].get("final_message") or "")
             + "\n"
         )
+        if refs:
+            evidence += "\nInherited Evidence Records (immutable):\n" + "".join(
+                f"- `{evidence_id}`\n" for evidence_id in refs
+            )
     common = (
         "# Supervisor Scientific Route\n\n"
         f"Decision `{decision_key}` routes source assignment `{source_id}` after generic review "
@@ -417,6 +464,7 @@ def _decision_event(
         "decision_key": decision_key,
         **identity,
         "source_role": str(action.get("source_role") or "researcher"),
+        "evidence_refs": list((packet or {}).get("source", {}).get("evidence_refs") or []),
         "route": route,
         "rationale": rationale,
         "basis": list(basis),
@@ -447,10 +495,19 @@ def _persist_route_decision(
     return persisted
 
 
-def _materialize_decision(ledger: ProgressLedger, decision: Dict[str, Any]) -> Dict[str, Any]:
+def _materialize_decision(
+    ledger: ProgressLedger,
+    decision: Dict[str, Any],
+    *,
+    evidence_refs: List[str] | None = None,
+) -> Dict[str, Any]:
     handoffs = HandoffRequests(ledger)
     subject_id = str(decision["subject_id"])
     route = str(decision["route"])
+    raw_refs = decision.get("evidence_refs") if "evidence_refs" in decision else (evidence_refs or [])
+    refs = list(dict.fromkeys(
+        str(value).strip() for value in (raw_refs or []) if str(value).strip()
+    ))
     lineage = [
         item
         for item in handoffs.all()
@@ -474,6 +531,8 @@ def _materialize_decision(ledger: ProgressLedger, decision: Dict[str, Any]) -> D
         }
         if any(current.get(key) != value for key, value in expected.items()):
             raise ValueError("existing scientific route handoff conflicts with durable decision")
+        if list(current.get("evidence_refs") or []) != refs:
+            raise ValueError("existing scientific route evidence conflicts with durable decision")
         if str(current.get("request") or "").strip() != str(decision["request"]).strip():
             raise ValueError("existing scientific route request conflicts with durable decision")
         return current
@@ -490,6 +549,7 @@ def _materialize_decision(ledger: ProgressLedger, decision: Dict[str, Any]) -> D
         parent_handoff_id=str(decision["review_handoff_id"]),
         request=str(decision["request"]),
         reason=str(decision["handoff_reason"]),
+        evidence_refs=refs,
     )
 
 
@@ -610,7 +670,28 @@ def resolve_scientific_routes(root: Path, actions: List[Dict[str, Any]]) -> List
                     continue
 
             try:
-                handoff = _materialize_decision(ledger, decision)
+                context = _route_context(root, action)
+            except ValueError as exc:
+                out.append({
+                    "decision_key": decision_key,
+                    "subject_id": subject_id,
+                    "status": "persisted_unmaterialized",
+                    "route": decision.get("route"),
+                    "decision_source": decision.get("decision_source"),
+                    "error": f"route_context_invalid:{exc}",
+                    "model": _MODEL,
+                    "effort": _EFFORT,
+                    "usage": usage,
+                    "replayed": replayed,
+                })
+                continue
+
+            try:
+                handoff = _materialize_decision(
+                    ledger,
+                    decision,
+                    evidence_refs=list(context["evidence_refs"]),
+                )
             except ValueError as exc:
                 out.append({
                     "decision_key": decision_key,

@@ -37,7 +37,13 @@ def _needs_review_source(root: Path):
     return ledger, source
 
 
-def _generic_review(ledger: ProgressLedger, source, *, complete: bool):
+def _generic_review(
+    ledger: ProgressLedger,
+    source,
+    *,
+    complete: bool,
+    review_class: str = "SCIENTIFIC_AMBIGUITY",
+):
     handoffs = HandoffRequests(ledger)
     review = handoffs.open(
         kind="REVIEW",
@@ -60,7 +66,17 @@ def _generic_review(ledger: ProgressLedger, source, *, complete: bool):
         handoff_id=review["handoff_id"],
     )
     if complete:
-        ledger.update(worker="reviewer", state="DONE", actor="runtime", outcome="COMPLETE")
+        ledger.update(
+            worker="reviewer",
+            state="DONE",
+            actor="runtime",
+            outcome="COMPLETE",
+            result=(
+                "review complete\n"
+                f"DANUS_REVIEW_CLASS: {review_class}\n"
+                "DANUS_OUTCOME: COMPLETE"
+            ),
+        )
     return review, assignment
 
 

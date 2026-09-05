@@ -188,7 +188,11 @@ def test_reused_reviewer_keeps_completed_result_for_route(tmp_path, monkeypatch)
         if str(item.get("role") or "").lower() == "reviewer"
         and item.get("state") == "DONE"
     )
-    immutable = "REVIEW A: evidence valid, conclusion ambiguous\nDANUS_OUTCOME: COMPLETE"
+    immutable = (
+        "REVIEW A: evidence valid, conclusion ambiguous\n"
+        "DANUS_REVIEW_CLASS: SCIENTIFIC_AMBIGUITY\n"
+        "DANUS_OUTCOME: COMPLETE"
+    )
     ledger.update(
         worker="reviewer",
         state="DONE",
