@@ -8,6 +8,7 @@ under ``plan/revisions``; ``current.json`` must match its committed revision.
 from __future__ import annotations
 
 import copy
+import fcntl
 import hashlib
 import json
 from pathlib import Path
@@ -292,47 +293,49 @@ class ResearchPlanGraph:
 
     def commit_change(self, change_id: str, *, committer: str) -> int:
         """Commit one Reviewer-approved request as exactly one new plan revision."""
-        record = self.get_change(change_id)
-        current = self.snapshot()
+        with (self.dir / ".commit.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            record = self.get_change(change_id)
+            current = self.snapshot()
 
-        # Idempotent recovery if current.json was replaced before the change record
-        # was marked COMMITTED.
-        if (
-            current.get("committed_change_id") == change_id
-            and current["plan_version"] == record["base_plan_version"] + 1
-        ):
-            if record["status"] != "COMMITTED":
-                record["status"] = "COMMITTED"
-                record["committer"] = self._required(committer, "committer")
-                record["committed_at"] = utc_now()
-                record["committed_version"] = current["plan_version"]
+            # Idempotent recovery if current.json was replaced before the change record
+            # was marked COMMITTED.
+            if (
+                current.get("committed_change_id") == change_id
+                and current["plan_version"] == record["base_plan_version"] + 1
+            ):
+                if record["status"] != "COMMITTED":
+                    record["status"] = "COMMITTED"
+                    record["committer"] = self._required(committer, "committer")
+                    record["committed_at"] = utc_now()
+                    record["committed_version"] = current["plan_version"]
+                    self._write_json(self._change_path(change_id), record)
+                return current["plan_version"]
+
+            if record["status"] != "APPROVED":
+                raise ValueError(f"change {change_id} is not approved")
+            if record["base_plan_version"] != current["plan_version"]:
+                record["status"] = "STALE"
                 self._write_json(self._change_path(change_id), record)
-            return current["plan_version"]
+                raise ValueError(
+                    f"stale change {change_id}: base {record['base_plan_version']}, "
+                    f"current {current['plan_version']}"
+                )
 
-        if record["status"] != "APPROVED":
-            raise ValueError(f"change {change_id} is not approved")
-        if record["base_plan_version"] != current["plan_version"]:
-            record["status"] = "STALE"
+            candidate = copy.deepcopy(current)
+            self._apply_operations(candidate, record["operations"])
+            candidate["plan_version"] = current["plan_version"] + 1
+            candidate["committed_change_id"] = change_id
+            self._validate(candidate)
+            self._write_revision(candidate)
+            self._write_current(candidate)
+
+            record["status"] = "COMMITTED"
+            record["committer"] = self._required(committer, "committer")
+            record["committed_at"] = utc_now()
+            record["committed_version"] = candidate["plan_version"]
             self._write_json(self._change_path(change_id), record)
-            raise ValueError(
-                f"stale change {change_id}: base {record['base_plan_version']}, "
-                f"current {current['plan_version']}"
-            )
-
-        candidate = copy.deepcopy(current)
-        self._apply_operations(candidate, record["operations"])
-        candidate["plan_version"] = current["plan_version"] + 1
-        candidate["committed_change_id"] = change_id
-        self._validate(candidate)
-        self._write_revision(candidate)
-        self._write_current(candidate)
-
-        record["status"] = "COMMITTED"
-        record["committer"] = self._required(committer, "committer")
-        record["committed_at"] = utc_now()
-        record["committed_version"] = candidate["plan_version"]
-        self._write_json(self._change_path(change_id), record)
-        return candidate["plan_version"]
+            return candidate["plan_version"]
 
     def _upgrade_v1(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """One-time migration for A2-6a plans created before revision history."""
