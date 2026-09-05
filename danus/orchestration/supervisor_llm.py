@@ -742,28 +742,63 @@ def _route_consumed(ledger: ProgressLedger, source_id: str, handoff_id: str) -> 
     )
 
 
-def apply_scientific_route_dispositions(project: str) -> List[Dict[str, Any]]:
-    """Close completed Assignment routes without adding a second routing decision layer."""
+def apply_scientific_route_dispositions(
+    project: str,
+    token_budget: int = 0,
+) -> List[Dict[str, Any]]:
+    """Consume completed Assignment routes only while the control plane permits progress."""
     from . import cli as CLI
 
     root = L.project_dir(project)
     out: List[Dict[str, Any]] = []
     with CLI.project_control_lock(root):
         ledger = ProgressLedger(root)
+        routes = [
+            handoff
+            for handoff in HandoffRequests(ledger).all()
+            if handoff.get("kind") in {"INTERPRET", "RETHINK"}
+            and handoff.get("subject_type") == "ASSIGNMENT"
+            and handoff.get("status") == "RESOLVED"
+        ]
+        if not routes:
+            return out
+
+        control = CLI._do_supervise_unlocked(
+            project,
+            apply=False,
+            token_budget=token_budget,
+            trigger="scientific_route_disposition_check",
+        )
+        if control.get("project_state") != "RUNNING":
+            reason = f"project_state:{control.get('project_state') or 'UNKNOWN'}"
+            return [
+                {
+                    "handoff_id": handoff["handoff_id"],
+                    "source_assignment_id": str(handoff.get("subject_id") or ""),
+                    "result": "blocked",
+                    "reason": reason,
+                }
+                for handoff in routes
+            ]
+        if control.get("budget_stop"):
+            reason = str(control["budget_stop"])
+            return [
+                {
+                    "handoff_id": handoff["handoff_id"],
+                    "source_assignment_id": str(handoff.get("subject_id") or ""),
+                    "result": "blocked",
+                    "reason": reason,
+                }
+                for handoff in routes
+            ]
+
         assignments = {
             str(item.get("assignment_id") or ""): item
             for item in ledger.assignments()
             if item.get("assignment_id")
         }
-        plan = ResearchPlanGraph(root).snapshot()
         completed = set(ledger.completed_nodes())
-        for handoff in HandoffRequests(ledger).all():
-            if (
-                handoff.get("kind") not in {"INTERPRET", "RETHINK"}
-                or handoff.get("subject_type") != "ASSIGNMENT"
-                or handoff.get("status") != "RESOLVED"
-            ):
-                continue
+        for handoff in routes:
             source_id = str(handoff.get("subject_id") or "")
             source = assignments.get(source_id)
             route_assignment_id = str(handoff.get("resolution_assignment_id") or "")
@@ -776,14 +811,28 @@ def apply_scientific_route_dispositions(project: str) -> List[Dict[str, Any]]:
                 or str(route_assignment.get("role") or "").lower() != "researcher"
             ):
                 continue
-            node_id = str(handoff.get("node_id") or "")
-            node = plan["nodes"].get(node_id)
-            if (
-                int(handoff.get("plan_version") or 0) != int(plan["plan_version"])
-                or not node
-                or node.get("state") != "ACTIVE"
-            ):
+
+            source_stale = ledger._is_plan_stale(source)
+            route_stale = ledger._is_plan_stale(route_assignment)
+            if source_stale or route_stale:
+                worker = str(source.get("worker") or "")
+                if worker:
+                    current = ledger.current(worker, refresh_stale=True)
+                    if current and current.get("assignment_id") == source_id:
+                        assignments[source_id] = current
+                out.append({
+                    "handoff_id": handoff["handoff_id"],
+                    "source_assignment_id": source_id,
+                    "result": "stale",
+                    "reason": (
+                        "source_plan_binding_stale"
+                        if source_stale
+                        else "route_plan_binding_stale"
+                    ),
+                })
                 continue
+
+            node_id = str(handoff.get("node_id") or "")
             if _proposal_from_route(root, route_assignment_id):
                 out.append({
                     "handoff_id": handoff["handoff_id"],
@@ -793,6 +842,8 @@ def apply_scientific_route_dispositions(project: str) -> List[Dict[str, Any]]:
                 continue
 
             source_role = str(source.get("role") or "").lower()
+            source_worker = str(source.get("worker") or "")
+            wl = L.WorkerLayout(L.worker_dir(project, source_worker)) if source_worker else None
             if source_role == "experimenter":
                 consumed = _route_consumed(ledger, source_id, handoff["handoff_id"])
                 if consumed:
@@ -802,8 +853,19 @@ def apply_scientific_route_dispositions(project: str) -> List[Dict[str, Any]]:
                             "source_assignment_id": source_id,
                             "result": "awaiting_human",
                         })
-                    elif source.get("state") in {"ASSIGNED", "RUNNING"}:
-                        start_result = CLI._start_one(L.WorkerLayout(L.worker_dir(project, str(source["worker"]))))
+                    elif source.get("state") in {"ASSIGNED", "RUNNING"} and wl is not None:
+                        pause_reason = CLI._pause_reason(wl)
+                        if pause_reason and pause_reason != "review:assignment_needs_review":
+                            out.append({
+                                "handoff_id": handoff["handoff_id"],
+                                "source_assignment_id": source_id,
+                                "result": "paused",
+                                "reason": pause_reason,
+                            })
+                            continue
+                        if pause_reason == "review:assignment_needs_review":
+                            wl.pause.unlink(missing_ok=True)
+                        start_result = CLI._start_one(wl)
                         out.append({
                             "handoff_id": handoff["handoff_id"],
                             "source_assignment_id": source_id,
@@ -813,21 +875,35 @@ def apply_scientific_route_dispositions(project: str) -> List[Dict[str, Any]]:
                     continue
                 if source.get("state") != "BLOCKED" or source.get("outcome") != "NEEDS_REVIEW":
                     continue
+                if wl is None:
+                    continue
+                pause_reason = CLI._pause_reason(wl)
+                if pause_reason and pause_reason != "review:assignment_needs_review":
+                    out.append({
+                        "handoff_id": handoff["handoff_id"],
+                        "source_assignment_id": source_id,
+                        "result": "paused",
+                        "reason": pause_reason,
+                    })
+                    continue
                 try:
                     result = _checkpoint_message(root, route_assignment)
                 except ValueError:
                     continue
+                if pause_reason == "review:assignment_needs_review":
+                    wl.pause.unlink(missing_ok=True)
                 note = (
                     f"resumed after scientific route {handoff['handoff_id']}\n\n"
                     f"{handoff['kind']} result:\n{result}"
                 )
                 ledger.update(
-                    worker=str(source["worker"]),
+                    worker=source_worker,
                     state="RUNNING",
                     actor="supervisor",
                     note=note,
+                    expected_assignment_id=source_id,
                 )
-                start_result = CLI._start_one(L.WorkerLayout(L.worker_dir(project, str(source["worker"]))))
+                start_result = CLI._start_one(wl)
                 out.append({
                     "handoff_id": handoff["handoff_id"],
                     "source_assignment_id": source_id,
@@ -837,10 +913,23 @@ def apply_scientific_route_dispositions(project: str) -> List[Dict[str, Any]]:
                 continue
 
             if source_role == "researcher" and node_id not in completed:
+                if wl is None:
+                    continue
+                pause_reason = CLI._pause_reason(wl)
+                if pause_reason and pause_reason != "review:assignment_needs_review":
+                    out.append({
+                        "handoff_id": handoff["handoff_id"],
+                        "source_assignment_id": source_id,
+                        "result": "paused",
+                        "reason": pause_reason,
+                    })
+                    continue
                 try:
                     result = _checkpoint_message(root, route_assignment)
                 except ValueError:
                     continue
+                if pause_reason == "review:assignment_needs_review":
+                    wl.pause.unlink(missing_ok=True)
                 ledger.set_node_state(
                     node_id,
                     state="DONE",
@@ -883,7 +972,7 @@ def _route_report(project: str, report: Dict[str, Any], token_budget: int) -> Di
         )
         report["scientific_route_decisions"] = decisions
 
-    dispositions = apply_scientific_route_dispositions(project)
+    dispositions = apply_scientific_route_dispositions(project, token_budget=token_budget)
     report["scientific_route_dispositions"] = dispositions
     if any(item.get("result") in {"resumed", "restarted", "completed"} for item in dispositions):
         refreshed = CLI.do_supervise(

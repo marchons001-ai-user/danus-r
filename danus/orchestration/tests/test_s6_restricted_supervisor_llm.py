@@ -191,7 +191,11 @@ def test_manual_apply_consults_only_after_stable_deterministic_supervision(monke
         "actions": [{"kind": "SCIENTIFIC_ROUTE_REQUIRED", "subject_id": "a1"}],
     }
     monkeypatch.setattr(CLI, "do_supervise", lambda *args, **kwargs: dict(report))
-    monkeypatch.setattr(S, "apply_scientific_route_dispositions", lambda project: [])
+    monkeypatch.setattr(
+        S,
+        "apply_scientific_route_dispositions",
+        lambda project, token_budget=0: [],
+    )
     calls = []
     monkeypatch.setattr(
         S,
@@ -224,7 +228,11 @@ def test_manual_apply_gates_prevent_llm_call(monkeypatch, capsys, override):
     }
     report.update(override)
     monkeypatch.setattr(CLI, "do_supervise", lambda *args, **kwargs: dict(report))
-    monkeypatch.setattr(S, "apply_scientific_route_dispositions", lambda project: [])
+    monkeypatch.setattr(
+        S,
+        "apply_scientific_route_dispositions",
+        lambda project, token_budget=0: [],
+    )
     monkeypatch.setattr(
         S,
         "resolve_scientific_routes",
