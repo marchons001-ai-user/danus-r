@@ -42,14 +42,14 @@ def append_jsonl(path: Path, payload: Dict[str, Any]) -> None:
 def iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
     if not path.exists():
         return
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open("rb") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
             try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
+                payload = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
             if isinstance(payload, dict):
                 yield payload
