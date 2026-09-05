@@ -502,6 +502,7 @@ def main(worker_dir: str) -> int:
     if ledger is not None:
         current = ledger.current(worker, refresh_stale=True)
         if current is not None:
+            assignment_id = str(current.get("assignment_id") or "")
             ledger.runtime_event(
                 worker=worker,
                 kind="STARTED",
@@ -525,6 +526,7 @@ def main(worker_dir: str) -> int:
                     actor="runtime",
                     note=f"worker role {role_key} does not match assignment role {assignment_role}",
                     outcome="NEEDS_REVIEW",
+                    expected_assignment_id=assignment_id,
                 )
                 write_status(
                     wl,
@@ -546,12 +548,14 @@ def main(worker_dir: str) -> int:
                 state="RUNNING",
                 actor="runtime",
                 note="worker process started",
+                expected_assignment_id=assignment_id,
             )
 
     consec_fail = 0
     migration_failures = 0
     try:
         while True:
+            round_assignment = None
             if ledger is not None:
                 current = ledger.current(worker, refresh_stale=True)
                 if current is not None and current["state"] in {"DONE", "BLOCKED", "STALE"}:
@@ -563,6 +567,7 @@ def main(worker_dir: str) -> int:
                     )
                     _record_exit(f"assignment_{current['state'].lower()}")
                     break
+                round_assignment = current
             if wl.stop.exists():
                 wl.stop.unlink(missing_ok=True)
                 write_status(wl, state="stopped")
@@ -595,11 +600,11 @@ def main(worker_dir: str) -> int:
                 and rc != 0
                 and _dsh_quota_exhausted(log_path)
             )
-            quota_assignment_id = None
-            if dsh_quota and ledger is not None:
-                current = ledger.current(worker, refresh_stale=True)
-                if current is not None:
-                    quota_assignment_id = current.get("assignment_id")
+            quota_assignment_id = (
+                str(round_assignment.get("assignment_id") or "")
+                if dsh_quota and round_assignment is not None
+                else None
+            )
 
             telemetry = C.inspect_log(log_path) if scientific else {}
             elapsed = time.time() - round_started
@@ -619,7 +624,7 @@ def main(worker_dir: str) -> int:
                     trigger = C.budget_reason(telemetry, elapsed)
                 C.write_checkpoint(
                     wl.dir, role=role_name, round_no=rnd, telemetry=telemetry,
-                    trigger=trigger,
+                    trigger=trigger, assignment=round_assignment,
                 )
 
                 migration_attempted = False
@@ -640,7 +645,7 @@ def main(worker_dir: str) -> int:
                     context_tokens_total += max(0, migration_tokens)
                     C.write_checkpoint(
                         wl.dir, role=role_name, round_no=rnd, telemetry=telemetry,
-                        trigger=trigger, migration=migration,
+                        trigger=trigger, migration=migration, assignment=round_assignment,
                     )
                     if migration is None:
                         migration_failures += 1
@@ -663,44 +668,42 @@ def main(worker_dir: str) -> int:
                 if not migration_attempted:
                     migration_failures = 0
 
-            if outcome and ledger is not None:
-                current = ledger.current(worker, refresh_stale=True)
-                if current is not None and current["state"] == "STALE":
-                    write_status(
-                        wl,
-                        state="stopped",
-                        progress_state="STALE",
-                        ignored_terminal_outcome=outcome,
+            if outcome and ledger is not None and round_assignment is not None:
+                progress_state = "DONE" if outcome == "COMPLETE" else "BLOCKED"
+                assignment_id = str(round_assignment.get("assignment_id") or "")
+                try:
+                    ledger.update(
+                        worker=worker,
+                        state=progress_state,
+                        actor="runtime",
+                        note=f"agent declared {outcome}",
+                        outcome=outcome,
+                        expected_assignment_id=assignment_id,
+                        result=str(telemetry.get("last_agent_message") or ""),
                     )
-                    _record_exit("assignment_stale_after_round")
-                    break
-                if current is not None:
-                    progress_state = "DONE" if outcome == "COMPLETE" else "BLOCKED"
-                    assignment_id = str(current.get("assignment_id") or "")
-                    try:
-                        ledger.update(
-                            worker=worker,
-                            state=progress_state,
-                            actor="runtime",
-                            note=f"agent declared {outcome}",
-                            outcome=outcome,
+                except ValueError:
+                    latest = ledger.current(worker, refresh_stale=True)
+                    latest_id = str((latest or {}).get("assignment_id") or "")
+                    if assignment_id and latest_id != assignment_id:
+                        write_status(
+                            wl,
+                            state="stopped",
+                            progress_state=str((latest or {}).get("state") or "REBOUND"),
+                            ignored_terminal_outcome=outcome,
+                            rebound_from_assignment_id=assignment_id,
+                            rebound_to_assignment_id=latest_id,
                         )
-                    except ValueError:
-                        latest = ledger.current(worker, refresh_stale=True)
-                        if (
-                            latest is not None
-                            and str(latest.get("assignment_id") or "") == assignment_id
-                            and latest.get("state") == "STALE"
-                        ):
-                            write_status(
-                                wl,
-                                state="stopped",
-                                progress_state="STALE",
-                                ignored_terminal_outcome=outcome,
-                            )
-                            _record_exit("assignment_stale_after_round")
-                            break
-                        raise
+                        break
+                    if latest is not None and latest.get("state") == "STALE":
+                        write_status(
+                            wl,
+                            state="stopped",
+                            progress_state="STALE",
+                            ignored_terminal_outcome=outcome,
+                        )
+                        _record_exit("assignment_stale_after_round")
+                        break
+                    raise
 
             status_fields = {
                 "state": "stopped" if outcome or dsh_quota else "idle",

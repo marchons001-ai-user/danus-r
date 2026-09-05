@@ -41,10 +41,17 @@ def _assignment(assignments: List[Dict[str, Any]], assignment_id: str) -> Dict[s
 
 
 def _checkpoint_message(root: Path, assignment: Dict[str, Any]) -> str:
+    message = str(assignment.get("result") or "").strip()
+    if message:
+        return message[-_MAX_MESSAGE_CHARS:]
     worker = str(assignment.get("worker") or "")
     role = str(assignment.get("role") or "").lower()
-    checkpoint = C.checkpoint_for_prompt(root / "workers" / worker, role)
-    if not checkpoint or checkpoint.get("assignment_id") != assignment.get("assignment_id"):
+    checkpoint = C.checkpoint_for_prompt(
+        root / "workers" / worker,
+        role,
+        assignment=assignment,
+    )
+    if not checkpoint:
         raise ValueError(f"verified checkpoint unavailable for assignment {assignment.get('assignment_id')}")
     message = str(checkpoint.get("last_agent_message") or "").strip()
     if not message:

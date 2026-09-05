@@ -261,9 +261,11 @@ def write_checkpoint(
     telemetry: Dict[str, Any],
     trigger: Optional[str] = None,
     migration: Optional[Dict[str, Any]] = None,
+    assignment: Optional[Dict[str, Any]] = None,
 ) -> Path:
     wdir = Path(worker_dir)
-    assignment = _assignment(wdir)
+    bound = dict(assignment) if assignment is not None else _assignment(wdir)
+    task_hash = str(bound.get("task_sha256") or "") or _task_hash(wdir)
     telemetry_out = {
         "tokens": int(telemetry.get("tokens") or 0),
         "uncached_tokens": int(telemetry.get("uncached_tokens") or 0),
@@ -277,10 +279,10 @@ def write_checkpoint(
         "schema_version": 1,
         "worker": wdir.name,
         "role": role,
-        "task_sha256": _task_hash(wdir),
-        "assignment_id": assignment.get("assignment_id"),
-        "plan_node_id": assignment.get("node_id"),
-        "plan_version": assignment.get("plan_version"),
+        "task_sha256": task_hash,
+        "assignment_id": bound.get("assignment_id"),
+        "plan_node_id": bound.get("node_id"),
+        "plan_version": bound.get("plan_version"),
         "round": int(round_no),
         "created_at": utc_now(),
         "trigger": trigger,
@@ -293,17 +295,32 @@ def write_checkpoint(
     return path
 
 
-def checkpoint_for_prompt(worker_dir: Path, role: str) -> Optional[Dict[str, Any]]:
-    path = _path(worker_dir, CHECKPOINT_NAME)
+def checkpoint_for_prompt(
+    worker_dir: Path,
+    role: str,
+    assignment: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    wdir = Path(worker_dir)
+    path = _path(wdir, CHECKPOINT_NAME)
     try:
         obj = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(obj, dict):
         return None
-    if obj.get("schema_version") != 1 or obj.get("worker") != Path(worker_dir).name:
+    if obj.get("schema_version") != 1 or obj.get("worker") != wdir.name:
         return None
-    if obj.get("role") != role or obj.get("task_sha256") != _task_hash(worker_dir):
+    if obj.get("role") != role:
+        return None
+
+    bound = dict(assignment) if assignment is not None else _assignment(wdir)
+    if bound:
+        if obj.get("assignment_id") != bound.get("assignment_id"):
+            return None
+        task_hash = str(bound.get("task_sha256") or "")
+        if task_hash and obj.get("task_sha256") != task_hash:
+            return None
+    if assignment is None and obj.get("task_sha256") != _task_hash(wdir):
         return None
     if len(json.dumps(obj, ensure_ascii=False)) > 20_000:
         return None

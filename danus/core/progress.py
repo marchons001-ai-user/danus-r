@@ -431,6 +431,8 @@ class ProgressLedger:
         actor: str,
         note: str = "",
         outcome: str = "",
+        expected_assignment_id: str = "",
+        result: str = "",
     ) -> Dict[str, Any]:
         """Update one worker's current assignment without touching Research Plan.
 
@@ -445,35 +447,60 @@ class ProgressLedger:
             raise ValueError(f"state must be one of {self.UPDATE_STATES}")
         actor = self._required(actor, "actor")
         outcome = str(outcome or "").strip().upper()
+        expected_assignment_id = str(expected_assignment_id or "").strip()
+        result = str(result or "")[-8000:]
         if outcome:
             if outcome not in self.TERMINAL_OUTCOMES:
                 raise ValueError(f"outcome must be one of {self.TERMINAL_OUTCOMES}")
             expected = "DONE" if outcome == "COMPLETE" else "BLOCKED"
             if state != expected:
                 raise ValueError(f"outcome {outcome} requires state {expected}")
+        elif result:
+            raise ValueError("result requires a terminal outcome")
 
-        current = self.current(worker, refresh_stale=True)
-        if current is None:
-            raise ValueError(f"worker {worker} has no assignment")
-        if current["state"] == "STALE":
-            raise ValueError(f"assignment {current['assignment_id']} is STALE")
-        if current["state"] == "DONE":
-            if state == "DONE":
-                return current
-            raise ValueError(f"assignment {current['assignment_id']} is already DONE")
-        if current["state"] == state and (
-            not outcome or current.get("outcome") == outcome
-        ):
-            return current
+        lock_path = self.root / "progress" / ".assign.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                current = self.current(worker, refresh_stale=True)
+                if current is None:
+                    raise ValueError(f"worker {worker} has no assignment")
+                if (
+                    expected_assignment_id
+                    and current["assignment_id"] != expected_assignment_id
+                ):
+                    raise ValueError(
+                        f"assignment changed: expected {expected_assignment_id}; "
+                        f"current is {current['assignment_id']}"
+                    )
+                if current["state"] == "STALE":
+                    raise ValueError(f"assignment {current['assignment_id']} is STALE")
+                if current["state"] == "DONE":
+                    if state == "DONE" and (
+                        not result or current.get("result") == result
+                    ):
+                        return current
+                    if state != "DONE":
+                        raise ValueError(f"assignment {current['assignment_id']} is already DONE")
+                if current["state"] == state and (
+                    not outcome or current.get("outcome") == outcome
+                ) and (
+                    not result or current.get("result") == result
+                ):
+                    return current
 
-        self._append_state(
-            current,
-            state=state,
-            actor=actor,
-            note=str(note).strip(),
-            outcome=outcome,
-        )
-        return self.current(worker, refresh_stale=False) or current
+                self._append_state(
+                    current,
+                    state=state,
+                    actor=actor,
+                    note=str(note).strip(),
+                    outcome=outcome,
+                    result=result,
+                )
+                return self.current(worker, refresh_stale=False) or current
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
     def runtime_event(
         self,
@@ -706,6 +733,7 @@ class ProgressLedger:
         actor: str,
         note: str,
         outcome: str = "",
+        result: str = "",
     ) -> None:
         event: Dict[str, Any] = {
             "event": "STATE",
@@ -718,6 +746,8 @@ class ProgressLedger:
         }
         if outcome:
             event["outcome"] = outcome
+        if result:
+            event["result"] = result
         append_jsonl(self.path, event)
 
     def _replay_assignments(self) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
@@ -763,8 +793,14 @@ class ProgressLedger:
                 outcome = str(event.get("outcome") or "").upper()
                 if outcome:
                     record["outcome"] = outcome
+                    result = str(event.get("result") or "")
+                    if result:
+                        record["result"] = result
+                    else:
+                        record.pop("result", None)
                 else:
                     record.pop("outcome", None)
+                    record.pop("result", None)
                 record["updated_at"] = event.get("at")
                 record["actor"] = event.get("actor")
                 record["note"] = str(event.get("note") or "")
