@@ -257,7 +257,7 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError(f"experiment protocol already running: {protocol_id}") from exc
-        return _run_experiment(root, protocol_id, author=author)
+        return _run_experiment(root, protocol_id, author=author, lock_fd=lock.fileno())
     finally:
         try:
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -265,7 +265,7 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
             lock.close()
 
 
-def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict[str, Any]:
+def _run_experiment(project_dir: Path, protocol_id: str, *, author: str, lock_fd: int) -> Dict[str, Any]:
     root = Path(project_dir).resolve()
     workspace = L.scientific_workspace(root)
     if not workspace.is_dir():
@@ -303,6 +303,20 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
     for unit_id, refs in completed.items():
         if not _refs_match(store, refs):
             raise ValueError(f"completed unit artifact changed: {unit_id}")
+
+    status_path = _status_path(root, protocol_id)
+    if status_path.is_file():
+        try:
+            previous_status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous_status = None
+        if isinstance(previous_status, dict) and previous_status.get("state") == "running":
+            interrupted_unit = str(previous_status.get("current_unit") or "")
+            if interrupted_unit and interrupted_unit not in completed:
+                raise RuntimeError(
+                    f"experiment unit {interrupted_unit} interrupted before safe point; "
+                    "refusing automatic rerun"
+                )
 
     evidence_id = checkpoint.get("evidence_id")
     if evidence_id:
@@ -357,6 +371,7 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str) -> Dict
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 check=False,
+                pass_fds=(lock_fd,),
             )
         # Do not accept a safe point if its frozen code/config/input changed while
         # the unit was executing; the output may no longer represent this protocol.
