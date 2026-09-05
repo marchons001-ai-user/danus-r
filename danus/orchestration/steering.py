@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from danus.core import ProgressLedger
+from danus.core.handoff import HandoffRequests
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write
 
@@ -74,19 +75,48 @@ def _resume_worker(project: str, worker: str) -> List[Dict[str, str]]:
     pdir = L.project_dir(project)
     ledger_path = pdir / "progress" / "ledger.jsonl"
     row = do_status(f"{project}/{worker}")[0]
-    current = ProgressLedger(pdir).current(worker, refresh_stale=True) if ledger_path.is_file() else None
+    ledger = ProgressLedger(pdir) if ledger_path.is_file() else None
+    current = ledger.current(worker, refresh_stale=True) if ledger else None
 
     if current and current.get("state") == "BLOCKED":
         outcome = str(current.get("outcome") or "").upper()
-        if outcome != "BLOCKED":
-            result = "needs-review" if outcome == "NEEDS_REVIEW" else "blocked"
-            return [{"worker": worker, "result": result}]
-        ProgressLedger(pdir).update(
-            worker=worker,
-            state="RUNNING",
-            actor="operator",
-            note="external prerequisite restored by explicit worker resume",
-        )
+        if outcome == "NEEDS_REVIEW":
+            source_id = str(current.get("assignment_id") or "")
+            handoffs = HandoffRequests(ledger)
+            routes = [
+                item
+                for item in handoffs.all()
+                if item.get("kind") in {"INTERPRET", "RETHINK", "ESCALATE"}
+                and item.get("subject_type") == "ASSIGNMENT"
+                and item.get("subject_id") == source_id
+            ]
+            active = [item for item in routes if item.get("status") in {"OPEN", "ASSIGNED"}]
+            if any(item.get("kind") != "ESCALATE" for item in active):
+                return [{"worker": worker, "result": "needs-review"}]
+            guidance = guidance_path(project)
+            if not routes or not guidance.is_file() or not guidance.read_text(encoding="utf-8").strip():
+                return [{"worker": worker, "result": "needs-review"}]
+            for handoff in active:
+                handoffs.cancel(
+                    handoff["handoff_id"],
+                    actor="operator",
+                    reason="resolved by explicit human guidance",
+                )
+            ledger.update(
+                worker=worker,
+                state="RUNNING",
+                actor="operator",
+                note="explicit human guidance resolved scientific route",
+            )
+        elif outcome == "BLOCKED":
+            ledger.update(
+                worker=worker,
+                state="RUNNING",
+                actor="operator",
+                note="external prerequisite restored by explicit worker resume",
+            )
+        else:
+            return [{"worker": worker, "result": "blocked"}]
     elif str(row.get("pause_reason") or "").startswith(("quota:", "budget:", "review:")):
         return [{"worker": worker, "result": "system-paused"}]
 

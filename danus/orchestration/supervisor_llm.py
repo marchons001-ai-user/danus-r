@@ -8,6 +8,7 @@ so cold-start replay never needs a second accepted route decision.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import signal
@@ -335,25 +336,47 @@ def _handoff_request(
     action: Dict[str, Any],
     rationale: str,
     basis: List[str],
+    packet: Dict[str, Any] | None = None,
 ) -> str:
     source_id = str(action.get("subject_id") or "")
     review_id = str(action.get("review_handoff_id") or "")
+    evidence = ""
+    if packet:
+        evidence = (
+            "\nSource final result:\n"
+            + str(packet["source"].get("final_message") or "")
+            + "\n\nIndependent review result:\n"
+            + str(packet["review"].get("final_message") or "")
+            + "\n"
+        )
     common = (
         "# Supervisor Scientific Route\n\n"
         f"Decision `{decision_key}` routes source assignment `{source_id}` after generic review "
         f"`{review_id}`.\n\nSupervisor rationale:\n{rationale}\n\n"
-        "Decision basis:\n" + "".join(f"- {item}\n" for item in basis) + "\n"
+        "Decision basis:\n" + "".join(f"- {item}\n" for item in basis) + evidence + "\n"
+    )
+    source_role = str(action.get("source_role") or "researcher").lower()
+    continuation = (
+        "This handoff supersedes the blocked Researcher assignment. If no structural Plan change is needed, "
+        "complete the remaining source-node Researcher work in this assignment; COMPLETE means that Researcher "
+        "work is fully done. If a structural Plan change is needed, use the existing governed Plan proposal "
+        "mechanism before COMPLETE. "
+        if source_role == "researcher"
+        else "If no structural Plan change is needed, return a bounded scientific result for the blocked source "
+        "assignment; the control plane may resume that same assignment with your result. "
     )
     if route == "INTERPRET":
         instruction = (
-            "Synthesize the scientific meaning of the reviewed evidence. State what is supported, what is not "
+            continuation
+            + "Synthesize the scientific meaning of the reviewed evidence. State what is supported, what is not "
             "supported, and what evidence-backed next action is justified. Use only existing governed proposal "
             "mechanisms for any structural change; do not edit Plan or Progress files directly. End with COMPLETE "
             "when this interpretation work is done.\n"
         )
     elif route == "RETHINK":
         instruction = (
-            "Substantively rethink the scientific assumption or direction that left the source assignment blocked. "
+            continuation
+            + "Substantively rethink the scientific assumption or direction that left the source assignment blocked. "
             "Do not cosmetically repeat the same route. Express any structural change only through existing governed "
             "proposal mechanisms; do not edit Plan or Progress files directly. End with COMPLETE when this rethink "
             "work is done.\n"
@@ -374,6 +397,7 @@ def _decision_event(
     rationale: str,
     basis: List[str],
     decision_source: str,
+    packet: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     identity = _decision_identity(action)
     reason = (
@@ -393,7 +417,7 @@ def _decision_event(
         "model": _MODEL,
         "effort": _EFFORT,
         "handoff_reason": reason,
-        "request": _handoff_request(route, decision_key, action, rationale, list(basis)),
+        "request": _handoff_request(route, decision_key, action, rationale, list(basis), packet),
         "at": utc_now(),
     }
 
@@ -551,6 +575,7 @@ def resolve_scientific_routes(root: Path, actions: List[Dict[str, Any]]) -> List
                         rationale=str(validated["rationale"]),
                         basis=list(validated["basis"]),
                         decision_source="llm",
+                        packet=packet,
                     )
                 else:
                     error = str(validated.get("error") or "model_call_failed")
@@ -561,6 +586,7 @@ def resolve_scientific_routes(root: Path, actions: List[Dict[str, Any]]) -> List
                         rationale=f"Restricted Supervisor failed closed: {error}",
                         basis=list(packet["allowed_basis"]),
                         decision_source="fail_closed",
+                        packet=packet,
                     )
                 try:
                     decision = _persist_route_decision(ledger, decision, identity)
@@ -601,6 +627,148 @@ def consult_scientific_routes(root: Path, actions: List[Dict[str, Any]]) -> List
     return resolve_scientific_routes(root, actions)
 
 
+def _proposal_from_route(root: Path, assignment_id: str) -> bool:
+    if (root / ".danus" / "plan_proposal.json").is_file():
+        return True
+    directory = root / "planning" / "proposals"
+    if not directory.is_dir():
+        return False
+    for path in directory.glob("*.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(record.get("source_assignment_id") or "") == assignment_id:
+            return True
+    return False
+
+
+def _route_consumed(ledger: ProgressLedger, source_id: str, handoff_id: str) -> bool:
+    prefix = f"resumed after scientific route {handoff_id}"
+    return any(
+        event.get("event") == "STATE"
+        and event.get("assignment_id") == source_id
+        and event.get("actor") == "supervisor"
+        and str(event.get("note") or "").startswith(prefix)
+        for event in read_jsonl(ledger.path)
+    )
+
+
+def apply_scientific_route_dispositions(project: str) -> List[Dict[str, Any]]:
+    """Close completed Assignment routes without adding a second routing decision layer."""
+    from . import cli as CLI
+
+    root = L.project_dir(project)
+    out: List[Dict[str, Any]] = []
+    with CLI.project_control_lock(root):
+        ledger = ProgressLedger(root)
+        assignments = {
+            str(item.get("assignment_id") or ""): item
+            for item in ledger.assignments()
+            if item.get("assignment_id")
+        }
+        plan = ResearchPlanGraph(root).snapshot()
+        completed = set(ledger.completed_nodes())
+        for handoff in HandoffRequests(ledger).all():
+            if (
+                handoff.get("kind") not in {"INTERPRET", "RETHINK"}
+                or handoff.get("subject_type") != "ASSIGNMENT"
+                or handoff.get("status") != "RESOLVED"
+            ):
+                continue
+            source_id = str(handoff.get("subject_id") or "")
+            source = assignments.get(source_id)
+            route_assignment_id = str(handoff.get("resolution_assignment_id") or "")
+            route_assignment = assignments.get(route_assignment_id)
+            if (
+                source is None
+                or route_assignment is None
+                or route_assignment.get("state") != "DONE"
+                or route_assignment.get("outcome") != "COMPLETE"
+                or str(route_assignment.get("role") or "").lower() != "researcher"
+            ):
+                continue
+            node_id = str(handoff.get("node_id") or "")
+            node = plan["nodes"].get(node_id)
+            if (
+                int(handoff.get("plan_version") or 0) != int(plan["plan_version"])
+                or not node
+                or node.get("state") != "ACTIVE"
+            ):
+                continue
+            if _proposal_from_route(root, route_assignment_id):
+                out.append({
+                    "handoff_id": handoff["handoff_id"],
+                    "source_assignment_id": source_id,
+                    "result": "plan_proposal",
+                })
+                continue
+
+            source_role = str(source.get("role") or "").lower()
+            if source_role == "experimenter":
+                consumed = _route_consumed(ledger, source_id, handoff["handoff_id"])
+                if consumed:
+                    if source.get("state") == "BLOCKED" and source.get("outcome") == "NEEDS_REVIEW":
+                        out.append({
+                            "handoff_id": handoff["handoff_id"],
+                            "source_assignment_id": source_id,
+                            "result": "awaiting_human",
+                        })
+                    elif source.get("state") in {"ASSIGNED", "RUNNING"}:
+                        start_result = CLI._start_one(L.WorkerLayout(L.worker_dir(project, str(source["worker"]))))
+                        out.append({
+                            "handoff_id": handoff["handoff_id"],
+                            "source_assignment_id": source_id,
+                            "result": "restarted",
+                            "start_result": start_result,
+                        })
+                    continue
+                if source.get("state") != "BLOCKED" or source.get("outcome") != "NEEDS_REVIEW":
+                    continue
+                try:
+                    result = _checkpoint_message(root, route_assignment)
+                except ValueError:
+                    continue
+                note = (
+                    f"resumed after scientific route {handoff['handoff_id']}\n\n"
+                    f"{handoff['kind']} result:\n{result}"
+                )
+                ledger.update(
+                    worker=str(source["worker"]),
+                    state="RUNNING",
+                    actor="supervisor",
+                    note=note,
+                )
+                start_result = CLI._start_one(L.WorkerLayout(L.worker_dir(project, str(source["worker"]))))
+                out.append({
+                    "handoff_id": handoff["handoff_id"],
+                    "source_assignment_id": source_id,
+                    "result": "resumed",
+                    "start_result": start_result,
+                })
+                continue
+
+            if source_role == "researcher" and node_id not in completed:
+                try:
+                    result = _checkpoint_message(root, route_assignment)
+                except ValueError:
+                    continue
+                ledger.set_node_state(
+                    node_id,
+                    state="DONE",
+                    actor="supervisor",
+                    note=f"scientific route {handoff['handoff_id']} completed Researcher source: {result}",
+                )
+                completed.add(node_id)
+                out.append({
+                    "handoff_id": handoff["handoff_id"],
+                    "source_assignment_id": source_id,
+                    "node_id": node_id,
+                    "result": "completed",
+                })
+    return out
+
+
 def _eligible(report: Dict[str, Any]) -> bool:
     return bool(
         report.get("project_state") == "RUNNING"
@@ -614,22 +782,32 @@ def _route_report(project: str, report: Dict[str, Any], token_budget: int) -> Di
     from . import cli as CLI
 
     report = dict(report)
-    report["scientific_route_decisions"] = []
-    if not _eligible(report):
-        return report
-    decisions = resolve_scientific_routes(L.project_dir(project), report.get("actions", []))
+    decisions: List[Dict[str, Any]] = []
+    if _eligible(report):
+        decisions = resolve_scientific_routes(L.project_dir(project), report.get("actions", []))
     report["scientific_route_decisions"] = decisions
-    if not any(item.get("handoff_id") for item in decisions):
-        return report
+    if any(item.get("handoff_id") for item in decisions):
+        report = CLI.do_supervise(
+            project,
+            apply=True,
+            token_budget=token_budget,
+            trigger="scientific_route",
+        )
+        report["scientific_route_decisions"] = decisions
 
-    followup = CLI.do_supervise(
-        project,
-        apply=True,
-        token_budget=token_budget,
-        trigger="scientific_route",
-    )
-    followup["scientific_route_decisions"] = decisions
-    return followup
+    dispositions = apply_scientific_route_dispositions(project)
+    report["scientific_route_dispositions"] = dispositions
+    if any(item.get("result") in {"resumed", "restarted", "completed"} for item in dispositions):
+        refreshed = CLI.do_supervise(
+            project,
+            apply=True,
+            token_budget=token_budget,
+            trigger="scientific_route_disposition",
+        )
+        refreshed["scientific_route_decisions"] = decisions
+        refreshed["scientific_route_dispositions"] = dispositions
+        return refreshed
+    return report
 
 
 def supervise_main(argv: List[str]) -> int:
@@ -661,4 +839,54 @@ def supervise_main(argv: List[str]) -> int:
     )
     routed = _route_report(args.project, report, args.token_budget)
     print(json.dumps(routed, ensure_ascii=False, indent=2))
+    return 0
+
+
+def research_main(argv: List[str]) -> int:
+    """Run the existing research planner with the same durable S6 route seam."""
+    from . import cli as CLI
+    from . import planning
+
+    parser = argparse.ArgumentParser(
+        prog="danus research",
+        description="Bootstrap/resume autonomous planning and DAG execution from a research brief.",
+    )
+    parser.add_argument("project")
+    parser.add_argument("--brief", default=None, help="research brief text file; required for a new project")
+    parser.add_argument("--stdin", action="store_true", help="read a new-project research brief from stdin")
+    parser.add_argument("--model", default=None, help="model for a newly scaffolded project")
+    parser.add_argument("--once", action="store_true", help="run one planning + Supervisor pass and return")
+    parser.add_argument("--heartbeat", type=float, default=1800.0)
+    parser.add_argument("--poll", type=float, default=1.0)
+    parser.add_argument("--token-budget", type=int, default=0)
+    args = parser.parse_args(argv)
+
+    init = planning.initialize_research(
+        args.project,
+        brief=planning._brief_from_args(args),
+        model=args.model,
+    )
+    print(json.dumps({"research_init": init}, ensure_ascii=False, sort_keys=True), flush=True)
+    if args.once:
+        applied = planning.planning_step(args.project)
+        report = CLI.do_supervise(
+            args.project,
+            apply=True,
+            token_budget=args.token_budget,
+            trigger="research",
+        )
+        report = _route_report(args.project, report, args.token_budget)
+        if applied:
+            report["planning_applied"] = applied
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True), flush=True)
+        return 0
+
+    for report in planning.watch_research(
+        args.project,
+        heartbeat=args.heartbeat,
+        poll=args.poll,
+        token_budget=args.token_budget,
+    ):
+        routed = _route_report(args.project, report, args.token_budget)
+        print(json.dumps(routed, ensure_ascii=False, sort_keys=True), flush=True)
     return 0

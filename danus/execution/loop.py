@@ -25,6 +25,8 @@ from . import layout as L
 from . import scaffold
 from danus import codex
 from danus.core import ProgressLedger
+from danus.core._util import read_jsonl
+from danus.core.handoff import HandoffRequests
 from danus.gateway.roles import tools_for
 
 _FACT_ID_RE = re.compile(r"(?i:fact(?:_|\s+)id)\b[\"'`\s]*[:=]?\s*[\"'`]?([0-9a-f]{16})[\"'`]?")
@@ -70,6 +72,44 @@ def _scientific_context(project: str, role_name: str) -> str:
     )
 
 
+def _resolved_scientific_route_context(project: str, assignment_id: str) -> str:
+    root = L.project_dir(project)
+    ledger_path = root / "progress" / "ledger.jsonl"
+    if not assignment_id or not ledger_path.is_file():
+        return ""
+    ledger = ProgressLedger(root)
+    routes = [
+        item
+        for item in HandoffRequests(ledger).all()
+        if item.get("kind") in {"INTERPRET", "RETHINK"}
+        and item.get("subject_type") == "ASSIGNMENT"
+        and item.get("subject_id") == assignment_id
+        and item.get("status") == "RESOLVED"
+    ]
+    if not routes:
+        return ""
+    routes.sort(key=lambda item: (str(item.get("resolved_at") or ""), str(item.get("handoff_id") or "")))
+    route = routes[-1]
+    prefix = f"resumed after scientific route {route['handoff_id']}"
+    for event in reversed(read_jsonl(ledger.path)):
+        if (
+            event.get("event") == "STATE"
+            and event.get("assignment_id") == assignment_id
+            and event.get("actor") == "supervisor"
+            and str(event.get("note") or "").startswith(prefix)
+        ):
+            note = str(event.get("note") or "")
+            result = note.split("\n\n", 1)[1] if "\n\n" in note else note
+            return (
+                "\n\nThe resolved scientific route below is durable reviewed context for this same "
+                "assignment, not a replacement for TASK/Charter/Plan. Use it to continue rather than reopening "
+                "the same ambiguity.\n\n"
+                f"<RESOLVED_SCIENTIFIC_ROUTE>\nroute: {route['kind']}\n"
+                f"handoff_id: {route['handoff_id']}\n{result}\n</RESOLVED_SCIENTIFIC_ROUTE>"
+            )
+    return ""
+
+
 def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
     role_key = (role_name or "worker").strip().lower()
     scientific = role_key in L.SCIENTIFIC_ROLES
@@ -107,6 +147,14 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
                 + json.dumps(checkpoint, ensure_ascii=False, sort_keys=True)
                 + "\n</RUNTIME_AGENT_CHECKPOINT>"
             )
+        ledger_path = L.project_dir(project) / "progress" / "ledger.jsonl"
+        if ledger_path.is_file():
+            current = ProgressLedger(L.project_dir(project)).current(worker, refresh_stale=False)
+            if current:
+                prompt += _resolved_scientific_route_context(
+                    project,
+                    str(current.get("assignment_id") or ""),
+                )
         paths = [L.scientific_worker_md()]
         skills = L.harness_skills_dir(role_key)
         if skills is not None:
