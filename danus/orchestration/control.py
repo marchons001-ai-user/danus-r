@@ -760,7 +760,7 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             source_id = str(source["assignment_id"])
             if any(
                 item.get("status") in {"OPEN", "ASSIGNED"}
-                and item.get("kind") in {"INTERPRET", "ESCALATE"}
+                and item.get("kind") in {"INTERPRET", "RETHINK", "ESCALATE"}
                 and item.get("subject_type") == "ASSIGNMENT"
                 and item.get("subject_id") == source_id
                 for item in handoffs
@@ -784,6 +784,21 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                     requested_by=str(source.get("worker") or "worker"),
                     source_role=str(source.get("role") or "researcher"),
                     source_assignment_id=source_id,
+                )
+            elif review_ready(review):
+                review_assignment = handoff_assignment(review)
+                route(
+                    "SCIENTIFIC_ROUTE_REQUIRED",
+                    node_id=source.get("node_id"),
+                    assignment_id=source_id,
+                    worker=source.get("worker"),
+                    reason="review_completed_source_disposition_ambiguous",
+                    subject_type="ASSIGNMENT",
+                    subject_id=source_id,
+                    source_role=str(source.get("role") or "researcher"),
+                    review_handoff_id=str(review.get("handoff_id") or ""),
+                    review_assignment_id=str((review_assignment or {}).get("assignment_id") or ""),
+                    candidate_routes=["INTERPRET", "RETHINK", "ESCALATE"],
                 )
 
         for change in sorted(
