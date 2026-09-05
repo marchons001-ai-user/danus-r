@@ -186,7 +186,7 @@ def test_watch_research_refreshes_report_after_planning_action(monkeypatch):
     planning_calls = 0
     supervise_calls = []
 
-    def fake_planning_step(project):
+    def fake_planning_step(project, *, token_budget=0):
         nonlocal planning_calls
         planning_calls += 1
         if planning_calls == 1:

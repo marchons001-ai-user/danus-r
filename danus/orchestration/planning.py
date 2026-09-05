@@ -1159,15 +1159,23 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
     return actions
 
 
-def planning_step(project: str) -> List[Dict[str, Any]]:
+def planning_step(project: str, *, token_budget: int = 0) -> List[Dict[str, Any]]:
     """Run one serialized proposal/review/commit/materialization pass."""
     pdir = L.project_dir(project)
     with cli.project_control_lock(pdir):
+        control = cli._do_supervise_unlocked(
+            project,
+            apply=False,
+            token_budget=token_budget,
+            trigger="planning_stop_check",
+        )
+        if control.get("budget_stop"):
+            return []
         return _planning_step_unlocked(project)
 
 
 def watch_research(project: str, *, heartbeat: float = 1800.0, poll: float = 1.0, token_budget: int = 0) -> Iterator[Dict[str, Any]]:
-    pending = planning_step(project)
+    pending = planning_step(project, token_budget=token_budget)
     while True:
         restart = False
         for report in cli.watch_supervisor(
@@ -1176,7 +1184,7 @@ def watch_research(project: str, *, heartbeat: float = 1800.0, poll: float = 1.0
             supervisor_was_terminal = bool(
                 report.get("project_state") == "COMPLETE" and not report.get("decisions")
             )
-            after = planning_step(project)
+            after = planning_step(project, token_budget=token_budget)
             actions = pending + after
             pending = []
             if after:
@@ -1228,7 +1236,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     init = initialize_research(args.project, brief=_brief_from_args(args), model=args.model)
     print(json.dumps({"research_init": init}, ensure_ascii=False, sort_keys=True), flush=True)
     if args.once:
-        planning = planning_step(args.project)
+        planning = planning_step(args.project, token_budget=args.token_budget)
         report = cli.do_supervise(args.project, apply=True, token_budget=args.token_budget, trigger="research")
         if planning:
             report["planning_applied"] = planning
