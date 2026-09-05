@@ -144,7 +144,7 @@ def test_agent_crash_retask_resumes_from_checkpoint_without_replaying_round(tmp_
         decision = next(d for d in dry["decisions"] if d.get("worker") == "high")
         assert decision["action"] == "RETASK" and decision["reason"] == "worker_not_running"
 
-        monkeypatch.setattr(cli, "spawn_loop", lambda path: os.getpid())
+        monkeypatch.setattr(cli, "spawn_loop", lambda path, lock_fd=None: os.getpid())
         applied = cli.do_supervise("P", apply=True)
         retask = next(d for d in applied["applied"] if d.get("worker") == "high")
         assert retask["result"] == "started"

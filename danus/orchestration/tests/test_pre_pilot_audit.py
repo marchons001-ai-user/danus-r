@@ -185,7 +185,7 @@ def test_two_supervisor_passes_cannot_start_two_worker_processes(tmp_path: Path,
     ctx, pdir, _, wl, _ = _project(tmp_path)
     spawned = []
     try:
-        def real_spawn(_path):
+        def real_spawn(_path, lock_fd=None):
             proc = subprocess.Popen(
                 [sys.executable, "-c", "import time; time.sleep(60)"],
                 stdout=subprocess.DEVNULL,

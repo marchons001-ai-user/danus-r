@@ -30,6 +30,22 @@ def atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def process_state_start(pid: int) -> tuple[Optional[str], Optional[str]]:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return fields[0], fields[19]
+    except (OSError, IndexError):
+        return None, None
+
+
+def write_worker_pid(wl: "L.WorkerLayout", pid: int) -> None:
+    _, start = process_state_start(pid)
+    text = f"{pid} {start}\n" if start is not None else f"{pid}\n"
+    tmp = wl.pid.with_name(f"{wl.pid.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, wl.pid)
+
+
 def _toml_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -252,7 +268,7 @@ def do_new(
 # spawn_loop — detached launch of one worker's outer loop                    #
 # --------------------------------------------------------------------------- #
 
-def spawn_loop(wdir: Path) -> int:
+def spawn_loop(wdir: Path, lock_fd: Optional[int] = None) -> int:
     """Launch ``python -m danus.execution <wdir>`` detached in its own group."""
     wl = L.WorkerLayout(wdir)
     wl.logs.mkdir(parents=True, exist_ok=True)
@@ -262,6 +278,7 @@ def spawn_loop(wdir: Path) -> int:
             [sys.executable, "-m", "danus.execution", str(wdir)],
             stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
+            pass_fds=(lock_fd,) if lock_fd is not None else (),
         )
     finally:
         logf.close()

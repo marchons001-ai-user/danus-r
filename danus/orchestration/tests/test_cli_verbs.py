@@ -69,7 +69,7 @@ class _FakeSpawn:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, wdir):
+    def __call__(self, wdir, lock_fd=None):
         self.calls.append(Path(wdir))
         return os.getpid()
 

@@ -433,6 +433,7 @@ def main(worker_dir: str) -> int:
         print(f"worker dir not found: {wdir}", file=sys.stderr)
         return 2
     wl = L.WorkerLayout(wdir)
+    scaffold.write_worker_pid(wl, os.getpid())
     project_dir = wl.project_dir
     project = wl.project
     worker = wl.name

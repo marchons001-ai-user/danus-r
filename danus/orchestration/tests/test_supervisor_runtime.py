@@ -62,7 +62,7 @@ def test_pause_blocks_start_and_resume_reuses_start(tmp_path: Path, monkeypatch)
         assert cli.do_start("P/high")[0]["result"] == "paused"
 
         spawned = []
-        monkeypatch.setattr(cli, "spawn_loop", lambda path: spawned.append(Path(path)) or 424242)
+        monkeypatch.setattr(cli, "spawn_loop", lambda path, lock_fd=None: spawned.append(Path(path)) or 424242)
         resumed = cli.do_resume("P/high")
         assert resumed[0]["result"] == "started"
         assert spawned == [wl.dir]
@@ -96,7 +96,7 @@ def test_dead_assignment_retask_restarts_same_worker(tmp_path: Path, monkeypatch
     try:
         _assign(pdir)
         spawned = []
-        monkeypatch.setattr(cli, "spawn_loop", lambda path: spawned.append(Path(path)) or 434343)
+        monkeypatch.setattr(cli, "spawn_loop", lambda path, lock_fd=None: spawned.append(Path(path)) or 434343)
 
         report = cli.do_supervise("P", apply=True)
         retask = next(d for d in report["applied"] if d.get("worker") == "high")

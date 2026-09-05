@@ -52,7 +52,7 @@ def _setup() -> tuple[Path, L.WorkerLayout, ProgressLedger, str]:
 def _fake_spawn(monkeypatch):
     calls = []
 
-    def spawn(path):
+    def spawn(path, lock_fd=None):
         calls.append(Path(path))
         return os.getpid()
 

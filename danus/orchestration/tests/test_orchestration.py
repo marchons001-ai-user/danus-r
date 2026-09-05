@@ -190,7 +190,7 @@ def test_idempotent_start(tmp: Path):
         try:
             assert cli.do_start("P/high")[0]["result"] == "started"
             assert _wait_until(lambda: _st("P", "high")["alive"])
-            assert cli.do_start("P/high")[0]["result"] == "already-running"
+            assert cli.do_start("P/high")[0]["result"] == "locked"
         finally:
             _kill_project("P")
 

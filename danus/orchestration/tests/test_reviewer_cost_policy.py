@@ -214,7 +214,7 @@ def test_direct_start_resolves_auto_reviewer_to_dsh_before_spawn(tmp_path: Path,
     monkeypatch.setattr(cli, "_dsh_available", lambda: True)
     monkeypatch.setattr(cli, "quota_policy", lambda _snapshot: _quota("NORMAL", False))
     spawned = []
-    monkeypatch.setattr(cli, "spawn_loop", lambda path: spawned.append(Path(path)) or 424242)
+    monkeypatch.setattr(cli, "spawn_loop", lambda path, lock_fd=None: spawned.append(Path(path)) or 424242)
 
     assert cli._start_one(wl) == "started"
     assert spawned == [wl.dir]

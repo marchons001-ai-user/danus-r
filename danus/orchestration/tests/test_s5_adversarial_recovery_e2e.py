@@ -229,7 +229,7 @@ def test_resource_and_external_blocker_chain_survives_restarts(tmp_path: Path):
 
         _fresh(
             "import os; from danus.orchestration import cli; "
-            "cli.spawn_loop=lambda path: os.getpid(); "
+            "cli.spawn_loop=lambda path, lock_fd=None: os.getpid(); "
             "cli.do_supervise('P', apply=True, token_budget=200)",
             agents_root=pdir.parent,
         )
@@ -239,7 +239,7 @@ def test_resource_and_external_blocker_chain_survives_restarts(tmp_path: Path):
         wl.pause.write_text("quota:pressure:test\n", encoding="utf-8")
         _fresh(
             "import os; from danus.orchestration import cli; "
-            "cli.spawn_loop=lambda path: os.getpid(); "
+            "cli.spawn_loop=lambda path, lock_fd=None: os.getpid(); "
             "rows=cli._project_rows('P'); "
             "cli._apply_quota_gate('P', rows, {'state':'NORMAL','reason':'restored','block_new_codex_rounds':False})",
             agents_root=pdir.parent,
@@ -261,7 +261,7 @@ def test_resource_and_external_blocker_chain_survives_restarts(tmp_path: Path):
 
         worker_resume = _fresh(
             "import json, os; from danus.orchestration import cli, steering; "
-            "cli.spawn_loop=lambda path: os.getpid(); "
+            "cli.spawn_loop=lambda path, lock_fd=None: os.getpid(); "
             "print(json.dumps(steering.do_resume('P/high')))",
             agents_root=pdir.parent,
         )

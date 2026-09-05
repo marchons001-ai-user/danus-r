@@ -37,7 +37,13 @@ from typing import Any, Dict, Iterator, List, Optional
 from danus.core import EvidenceStore, ProgressLedger, ResearchPlanGraph
 from danus.core._util import append_jsonl, utc_now
 from danus.execution import layout as L
-from danus.execution.scaffold import atomic_write, do_new, spawn_loop
+from danus.execution.scaffold import (
+    atomic_write,
+    do_new,
+    process_state_start,
+    spawn_loop,
+    write_worker_pid,
+)
 
 from . import autonomy as A
 from . import quota as Q
@@ -91,12 +97,7 @@ def _read_pid(wl: L.WorkerLayout) -> Optional[int]:
 
 
 def _proc_state_start(pid: int) -> tuple[Optional[str], Optional[str]]:
-    try:
-        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        # fields[0] is proc field 3 (state), so field 22 (starttime) is index 19.
-        return fields[0], fields[19]
-    except (OSError, IndexError):
-        return None, None
+    return process_state_start(pid)
 
 
 def _alive(pid: Optional[int], expected_start: Optional[str] = None) -> bool:
@@ -122,8 +123,7 @@ def _worker_alive(wl: L.WorkerLayout) -> bool:
 
 
 def _write_pid(wl: L.WorkerLayout, pid: int) -> None:
-    _, start = _proc_state_start(pid)
-    atomic_write(wl.pid, f"{pid} {start}\n" if start is not None else f"{pid}\n")
+    write_worker_pid(wl, pid)
 
 
 def _read_status(wl: L.WorkerLayout) -> Dict:
@@ -448,6 +448,7 @@ def _start_one(wl: L.WorkerLayout) -> str:
     if wl.pause.exists():
         return "paused"
     lock = open(wl.lock, "w")
+    handed_off = False
     try:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -457,11 +458,13 @@ def _start_one(wl: L.WorkerLayout) -> str:
             return "already-running"
         _prepare_reviewer_backend(wl)
         wl.stop.unlink(missing_ok=True)
-        pid = spawn_loop(wl.dir)
+        pid = spawn_loop(wl.dir, lock.fileno())
+        handed_off = True
         _write_pid(wl, pid)
         return "started"
     finally:
-        fcntl.flock(lock, fcntl.LOCK_UN)
+        if not handed_off:
+            fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
 
 
