@@ -742,6 +742,41 @@ def _route_consumed(ledger: ProgressLedger, source_id: str, handoff_id: str) -> 
     )
 
 
+def _researcher_route_authoritative(
+    ledger: ProgressLedger,
+    node_id: str,
+    route_assignment_id: str,
+    handoff_id: str,
+) -> bool:
+    events = read_jsonl(ledger.path)
+    completed_at = -1
+    for index, event in enumerate(events):
+        if (
+            event.get("event") == "STATE"
+            and event.get("assignment_id") == route_assignment_id
+            and event.get("state") == "DONE"
+            and event.get("outcome") == "COMPLETE"
+        ):
+            completed_at = index
+    if completed_at < 0:
+        return False
+
+    marker = f"scientific route {handoff_id} completed Researcher source:"
+    for event in events[completed_at + 1:]:
+        if (
+            event.get("event") == "ASSIGNED"
+            and str(event.get("node_id") or "") == node_id
+            and event.get("assignment_id") != route_assignment_id
+        ):
+            return False
+        if event.get("event") == "NODE_STATE" and str(event.get("node_id") or "") == node_id:
+            if event.get("state") == "OPEN":
+                return False
+            if event.get("state") == "DONE" and str(event.get("note") or "").startswith(marker):
+                return False
+    return True
+
+
 def apply_scientific_route_dispositions(
     project: str,
     token_budget: int = 0,
@@ -913,6 +948,10 @@ def apply_scientific_route_dispositions(
                 continue
 
             if source_role == "researcher" and node_id not in completed:
+                if not _researcher_route_authoritative(
+                    ledger, node_id, route_assignment_id, handoff["handoff_id"]
+                ):
+                    continue
                 if wl is None:
                     continue
                 pause_reason = CLI._pause_reason(wl)

@@ -1170,21 +1170,22 @@ def do_pause(target: str) -> List[Dict]:
     dirs = L.target_worker_dirs(target)
     if not dirs:
         raise SystemExit(f"no workers for target {target!r}")
-    if worker:
-        wl = L.WorkerLayout(dirs[0])
-        return [{"worker": wl.name, "result": _pause_one(wl)}]
+    with project_control_lock(L.project_dir(project)):
+        if worker:
+            wl = L.WorkerLayout(dirs[0])
+            return [{"worker": wl.name, "result": _pause_one(wl)}]
 
-    atomic_write(_project_pause(project), "manual\n")
-    out = []
-    for wdir in dirs:
-        wl = L.WorkerLayout(wdir)
-        result = _stop_one(wl, force=False)
-        if result == "not-running":
-            result = "paused"
-        elif result == "stopping (graceful)":
-            result = "pausing"
-        out.append({"worker": wl.name, "result": result})
-    return out
+        atomic_write(_project_pause(project), "manual\n")
+        out = []
+        for wdir in dirs:
+            wl = L.WorkerLayout(wdir)
+            result = _stop_one(wl, force=False)
+            if result == "not-running":
+                result = "paused"
+            elif result == "stopping (graceful)":
+                result = "pausing"
+            out.append({"worker": wl.name, "result": result})
+        return out
 
 
 def _resume_one(wl: L.WorkerLayout) -> str:

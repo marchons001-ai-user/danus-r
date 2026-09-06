@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 from pathlib import Path
 
@@ -152,6 +153,14 @@ def _resolved_route(root: Path, monkeypatch, *, source_role: str = "experimenter
     return ledger, source, route_assignment, handoffs.get(handoff["handoff_id"]), decision
 
 
+def _allow_disposition(monkeypatch) -> None:
+    monkeypatch.setattr(
+        CLI,
+        "_do_supervise_unlocked",
+        lambda *args, **kwargs: {"project_state": "RUNNING", "budget_stop": None},
+    )
+
+
 def test_route_request_contains_source_and_review_results(tmp_path: Path, monkeypatch):
     _bind_layout(monkeypatch, tmp_path)
     ledger, source, action = _ambiguity(tmp_path)
@@ -252,6 +261,90 @@ def test_researcher_source_route_completes_node_without_new_assignment(tmp_path:
     assert "root" in ledger.completed_nodes()
     assert source["assignment_id"] != route_assignment["assignment_id"]
     assert next(item for item in ledger.assignments() if item["assignment_id"] == source["assignment_id"])["state"] == "STALE"
+
+
+def test_new_same_node_assignment_invalidates_completed_researcher_route(tmp_path: Path, monkeypatch):
+    ledger, _, route_assignment, _, _ = _resolved_route(
+        tmp_path,
+        monkeypatch,
+        source_role="researcher",
+        route="RETHINK",
+    )
+    _allow_disposition(monkeypatch)
+    newer = ledger.assign(
+        worker="researcher",
+        role="researcher",
+        node_id="root",
+        plan_version=1,
+        task="independent follow-up work\n",
+    )
+
+    assert S.apply_scientific_route_dispositions("p") == []
+    assert "root" not in ledger.completed_nodes()
+    assert ledger.current("researcher", refresh_stale=False)["assignment_id"] == newer["assignment_id"]
+    assert newer["assignment_id"] != route_assignment["assignment_id"]
+
+
+def test_consumed_researcher_route_cannot_reclose_reopened_node(tmp_path: Path, monkeypatch):
+    ledger, _, _, _, _ = _resolved_route(
+        tmp_path,
+        monkeypatch,
+        source_role="researcher",
+        route="RETHINK",
+    )
+    _allow_disposition(monkeypatch)
+
+    assert S.apply_scientific_route_dispositions("p")[0]["result"] == "completed"
+    ledger.set_node_state("root", state="OPEN", actor="supervisor", note="manual reopen")
+
+    assert S.apply_scientific_route_dispositions("p") == []
+    assert ledger.node_states()["root"]["state"] == "OPEN"
+    assert "root" not in ledger.completed_nodes()
+
+
+def test_reopen_after_route_completion_invalidates_unconsumed_route(tmp_path: Path, monkeypatch):
+    ledger, _, _, _, _ = _resolved_route(
+        tmp_path,
+        monkeypatch,
+        source_role="researcher",
+        route="RETHINK",
+    )
+    _allow_disposition(monkeypatch)
+    ledger.set_node_state("root", state="OPEN", actor="supervisor", note="manual reopen")
+
+    assert S.apply_scientific_route_dispositions("p") == []
+    assert ledger.node_states()["root"]["state"] == "OPEN"
+    assert "root" not in ledger.completed_nodes()
+
+
+def test_manual_pause_uses_project_control_lock(tmp_path: Path, monkeypatch):
+    worker_dir = tmp_path / "workers" / "researcher"
+    worker_dir.mkdir(parents=True)
+    monkeypatch.setattr(CLI.L, "resolve_target", lambda target: ("p", "researcher"))
+    monkeypatch.setattr(CLI.L, "target_worker_dirs", lambda target: [worker_dir])
+    monkeypatch.setattr(CLI.L, "project_dir", lambda project: tmp_path)
+    held = False
+
+    @contextmanager
+    def lock(project_dir):
+        nonlocal held
+        assert project_dir == tmp_path
+        assert not held
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    def pause_one(wl, reason="manual"):
+        assert held
+        return "paused"
+
+    monkeypatch.setattr(CLI, "project_control_lock", lock)
+    monkeypatch.setattr(CLI, "_pause_one", pause_one)
+
+    assert CLI.do_pause("p/researcher") == [{"worker": "researcher", "result": "paused"}]
+    assert held is False
 
 
 def test_escalation_requires_guidance_then_explicit_resume(tmp_path: Path, monkeypatch):
