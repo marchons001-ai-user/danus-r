@@ -319,7 +319,16 @@ class ProgressLedger:
                             f"handoff {handoff_id} is {handoff['status']}; expected OPEN"
                         )
                     if int(handoff["plan_version"]) != version:
-                        raise ValueError("handoff plan_version does not match assignment")
+                        compatible_scientific_route = (
+                            handoff.get("kind") in {"INTERPRET", "RETHINK", "ESCALATE"}
+                            and handoff.get("subject_type") == "ASSIGNMENT"
+                            and not self._is_plan_stale({
+                                "plan_version": int(handoff.get("plan_version") or 0),
+                                "node_id": node_id,
+                            })
+                        )
+                        if not compatible_scientific_route:
+                            raise ValueError("handoff plan_version does not match assignment")
                     if handoff["node_id"] != node_id:
                         raise ValueError("handoff node does not match assignment")
                     if str(handoff["target_role"]).lower() != role.lower():

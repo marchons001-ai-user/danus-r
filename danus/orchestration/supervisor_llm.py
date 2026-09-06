@@ -74,14 +74,13 @@ def _route_context(root: Path, action: Dict[str, Any]) -> Dict[str, Any]:
     worker = str(source.get("worker") or "")
     current = ledger.current(worker, refresh_stale=False) if worker else None
     node_id = str(action.get("node_id") or "")
-    plan_version = int(action.get("plan_version") or 0)
     if (
         not current
         or current.get("assignment_id") != source_id
         or source.get("state") != "BLOCKED"
         or source.get("outcome") != "NEEDS_REVIEW"
         or source.get("node_id") != node_id
-        or int(source.get("plan_version") or 0) != plan_version
+        or ledger._is_plan_stale(source)
     ):
         raise ValueError("source assignment no longer matches the scientific ambiguity")
 
@@ -95,7 +94,10 @@ def _route_context(root: Path, action: Dict[str, Any]) -> Dict[str, Any]:
         or review.get("subject_type") != "ASSIGNMENT"
         or review.get("subject_id") != source_id
         or review.get("node_id") != node_id
-        or int(review.get("plan_version") or 0) != plan_version
+        or ledger._is_plan_stale({
+            "plan_version": int(review.get("plan_version") or 0),
+            "node_id": node_id,
+        })
     ):
         raise ValueError("completed generic review is unavailable")
 
@@ -106,6 +108,7 @@ def _route_context(root: Path, action: Dict[str, Any]) -> Dict[str, Any]:
         or review_assignment.get("state") != "DONE"
         or review_assignment.get("outcome") != "COMPLETE"
         or str(review_assignment.get("role") or "").lower() != "reviewer"
+        or ledger._is_plan_stale(review_assignment)
     ):
         raise ValueError("review assignment is not a completed Reviewer result")
     if generic_review_class(review_assignment) != "SCIENTIFIC_AMBIGUITY":
@@ -504,6 +507,13 @@ def _materialize_decision(
     handoffs = HandoffRequests(ledger)
     subject_id = str(decision["subject_id"])
     route = str(decision["route"])
+    node_id = str(decision["node_id"])
+    if ledger._is_plan_stale({
+        "plan_version": int(decision["plan_version"]),
+        "node_id": node_id,
+    }):
+        raise ValueError("durable route decision plan binding is stale")
+    current_version = ResearchPlanGraph(ledger.root).snapshot()["plan_version"]
     raw_refs = decision.get("evidence_refs") if "evidence_refs" in decision else (evidence_refs or [])
     refs = list(dict.fromkeys(
         str(value).strip() for value in (raw_refs or []) if str(value).strip()
@@ -521,8 +531,7 @@ def _materialize_decision(
         current = lineage[0]
         expected = {
             "kind": route,
-            "plan_version": decision["plan_version"],
-            "node_id": decision["node_id"],
+            "node_id": node_id,
             "source_assignment_id": subject_id,
             "parent_handoff_id": decision["review_handoff_id"],
             "requested_by": "supervisor",
@@ -531,6 +540,11 @@ def _materialize_decision(
         }
         if any(current.get(key) != value for key, value in expected.items()):
             raise ValueError("existing scientific route handoff conflicts with durable decision")
+        if ledger._is_plan_stale({
+            "plan_version": int(current.get("plan_version") or 0),
+            "node_id": node_id,
+        }):
+            raise ValueError("existing scientific route handoff plan binding is stale")
         if list(current.get("evidence_refs") or []) != refs:
             raise ValueError("existing scientific route evidence conflicts with durable decision")
         if str(current.get("request") or "").strip() != str(decision["request"]).strip():
@@ -539,8 +553,8 @@ def _materialize_decision(
 
     return handoffs.open(
         kind=route,
-        plan_version=int(decision["plan_version"]),
-        node_id=str(decision["node_id"]),
+        plan_version=int(current_version),
+        node_id=node_id,
         subject_type="ASSIGNMENT",
         subject_id=subject_id,
         requested_by="supervisor",

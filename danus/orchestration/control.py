@@ -20,6 +20,7 @@ from danus.execution import layout as L
 _FIVE_HOURS_SECONDS = 5 * 60 * 60
 _QUOTA_SNAPSHOT_MAX_AGE_SECONDS = 15 * 60
 _GENERIC_REVIEW_PREFIX = "DANUS_REVIEW_CLASS:"
+_GENERIC_REVIEW_VERIFIED_PREFIX = "DANUS_REVIEW_CLASS_VERIFIED:"
 _GENERIC_REVIEW_CLASSES = {"SCIENTIFIC_AMBIGUITY", "DETERMINISTIC"}
 
 
@@ -240,8 +241,22 @@ def generic_review_class(assignment: Optional[Dict[str, Any]]) -> str:
     """Return the one explicit generic-review routing class, or fail closed."""
     if not assignment:
         return ""
+    result = str(assignment.get("result") or "")
+    verified = []
+    for raw in result.splitlines():
+        line = raw.strip()
+        if line.startswith(_GENERIC_REVIEW_VERIFIED_PREFIX):
+            verified.append(line[len(_GENERIC_REVIEW_VERIFIED_PREFIX):].strip())
+    if verified:
+        if len(verified) == 1 and verified[0] in _GENERIC_REVIEW_CLASSES:
+            return verified[0]
+        return ""
+    # Legacy short results were never truncated; exact 8000-char records may have
+    # lost an earlier conflicting marker and therefore cannot authorize routing.
+    if len(result) >= 8000:
+        return ""
     markers = []
-    for raw in str(assignment.get("result") or "").splitlines():
+    for raw in result.splitlines():
         line = raw.strip()
         if line.startswith(_GENERIC_REVIEW_PREFIX):
             markers.append(line[len(_GENERIC_REVIEW_PREFIX):].strip())

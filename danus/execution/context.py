@@ -34,6 +34,9 @@ _DEFAULT_SECONDS = 1_800
 
 _TOOL_ITEM_TYPES = {"command_execution", "mcp_tool_call", "web_search"}
 _TOKEN_LINE_RE = re.compile(r"(?im)^tokens used\s+([0-9][0-9,]*)\s*$")
+_REVIEW_CLASS_PREFIX = "DANUS_REVIEW_CLASS:"
+_VERIFIED_REVIEW_CLASS_PREFIX = "DANUS_REVIEW_CLASS_VERIFIED:"
+_REVIEW_CLASSES = {"SCIENTIFIC_AMBIGUITY", "DETERMINISTIC"}
 _MIGRATION_FIELDS = (
     "current_objective",
     "established_results",
@@ -110,6 +113,23 @@ def limits() -> Dict[str, int]:
     }
 
 
+def _bounded_agent_message(message: str) -> str:
+    markers = []
+    kept = []
+    for line in message.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_REVIEW_CLASS_PREFIX):
+            markers.append(stripped[len(_REVIEW_CLASS_PREFIX):].strip())
+            continue
+        if stripped.startswith(_VERIFIED_REVIEW_CLASS_PREFIX):
+            continue
+        kept.append(line)
+    text = "\n".join(kept)
+    verified = markers[0] if len(markers) == 1 and markers[0] in _REVIEW_CLASSES else ""
+    suffix = f"\n{_VERIFIED_REVIEW_CLASS_PREFIX} {verified}" if verified else ""
+    return text[-max(0, 8000 - len(suffix)):] + suffix
+
+
 def _consume_line(cursor: LogCursor, line: str) -> None:
     try:
         event = json.loads(line)
@@ -156,7 +176,7 @@ def _consume_line(cursor: LogCursor, line: str) -> None:
         if etype == "item.completed" and item_type == "agent_message":
             msg = item.get("text")
             if isinstance(msg, str):
-                out["last_agent_message"] = msg[-8000:]
+                out["last_agent_message"] = _bounded_agent_message(msg)
 
 
 def inspect_log(path: Path, cursor: Optional[LogCursor] = None) -> Dict[str, Any]:

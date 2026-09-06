@@ -91,6 +91,14 @@ def _repair_error_path(pdir: Path) -> Path:
     return pdir / _REPAIR_ERROR_REL
 
 
+def _repair_context(pdir: Path) -> Dict[str, Any]:
+    try:
+        obj = json.loads(_repair_error_path(pdir).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
 def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
@@ -471,16 +479,46 @@ def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
     path = _proposal_path(pdir)
     if not path.is_file() or not _researcher_handoff_ready(pdir, researcher):
         return None
+
+    graph = ResearchPlanGraph(pdir)
+    repair = _repair_context(pdir)
+    required_refs = list(dict.fromkeys(
+        graph._required_post_hoc_refs(researcher)
+        + [
+            str(value).strip()
+            for value in (repair.get("required_evidence_refs") or [])
+            if str(value).strip()
+        ]
+    ))
+    source_assignment_id = str(
+        repair.get("source_assignment_id")
+        or (source_assignment or {}).get("assignment_id")
+        or ""
+    )
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         reason = f"invalid_json:{exc.msg}"
         _stale_invalid_correction_handoff(pdir, source_assignment, reason)
-        return {"action": "PLAN_PROPOSAL", "result": "blocked", "reason": reason}
+        return {
+            "action": "PLAN_PROPOSAL",
+            "result": "blocked",
+            "reason": reason,
+            "source_assignment_id": source_assignment_id,
+            "required_evidence_refs": required_refs,
+        }
 
-    graph = ResearchPlanGraph(pdir)
     try:
         proposal = _normalize_proposal(graph, raw, path)
+        if required_refs:
+            if not proposal["post_hoc"]:
+                raise ValueError("evidence-bound plan change requires post_hoc=true")
+            missing = [ref for ref in required_refs if ref not in proposal["evidence_refs"]]
+            if missing:
+                raise ValueError(
+                    "post_hoc plan change must preserve triggering evidence_refs: "
+                    + ", ".join(missing)
+                )
         proposal_id = _content_id({"proposer": researcher, "proposal": proposal})
         record_path = _proposal_record_path(pdir, proposal_id)
         if record_path.is_file():
@@ -505,7 +543,7 @@ def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
             "proposal_id": proposal_id,
             "change_id": change_id,
             "proposer": researcher,
-            "source_assignment_id": str(source_assignment.get("assignment_id") or "") if source_assignment else "",
+            "source_assignment_id": source_assignment_id,
             "captured_at": utc_now(),
             "proposal": proposal,
         }
@@ -516,7 +554,13 @@ def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
     except (OSError, ValueError) as exc:
         reason = str(exc)
         _stale_invalid_correction_handoff(pdir, source_assignment, reason)
-        return {"action": "PLAN_PROPOSAL", "result": "blocked", "reason": reason}
+        return {
+            "action": "PLAN_PROPOSAL",
+            "result": "blocked",
+            "reason": reason,
+            "source_assignment_id": source_assignment_id,
+            "required_evidence_refs": required_refs,
+        }
 
 
 def _proposal_id_from_change(change: Dict[str, Any]) -> Optional[str]:
@@ -932,6 +976,8 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
             atomic_write(_repair_error_path(pdir), _json_text({
                 "plan_version": ResearchPlanGraph(pdir).snapshot()["plan_version"],
                 "reason": reason,
+                "source_assignment_id": str(captured.get("source_assignment_id") or ""),
+                "required_evidence_refs": list(captured.get("required_evidence_refs") or []),
                 "recorded_at": utc_now(),
             }))
             item = _assign_role(
@@ -968,6 +1014,11 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
                 raise ValueError("proposal/change binding mismatch")
             if record["proposal"]["operations"] != change.get("operations"):
                 raise ValueError("approved change operations diverge from immutable proposal")
+            if (
+                bool(record["proposal"].get("post_hoc")) != bool(change.get("post_hoc"))
+                or list(record["proposal"].get("evidence_refs") or []) != list(change.get("evidence_refs") or [])
+            ):
+                raise ValueError("approved change evidence binding diverges from immutable proposal")
 
             change_id = str(change["change_id"])
             review_handoff = _plan_handoff(pdir, "REVIEW", change_id)
