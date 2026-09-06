@@ -1057,7 +1057,7 @@ def research_main(argv: List[str]) -> int:
     )
     print(json.dumps({"research_init": init}, ensure_ascii=False, sort_keys=True), flush=True)
     if args.once:
-        applied = planning.planning_step(args.project)
+        applied = planning.planning_step(args.project, token_budget=args.token_budget)
         report = CLI.do_supervise(
             args.project,
             apply=True,

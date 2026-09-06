@@ -277,7 +277,7 @@ def test_escalation_requires_guidance_then_explicit_resume(tmp_path: Path, monke
 def test_research_once_uses_same_s6_route_seam(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(planning, "initialize_research", lambda *args, **kwargs: {"project": "p"})
-    monkeypatch.setattr(planning, "planning_step", lambda project: [{"action": "PLAN_NOOP"}])
+    monkeypatch.setattr(planning, "planning_step", lambda project, *, token_budget=0: [{"action": "PLAN_NOOP"}])
     monkeypatch.setattr(
         CLI,
         "do_supervise",
