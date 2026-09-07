@@ -20,6 +20,7 @@ is testable and reconfigurable:
   DANUS_AGENTS_ROOT   root holding all projects (<root>/<project>); lets main
                       address any project by name via the ``project`` arg
   DANUS_AUTHOR        this agent's id, for attribution
+  DANUS_ASSIGNMENT_ID the runtime-bound assignment allowed to submit Reviewer verdicts
   DANUS_ROLE          worker | main | verifier | all  (selects exposed tools;
                       unset falls back to the read-only verifier set — fail-closed)
   DANUS_VERIFY_URL    analytical verify endpoint, normally .../verify; the
@@ -29,6 +30,7 @@ is testable and reconfigurable:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -584,38 +586,75 @@ def implementation_submit_contract(
     }
 
 
+@contextmanager
+def _review_scope(subject_type: str, subject_id: str):
+    from danus.orchestration.cli import project_control_lock
+
+    ledger = _pl()
+    with project_control_lock(_project()), ledger.assignment_lock():
+        assignment = ledger.current(_author(), refresh_stale=True)
+        expected = os.environ.get("DANUS_ASSIGNMENT_ID", "")
+        if (
+            _role().lower() not in {"reviewer", "all"}
+            or not assignment
+            or not expected
+            or assignment.get("assignment_id") != expected
+            or assignment.get("role", "").lower() != "reviewer"
+            or assignment.get("state") not in {"ASSIGNED", "RUNNING", "DONE"}
+            or ledger._is_plan_stale(assignment)
+        ):
+            raise ValueError("review requires the gateway's current Reviewer assignment")
+        handoff = HandoffRequests(ledger).get(str(assignment.get("handoff_id") or ""))
+        if (
+            not handoff
+            or handoff.get("kind") != "REVIEW"
+            or handoff.get("subject_type") != subject_type
+            or handoff.get("subject_id") != subject_id
+            or handoff.get("node_id") != assignment.get("node_id")
+            or handoff.get("assigned_assignment_id") != expected
+            or handoff.get("status") not in {"ASSIGNED", "RESOLVED"}
+        ):
+            raise ValueError("review subject does not match the assigned REVIEW handoff")
+        yield assignment, handoff
+
+
 def implementation_review_contract(
     contract_id: str,
     verdict: str,
     rationale: str,
 ) -> Dict[str, Any]:
     """Reviewer-only semantic verdict; exact retries return the durable verdict."""
-    ledger = _pl()
-    reviewer = _author()
-    normalized = str(verdict or "").strip().upper()
-    if normalized not in ProgressLedger.IMPLEMENTATION_VERDICTS:
-        raise ValueError(f"verdict must be one of {ProgressLedger.IMPLEMENTATION_VERDICTS}")
-    rationale_text = str(rationale or "").strip()
-    if not rationale_text:
-        raise ValueError("rationale is required")
-    current = ledger.implementation_contract(contract_id)
-    if current is not None:
-        existing_verdict = str(current.get("verdict") or "").upper()
-        if existing_verdict in ProgressLedger.IMPLEMENTATION_VERDICTS:
-            if (
-                existing_verdict == normalized
-                and str(current.get("reviewer") or "") == reviewer
-                and str(current.get("rationale") or "") == rationale_text
-            ):
-                return {"contract_id": contract_id, "status": current["status"]}
-            raise ValueError(f"conflicting replay for reviewed implementation contract {contract_id}")
-    record = ledger.review_implementation_contract(
-        contract_id,
-        reviewer=reviewer,
-        verdict=normalized,
-        rationale=rationale_text,
-    )
-    return {"contract_id": contract_id, "status": record["status"]}
+    with _review_scope("IMPLEMENTATION_CONTRACT", contract_id) as (review_assignment, review_handoff):
+        ledger = _pl()
+        reviewer = _author()
+        normalized = str(verdict or "").strip().upper()
+        if normalized not in ProgressLedger.IMPLEMENTATION_VERDICTS:
+            raise ValueError(f"verdict must be one of {ProgressLedger.IMPLEMENTATION_VERDICTS}")
+        rationale_text = str(rationale or "").strip()
+        if not rationale_text:
+            raise ValueError("rationale is required")
+        current = ledger.implementation_contract(contract_id)
+        if current is not None:
+            existing_verdict = str(current.get("verdict") or "").upper()
+            if existing_verdict in ProgressLedger.IMPLEMENTATION_VERDICTS:
+                if (
+                    existing_verdict == normalized
+                    and current.get("review_assignment_id") == review_assignment["assignment_id"]
+                    and str(current.get("reviewer") or "") == reviewer
+                    and str(current.get("rationale") or "") == rationale_text
+                ):
+                    return {"contract_id": contract_id, "status": current["status"]}
+                raise ValueError(f"conflicting replay for reviewed implementation contract {contract_id}")
+        if review_assignment.get("state") not in {"ASSIGNED", "RUNNING"} or review_handoff.get("status") != "ASSIGNED":
+            raise ValueError("new verdict requires an active review assignment")
+        record = ledger.review_implementation_contract(
+            contract_id,
+            reviewer=reviewer,
+            verdict=normalized,
+            rationale=rationale_text,
+            review_assignment_id=review_assignment["assignment_id"],
+        )
+        return {"contract_id": contract_id, "status": record["status"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -654,47 +693,52 @@ def plan_review_change(
     approve: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Reviewer-only verdict; exact retries return the already durable review."""
-    graph = _pg()
-    reviewer = _author()
-    if verdict and str(verdict).strip():
-        normalized = str(verdict).strip().upper()
-        if normalized not in ResearchPlanGraph.REVIEW_VERDICTS:
-            raise ValueError(f"verdict must be one of {ResearchPlanGraph.REVIEW_VERDICTS}")
-        if approve is not None and bool(approve) != (normalized == "APPROVE"):
-            raise ValueError("approve compatibility flag conflicts with explicit verdict")
-    else:
-        if approve is None:
-            raise ValueError("plan review requires verdict APPROVE, REVISE, or REJECT")
-        normalized = "APPROVE" if bool(approve) else "REVISE"
-    rationale_text = str(rationale or "").strip()
-    if not rationale_text:
-        raise ValueError("rationale is required")
-    current = graph.get_change(change_id)
-    existing_verdict = str(current.get("review_verdict") or "").upper()
-    if existing_verdict in ResearchPlanGraph.REVIEW_VERDICTS:
-        if (
-            existing_verdict == normalized
-            and str(current.get("reviewer") or "") == reviewer
-            and str(current.get("review_rationale") or "") == rationale_text
-        ):
-            return {
-                "change_id": change_id,
-                "status": current["status"],
-                "verdict": existing_verdict,
-            }
-        raise ValueError(f"conflicting replay for reviewed plan change {change_id}")
-    record = graph.review_change(
-        change_id,
-        reviewer=reviewer,
-        rationale=rationale_text,
-        verdict=normalized,
-        approve=None,
-    )
-    return {
-        "change_id": change_id,
-        "status": record["status"],
-        "verdict": record.get("review_verdict"),
-    }
+    with _review_scope("PLAN_CHANGE", change_id) as (review_assignment, review_handoff):
+        graph = _pg()
+        reviewer = _author()
+        if verdict and str(verdict).strip():
+            normalized = str(verdict).strip().upper()
+            if normalized not in ResearchPlanGraph.REVIEW_VERDICTS:
+                raise ValueError(f"verdict must be one of {ResearchPlanGraph.REVIEW_VERDICTS}")
+            if approve is not None and bool(approve) != (normalized == "APPROVE"):
+                raise ValueError("approve compatibility flag conflicts with explicit verdict")
+        else:
+            if approve is None:
+                raise ValueError("plan review requires verdict APPROVE, REVISE, or REJECT")
+            normalized = "APPROVE" if bool(approve) else "REVISE"
+        rationale_text = str(rationale or "").strip()
+        if not rationale_text:
+            raise ValueError("rationale is required")
+        current = graph.get_change(change_id)
+        existing_verdict = str(current.get("review_verdict") or "").upper()
+        if existing_verdict in ResearchPlanGraph.REVIEW_VERDICTS:
+            if (
+                existing_verdict == normalized
+                and current.get("review_assignment_id") == review_assignment["assignment_id"]
+                and str(current.get("reviewer") or "") == reviewer
+                and str(current.get("review_rationale") or "") == rationale_text
+            ):
+                return {
+                    "change_id": change_id,
+                    "status": current["status"],
+                    "verdict": existing_verdict,
+                }
+            raise ValueError(f"conflicting replay for reviewed plan change {change_id}")
+        if review_assignment.get("state") not in {"ASSIGNED", "RUNNING"} or review_handoff.get("status") != "ASSIGNED":
+            raise ValueError("new verdict requires an active review assignment")
+        record = graph.review_change(
+            change_id,
+            reviewer=reviewer,
+            rationale=rationale_text,
+            verdict=normalized,
+            approve=None,
+            review_assignment_id=review_assignment["assignment_id"],
+        )
+        return {
+            "change_id": change_id,
+            "status": record["status"],
+            "verdict": record.get("review_verdict"),
+        }
 
 
 def plan_commit_change(change_id: str, project: Optional[str] = None) -> Dict[str, Any]:

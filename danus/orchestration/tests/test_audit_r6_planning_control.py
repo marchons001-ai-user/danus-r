@@ -225,6 +225,7 @@ def test_supervise_watch_captures_researcher_plan_proposal(tmp_path: Path, monke
         proposal = Path(init["proposal_handoff"])
         proposal.parent.mkdir(parents=True, exist_ok=True)
         proposal.write_text(json.dumps({
+            "assignment_id": ProgressLedger(pdir).current("low")["assignment_id"],
             "base_plan_version": 1,
             "reason": "small route",
             "post_hoc": False,

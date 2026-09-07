@@ -122,6 +122,7 @@ tool_timeout_sec = 3600
 DANUS_PROJECT_DIR = {project_dir}
 DANUS_AUTHOR = {author}
 DANUS_ROLE = {gateway_role}
+DANUS_ASSIGNMENT_ID = {assignment_id}
 DANUS_VERIFY_URL = {verify_url}
 """
 
@@ -139,13 +140,18 @@ def _default_model() -> str:
     return codex.model()
 
 
-def write_codex_config(wl: "L.WorkerLayout", role_name: str = "worker") -> None:
+def write_codex_config(wl: "L.WorkerLayout", role_name: str = "worker", assignment=None) -> None:
     """Write the worker's MCP config pinned to this interpreter and role."""
+    from danus.core import ProgressLedger
+
+    if assignment is None:
+        assignment = ProgressLedger(wl.project_dir).current(wl.name, refresh_stale=False)
     atomic_write(wl.codex_config, _CODEX_CONFIG.format(
         python=_toml_str(sys.executable),
         project_dir=_toml_str(str(wl.project_dir)),
         author=_toml_str(wl.name),
         gateway_role=_toml_str(gateway_role(role_name)),
+        assignment_id=_toml_str(str((assignment or {}).get("assignment_id") or "")),
         verify_url=_toml_str(_verify_url()),
     ))
 

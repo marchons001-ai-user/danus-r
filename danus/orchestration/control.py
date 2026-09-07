@@ -175,7 +175,10 @@ def build_supervisor_snapshot(project_dir: Path, worker_rows: List[Dict[str, Any
         "plan_changes": pending_plan_changes,
         "all_plan_changes": _all_plan_changes(graph),
         "current_assignments": current_assignments,
-        "assignments": ledger.assignments(),
+        "assignments": [
+            {**item, "state": "STALE"} if ledger._is_plan_stale(item) else item
+            for item in ledger.assignments()
+        ],
         "completed_nodes": ledger.completed_nodes(),
         "implementation_contracts": ledger.implementation_contracts(),
         "pending_implementation_contracts": ledger.pending_implementation_contracts(),
@@ -319,6 +322,7 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             if (
                 not active_route(node_id)
                 or any(child not in completed for child in active_children[node_id])
+                or any(dep not in completed for dep in nodes[node_id]["depends_on"])
             ):
                 completed.remove(node_id)
                 changed = True
@@ -380,10 +384,6 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         state = assignment["state"]
         aid = assignment["assignment_id"]
 
-        if state == "STALE":
-            add("STOP", worker=worker, node_id=node_id, assignment_id=aid,
-                reason="assignment_stale")
-            continue
         if not active_route(node_id):
             add("STOP", worker=worker, node_id=node_id, assignment_id=aid,
                 reason="plan_route_retired")
@@ -391,6 +391,10 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         if blocked_dependencies(node_id):
             add("STOP", worker=worker, node_id=node_id, assignment_id=aid,
                 reason="dependencies_not_complete")
+            continue
+        if state == "STALE":
+            add("STOP", worker=worker, node_id=node_id, assignment_id=aid,
+                reason="assignment_stale")
             continue
         if row.get("paused"):
             pause_reason = str(row.get("pause_reason") or "manual")
@@ -623,7 +627,9 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             elif kind == "REVIEW" and subject_type == "IMPLEMENTATION_CONTRACT":
                 contract = contracts_by_id.get(subject_id)
                 status = _contract_status(contract or {})
-                if status in ProgressLedger.IMPLEMENTATION_VERDICTS:
+                if (status in ProgressLedger.IMPLEMENTATION_VERDICTS
+                    and (not contract.get("review_assignment_id")
+                         or contract["review_assignment_id"] == assignment["assignment_id"])):
                     summary = f"implementation review recorded {status}"
             elif kind in {"REVISION", "RETHINK"} and subject_type == "IMPLEMENTATION_CONTRACT":
                 candidates = replacements.get(subject_id, [])
@@ -634,7 +640,9 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             elif kind == "REVIEW" and subject_type == "PLAN_CHANGE":
                 change = changes_by_id.get(subject_id)
                 verdict = str((change or {}).get("review_verdict") or "").upper()
-                if verdict in ResearchPlanGraph.REVIEW_VERDICTS:
+                if (verdict in ResearchPlanGraph.REVIEW_VERDICTS
+                    and (not change.get("review_assignment_id")
+                         or change["review_assignment_id"] == assignment["assignment_id"])):
                     summary = f"plan review recorded {verdict}"
             if summary:
                 route(
@@ -702,6 +710,12 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 )
 
         def review_ready(review: Optional[Dict[str, Any]]) -> bool:
+            if review:
+                subject_id = str(review.get("subject_id") or "")
+                subject = (contracts_by_id if review.get("subject_type") == "IMPLEMENTATION_CONTRACT" else changes_by_id).get(subject_id) or {}
+                bound = subject.get("review_assignment_id")
+                if bound and bound != (handoff_assignment(review) or {}).get("assignment_id"):
+                    return False
             return bool(
                 review
                 and (
@@ -745,7 +759,7 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                         source_assignment_id=source_id,
                     )
                 continue
-            if status == "APPROVE" and (review is None or review_ready(review)):
+            if status == "APPROVE" and ((review is None and not contract.get("review_assignment_id")) or review_ready(review)):
                 route(
                     "ASSIGN_CONTRACT",
                     node_id=contract.get("node_id"),

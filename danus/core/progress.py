@@ -9,6 +9,7 @@ plan node after deciding that its scientific objective is actually satisfied.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -33,6 +34,14 @@ class ProgressLedger:
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.path = self.root / "progress" / "ledger.jsonl"
+
+    @contextmanager
+    def assignment_lock(self):
+        path = self.root / "progress" / ".assign.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
 
     @staticmethod
     def task_sha256(task: str) -> str:
@@ -188,6 +197,7 @@ class ProgressLedger:
         reviewer: str,
         verdict: str,
         rationale: str,
+        review_assignment_id: str = "",
     ) -> Dict[str, Any]:
         """Record the Reviewer's one-shot semantic verdict for a contract."""
         contract_id = self._required(contract_id, "contract_id")
@@ -207,6 +217,7 @@ class ProgressLedger:
             self.path,
             {
                 "event": "IMPLEMENTATION_REVIEW",
+                **({"review_assignment_id": review_assignment_id} if review_assignment_id else {}),
                 "contract_id": contract_id,
                 "reviewer": reviewer,
                 "verdict": verdict,
@@ -263,6 +274,7 @@ class ProgressLedger:
         plan_version: int,
         task: str,
         handoff_id: str = "",
+        write_task: bool = False,
     ) -> Dict[str, Any]:
         """Atomically bind one worker task to one ACTIVE Plan node/role lane."""
         worker = self._required(worker, "worker")
@@ -271,6 +283,13 @@ class ProgressLedger:
         handoff_id = str(handoff_id or "").strip()
         if not str(task).strip():
             raise ValueError("task is required")
+
+        def materialize_task():
+            if write_task:
+                path = self.root / "workers" / worker / "TASK.md"
+                tmp = path.with_suffix(".md.tmp")
+                tmp.write_text(task, encoding="utf-8")
+                tmp.replace(path)
 
         lock_path = self.root / "progress" / ".assign.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -312,6 +331,7 @@ class ProgressLedger:
                             and int(existing.get("plan_version")) == version
                             and existing.get("task_sha256") == task_hash
                         ):
+                            materialize_task()
                             return existing
                         raise ValueError(f"handoff {handoff_id} is already ASSIGNED")
                     if handoff["status"] != "OPEN":
@@ -362,6 +382,9 @@ class ProgressLedger:
                         and item.get("subject_type") == "IMPLEMENTATION_CONTRACT"
                         and item.get("subject_id") == implementation_contract["contract_id"]
                     ]
+                    review_assignment_id = implementation_contract.get("review_assignment_id")
+                    if review_assignment_id and not reviews:
+                        raise ValueError("managed implementation approval requires its REVIEW handoff")
                     if reviews:
                         reviews.sort(
                             key=lambda item: (
@@ -369,7 +392,8 @@ class ProgressLedger:
                                 item["handoff_id"],
                             )
                         )
-                        if reviews[-1].get("status") != "RESOLVED":
+                        if (reviews[-1].get("status") != "RESOLVED"
+                            or (review_assignment_id and reviews[-1].get("resolution_assignment_id") != review_assignment_id)):
                             raise ValueError(
                                 "implementation contract review handoff requires RESOLVED"
                             )
@@ -388,6 +412,8 @@ class ProgressLedger:
                             f"plan node {node_id} role {role} already has active assignment "
                             f"{record['assignment_id']} on worker {record['worker']}"
                         )
+
+                materialize_task()
 
                 # A worker may be deliberately rebound. A reopened handoff may also
                 # replace its previous attempt on a different worker.
@@ -442,6 +468,7 @@ class ProgressLedger:
         outcome: str = "",
         expected_assignment_id: str = "",
         result: str = "",
+        checkpoint_id: str = "",
     ) -> Dict[str, Any]:
         """Update one worker's current assignment without touching Research Plan.
 
@@ -506,6 +533,7 @@ class ProgressLedger:
                     note=str(note).strip(),
                     outcome=outcome,
                     result=result,
+                    checkpoint_id=checkpoint_id,
                 )
                 return self.current(worker, refresh_stale=False) or current
             finally:
@@ -546,6 +574,7 @@ class ProgressLedger:
         state: str,
         actor: str,
         note: str = "",
+        expected_assignment_id: str = "",
     ) -> Dict[str, Any]:
         """Supervisor-only semantic closure/reopen of one plan node.
 
@@ -559,59 +588,95 @@ class ProgressLedger:
             raise ValueError(f"node state must be one of {self.NODE_STATES}")
         actor = self._required(actor, "actor")
 
-        plan = ResearchPlanGraph(self.root)
-        current = plan.snapshot()
-        node = current["nodes"].get(node_id)
-        if node is None:
-            raise ValueError(f"unknown plan node: {node_id}")
-        if node["state"] != "ACTIVE":
-            raise ValueError(f"plan node {node_id} is not ACTIVE")
+        with self.assignment_lock():
+            if expected_assignment_id:
+                source = next((item for item in self._current_by_worker().values()
+                               if item["assignment_id"] == expected_assignment_id), None)
+                if (source is None or source["node_id"] != node_id
+                    or source["state"] != "DONE" or source.get("outcome") != "COMPLETE"
+                    or self._is_plan_stale(source)):
+                    raise ValueError("node completion assignment is no longer authoritative")
+            plan = ResearchPlanGraph(self.root)
+            current = plan.snapshot()
+            node = current["nodes"].get(node_id)
+            if node is None:
+                raise ValueError(f"unknown plan node: {node_id}")
+            if node["state"] != "ACTIVE":
+                raise ValueError(f"plan node {node_id} is not ACTIVE")
 
-        existing = self.node_states().get(node_id)
-        if existing and existing["state"] == state:
-            return existing
-        event = {
-            "event": "NODE_STATE",
-            "node_id": node_id,
-            "plan_version": current["plan_version"],
-            "state": state,
-            "actor": actor,
-            "note": str(note).strip(),
-            "at": utc_now(),
-        }
-        append_jsonl(self.path, event)
-        return event
+            existing = self.node_states().get(node_id)
+            if state == "DONE" and existing and existing["state"] == state:
+                return existing
+            event = {
+                "event": "NODE_STATE",
+                "node_id": node_id,
+                "plan_version": current["plan_version"],
+                "state": state,
+                "actor": actor,
+                "note": str(note).strip(),
+                "at": utc_now(),
+            }
+            append_jsonl(self.path, event)
+            return event
+
+    @staticmethod
+    def _reopen_affected(nodes: Dict[str, Any], node_id: str) -> set[str]:
+        affected = {node_id}
+        while True:
+            expanded = affected | {
+                nid for nid, node in nodes.items()
+                if node.get("parent") in affected or affected.intersection(node.get("depends_on", []))
+            }
+            if expanded == affected:
+                break
+            affected = expanded
+        for nid in list(affected):
+            parent = nodes.get(nid, {}).get("parent")
+            while parent:
+                affected.add(parent)
+                parent = nodes[parent].get("parent")
+        return affected
+
+    def _reopened_after(self, record: Dict[str, Any]) -> bool:
+        identity = record.get("assignment_id") or record.get("contract_id")
+        if not identity:
+            return False
+        seen = False
+        graph = ResearchPlanGraph(self.root)
+        for event in read_jsonl(self.path):
+            if event.get("event") in {"ASSIGNED", "IMPLEMENTATION_CONTRACT"} and identity in {
+                event.get("assignment_id"), event.get("contract_id")
+            }:
+                seen = True
+            if seen and event.get("event") == "NODE_STATE" and event.get("state") == "OPEN":
+                nodes = graph.revision(int(event["plan_version"]))["nodes"]
+                if record["node_id"] in self._reopen_affected(nodes, str(event["node_id"])):
+                    return True
+        return False
 
     def node_states(self) -> Dict[str, Dict[str, Any]]:
-        """Return latest valid OPEN/DONE event per node under the current Plan."""
+        """Replay completion and cascading reopen in durable event order."""
+        graph = ResearchPlanGraph(self.root)
+        current = graph.snapshot()
         latest: Dict[str, Dict[str, Any]] = {}
         for event in read_jsonl(self.path):
             if event.get("event") != "NODE_STATE":
                 continue
             node_id = str(event.get("node_id") or "")
             state = str(event.get("state") or "").upper()
-            if node_id and state in self.NODE_STATES:
-                latest[node_id] = dict(event)
-
-        plan = ResearchPlanGraph(self.root)
-        current = plan.snapshot()
-        valid: Dict[str, Dict[str, Any]] = {}
-        for node_id, event in latest.items():
-            try:
-                version = int(event.get("plan_version"))
-                old = plan.revision(version)
-            except (TypeError, ValueError):
+            if state not in self.NODE_STATES:
                 continue
-            old_node = old["nodes"].get(node_id)
-            new_node = current["nodes"].get(node_id)
-            if (
-                old_node is not None
-                and new_node is not None
-                and new_node["state"] == "ACTIVE"
-                and old_node == new_node
-            ):
-                valid[node_id] = event
-        return valid
+            version = int(event["plan_version"])
+            if state == "OPEN":
+                nodes = graph.revision(version)["nodes"]
+                for affected in self._reopen_affected(nodes, node_id):
+                    latest[affected] = {**event, "node_id": affected}
+            else:
+                latest[node_id] = dict(event)
+        return {
+            node_id: event for node_id, event in latest.items()
+            if graph.node_compatible(node_id, event["plan_version"], current)
+        }
 
     def completed_nodes(self) -> List[str]:
         return sorted(
@@ -634,6 +699,8 @@ class ProgressLedger:
                     note="bound plan node changed or was retired",
                 )
                 current = self._current_by_worker().get(worker)
+        if current and refresh_stale and current["state"] == "DONE" and self._is_plan_stale(current):
+            return {**current, "state": "STALE"}
         return current
 
     def snapshot(self, *, refresh_stale: bool = True) -> List[Dict[str, Any]]:
@@ -651,7 +718,12 @@ class ProgressLedger:
                     changed = True
             if changed:
                 current = self._current_by_worker()
-        return [current[k] for k in sorted(current)]
+        return [
+            {**current[k], "state": "STALE"}
+            if refresh_stale and current[k]["state"] == "DONE" and self._is_plan_stale(current[k])
+            else current[k]
+            for k in sorted(current)
+        ]
 
     def assignments(self) -> List[Dict[str, Any]]:
         """Latest state of every assignment, including historical workers/tasks."""
@@ -676,19 +748,7 @@ class ProgressLedger:
         return view
 
     def _implementation_contract_stale(self, record: Dict[str, Any]) -> bool:
-        plan = ResearchPlanGraph(self.root)
-        current = plan.snapshot()
-        if current["plan_version"] == record["plan_version"]:
-            return False
-        try:
-            old = plan.revision(record["plan_version"])
-        except ValueError:
-            return True
-        old_node = old["nodes"].get(record["node_id"])
-        new_node = current["nodes"].get(record["node_id"])
-        if old_node is None or new_node is None or new_node["state"] != "ACTIVE":
-            return True
-        return old_node != new_node
+        return self._is_plan_stale(record)
 
     def _replay_implementation_contracts(
         self,
@@ -710,6 +770,8 @@ class ProgressLedger:
                 record = records[contract_id]
                 record["verdict"] = str(event.get("verdict") or "").upper()
                 record["reviewer"] = str(event.get("reviewer") or "")
+                if event.get("review_assignment_id"):
+                    record["review_assignment_id"] = event["review_assignment_id"]
                 record["rationale"] = str(event.get("rationale") or "")
                 record["reviewed_at"] = event.get("at")
             elif kind == "ASSIGNED":
@@ -720,19 +782,10 @@ class ProgressLedger:
         return records, order
 
     def _is_plan_stale(self, record: Dict[str, Any]) -> bool:
-        plan = ResearchPlanGraph(self.root)
-        current = plan.snapshot()
-        if current["plan_version"] == record["plan_version"]:
-            return False
-        try:
-            old = plan.revision(record["plan_version"])
-        except ValueError:
-            return True
-        old_node = old["nodes"].get(record["node_id"])
-        new_node = current["nodes"].get(record["node_id"])
-        if old_node is None or new_node is None or new_node["state"] != "ACTIVE":
-            return True
-        return old_node != new_node
+        return (
+            not ResearchPlanGraph(self.root).node_compatible(record["node_id"], record["plan_version"])
+            or self._reopened_after(record)
+        )
 
     def _append_state(
         self,
@@ -743,6 +796,7 @@ class ProgressLedger:
         note: str,
         outcome: str = "",
         result: str = "",
+        checkpoint_id: str = "",
     ) -> None:
         event: Dict[str, Any] = {
             "event": "STATE",
@@ -757,6 +811,8 @@ class ProgressLedger:
             event["outcome"] = outcome
         if result:
             event["result"] = result
+        if checkpoint_id:
+            event["checkpoint_id"] = checkpoint_id
         append_jsonl(self.path, event)
 
     def _replay_assignments(self) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
@@ -799,6 +855,8 @@ class ProgressLedger:
                     continue
                 record = assignments[aid]
                 record["state"] = state
+                if event.get("checkpoint_id"):
+                    record["checkpoint_id"] = event["checkpoint_id"]
                 outcome = str(event.get("outcome") or "").upper()
                 if outcome:
                     record["outcome"] = outcome

@@ -515,6 +515,27 @@ def main(worker_dir: str) -> int:
         current = ledger.current(worker, refresh_stale=True)
         if current is not None:
             assignment_id = str(current.get("assignment_id") or "")
+            checkpoint = C.checkpoint_for_prompt(wl.dir, role_name, assignment=current)
+            if (
+                current["state"] in {"ASSIGNED", "RUNNING"}
+                and _assignment_task_matches(wl, current)
+                and checkpoint
+                and checkpoint.get("returncode") in (0, 125)
+                and checkpoint.get("terminal_outcome") in ProgressLedger.TERMINAL_OUTCOMES
+                and checkpoint.get("checkpoint_id")
+                and checkpoint["checkpoint_id"] != current.get("checkpoint_id")
+            ):
+                recovered_outcome = checkpoint["terminal_outcome"]
+                current = ledger.update(
+                    worker=worker,
+                    state="DONE" if recovered_outcome == "COMPLETE" else "BLOCKED",
+                    actor="runtime",
+                    note="recovered checkpointed terminal outcome",
+                    outcome=recovered_outcome,
+                    expected_assignment_id=assignment_id,
+                    result=str(checkpoint.get("last_agent_message") or ""),
+                    checkpoint_id=checkpoint["checkpoint_id"],
+                )
             ledger.runtime_event(
                 worker=worker,
                 kind="STARTED",
@@ -625,6 +646,9 @@ def main(worker_dir: str) -> int:
             log_path = wl.logs / f"round_{rnd}.log"
             round_started = time.time()
             prompt = kickoff(project, worker, role_name)
+            if round_assignment is not None:
+                prompt += f"\n\nCurrent Assignment ID: `{round_assignment['assignment_id']}`. Copy this ID into any Plan proposal's `assignment_id`.\n"
+                scaffold.write_codex_config(wl, role_name, round_assignment)
             write_status(wl, state="running", round=rnd, round_started_at=round_started)
             if scientific:
                 rc = run_round(
@@ -664,6 +688,7 @@ def main(worker_dir: str) -> int:
                 C.write_checkpoint(
                     wl.dir, role=role_name, round_no=rnd, telemetry=telemetry,
                     trigger=trigger, assignment=round_assignment,
+                    returncode=rc, terminal_outcome=outcome,
                 )
 
                 migration_attempted = False
@@ -710,6 +735,7 @@ def main(worker_dir: str) -> int:
             if outcome and ledger is not None and round_assignment is not None:
                 progress_state = "DONE" if outcome == "COMPLETE" else "BLOCKED"
                 assignment_id = str(round_assignment.get("assignment_id") or "")
+                checkpoint = C.checkpoint_for_prompt(wl.dir, role_name, assignment=round_assignment)
                 try:
                     ledger.update(
                         worker=worker,
@@ -719,6 +745,7 @@ def main(worker_dir: str) -> int:
                         outcome=outcome,
                         expected_assignment_id=assignment_id,
                         result=str(telemetry.get("last_agent_message") or ""),
+                        checkpoint_id=str((checkpoint or {}).get("checkpoint_id") or ""),
                     )
                 except ValueError:
                     latest = ledger.current(worker, refresh_stale=True)

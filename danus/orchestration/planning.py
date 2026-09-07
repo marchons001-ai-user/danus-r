@@ -121,6 +121,7 @@ def _proposal_instructions(path: Path, plan_version: Optional[int]) -> str:
     return f"""{version_note}Write exactly one JSON object to `{path}` only if a structural Plan change is needed.
 Schema:
 {{
+  "assignment_id": "<the current Assignment ID injected by the runtime>",
   "base_plan_version": {version},
   "reason": "why the route must change",
   "post_hoc": false,
@@ -324,7 +325,7 @@ def _active_leaves(plan: Dict[str, Any]) -> set[str]:
 def _normalize_proposal(graph: ResearchPlanGraph, raw: Dict[str, Any], proposal_path: Path) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("proposal root must be an object")
-    allowed = {"base_plan_version", "reason", "post_hoc", "evidence_refs", "operations", "tasks"}
+    allowed = {"assignment_id", "base_plan_version", "reason", "post_hoc", "evidence_refs", "operations", "tasks"}
     extra = set(raw) - allowed
     if extra:
         raise ValueError(f"unsupported proposal fields: {sorted(extra)}")
@@ -393,6 +394,7 @@ def _normalize_proposal(graph: ResearchPlanGraph, raw: Dict[str, Any], proposal_
         )
     tasks.sort(key=lambda item: item["node_id"])
     return {
+        "assignment_id": str(raw.get("assignment_id") or ""),
         "base_plan_version": base,
         "reason": reason,
         "post_hoc": bool(raw.get("post_hoc", False)),
@@ -509,6 +511,8 @@ def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
         }
 
     try:
+        if not isinstance(raw, dict) or raw.get("assignment_id") != (source_assignment or {}).get("assignment_id"):
+            raise ValueError("proposal assignment_id does not match the current Researcher assignment")
         proposal = _normalize_proposal(graph, raw, path)
         if required_refs:
             if not proposal["post_hoc"]:
@@ -896,8 +900,7 @@ def _recover_materialized_tasks(pdir: Path) -> List[Dict[str, Any]]:
             change = graph.get_change(record["change_id"])
             if (
                 change.get("status") != "COMMITTED"
-                and current.get("committed_change_id") == change.get("change_id")
-                and int(current["plan_version"]) == int(change.get("base_plan_version") or 0) + 1
+                and graph.committed_version(change, current) is not None
             ):
                 graph.commit_change(change["change_id"], committer="supervisor")
                 change = graph.get_change(change["change_id"])

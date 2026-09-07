@@ -77,6 +77,7 @@ def _write_proposal(path: Path, version: int, node_id: str) -> None:
     path.write_text(
         json.dumps(
             {
+                "assignment_id": ProgressLedger(path.parents[1]).current("low")["assignment_id"],
                 "base_plan_version": version,
                 "reason": f"bounded route {node_id}",
                 "post_hoc": False,
@@ -123,6 +124,7 @@ def _gateway_reviewer(monkeypatch, pdir: Path) -> None:
     monkeypatch.setenv("DANUS_PROJECT_DIR", str(pdir))
     monkeypatch.setenv("DANUS_AUTHOR", "low2")
     monkeypatch.setenv("DANUS_ROLE", "reviewer")
+    monkeypatch.setenv("DANUS_ASSIGNMENT_ID", ProgressLedger(pdir).current("low2")["assignment_id"])
 
 
 def test_exact_verdict_replay_is_idempotent_and_conflicts_fail_closed(tmp_path: Path, monkeypatch):

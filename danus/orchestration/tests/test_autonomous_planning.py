@@ -33,6 +33,7 @@ def _finish(project: str, worker: str):
 def _proposal(path: Path, version: int, suffix: str = "1"):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
+        "assignment_id": ProgressLedger(path.parents[1]).current("low")["assignment_id"],
         "base_plan_version": version,
         "reason": f"minimal route {suffix}",
         "post_hoc": False,
@@ -51,6 +52,7 @@ def _proposal(path: Path, version: int, suffix: str = "1"):
 def _invalid_proposal(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
+        "assignment_id": ProgressLedger(path.parents[1]).current("low")["assignment_id"],
         "base_plan_version": 1,
         "reason": "minimal route",
         "post_hoc": False,
@@ -178,6 +180,7 @@ def test_proposal_requires_exact_tasks_for_changed_leaves(tmp_path: Path, monkey
         path = Path(init["proposal_handoff"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({
+            "assignment_id": ProgressLedger(path.parents[1]).current("low")["assignment_id"],
             "base_plan_version": 1,
             "reason": "missing task",
             "operations": [{"op": "add_node", "node_id": "R1", "title": "Research", "summary": "", "parent": "P0", "depends_on": []}],

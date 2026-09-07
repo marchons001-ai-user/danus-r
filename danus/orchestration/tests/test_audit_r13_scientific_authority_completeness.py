@@ -140,7 +140,7 @@ def test_plan_repair_preserves_route_evidence_obligation(tmp_path: Path, monkeyp
     )
     path = planning._proposal_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_proposal([], post_hoc=False)), encoding="utf-8")
+    path.write_text(json.dumps({**_proposal([], post_hoc=False), "assignment_id": ledger.current("researcher")["assignment_id"]}), encoding="utf-8")
 
     actions = planning._planning_step_unlocked("P")
     repair = json.loads(planning._repair_error_path(tmp_path).read_text(encoding="utf-8"))
@@ -162,12 +162,12 @@ def test_plan_repair_preserves_route_evidence_obligation(tmp_path: Path, monkeyp
         outcome="COMPLETE",
         expected_assignment_id=repair_assignment["assignment_id"],
     )
-    path.write_text(json.dumps(_proposal([], post_hoc=False)), encoding="utf-8")
+    path.write_text(json.dumps({**_proposal([], post_hoc=False), "assignment_id": ledger.current("researcher")["assignment_id"]}), encoding="utf-8")
     blocked = planning._capture_proposal("P")
     assert blocked and blocked["result"] == "blocked"
     assert blocked["required_evidence_refs"] == [evidence_id]
 
-    path.write_text(json.dumps(_proposal([evidence_id], post_hoc=True)), encoding="utf-8")
+    path.write_text(json.dumps({**_proposal([evidence_id], post_hoc=True), "assignment_id": repair_assignment["assignment_id"]}), encoding="utf-8")
     captured = planning._capture_proposal("P")
     assert captured and captured["result"] == "captured"
     change = ResearchPlanGraph(tmp_path).get_change(captured["change_id"])

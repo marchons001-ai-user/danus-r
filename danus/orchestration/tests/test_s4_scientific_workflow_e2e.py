@@ -39,6 +39,7 @@ def _gateway(pdir: Path, worker: str, role: str):
         "DANUS_PROJECT_DIR": str(pdir),
         "DANUS_AUTHOR": worker,
         "DANUS_ROLE": role,
+        "DANUS_ASSIGNMENT_ID": str((ProgressLedger(pdir).current(worker) or {}).get("assignment_id") or ""),
     }
     old = {key: os.environ.get(key) for key in values}
     os.environ.update(values)
@@ -237,6 +238,7 @@ def test_scientific_workflow_commits_evidence_bound_post_hoc_revision(tmp_path: 
         }
         path = planning._proposal_path(pdir)
         path.parent.mkdir(parents=True, exist_ok=True)
+        proposal["assignment_id"] = ledger.current("low")["assignment_id"]
         path.write_text(json.dumps(proposal), encoding="utf-8")
         _finish("P", "low")
 

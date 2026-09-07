@@ -200,7 +200,7 @@ def test_manual_apply_consults_only_after_stable_deterministic_supervision(monke
     monkeypatch.setattr(
         S,
         "resolve_scientific_routes",
-        lambda root, actions: calls.append((root, actions)) or [{"status": "valid", "route": "INTERPRET"}],
+        lambda root, actions, token_budget=0: calls.append((root, actions)) or [{"status": "valid", "route": "INTERPRET"}],
     )
 
     assert S.supervise_main(["project-x", "--apply"]) == 0

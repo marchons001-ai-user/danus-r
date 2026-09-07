@@ -8,6 +8,7 @@ under ``plan/revisions``; ``current.json`` must match its committed revision.
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -129,6 +130,29 @@ class ResearchPlanGraph:
                 return self._clean_refs(list(prior.get("evidence_refs") or []))
         return []
 
+    def node_compatible(self, node_id: str, base_version: int, current=None) -> bool:
+        """Keep authority only across uninterrupted equivalent node revisions."""
+        current = current if current is not None else self.snapshot()
+        try:
+            base = int(base_version)
+            if base < 1 or base > current["plan_version"]:
+                return False
+            node = self.revision(base)["nodes"].get(node_id)
+            if node is None or node.get("state") != "ACTIVE":
+                return False
+            for version in range(base, current["plan_version"] + 1):
+                nodes = self.revision(version)["nodes"]
+                if nodes.get(node_id) != node:
+                    return False
+                ancestor = node_id
+                while ancestor:
+                    if nodes[ancestor]["state"] != "ACTIVE":
+                        return False
+                    ancestor = nodes[ancestor]["parent"]
+        except (KeyError, TypeError, ValueError):
+            return False
+        return True
+
     def propose_change(
         self,
         *,
@@ -140,82 +164,83 @@ class ResearchPlanGraph:
         evidence_refs: Optional[List[str]] = None,
     ) -> str:
         """Create a change request without changing the active plan."""
-        current = self.snapshot()
-        base = int(base_plan_version)
-        if base != current["plan_version"]:
-            raise ValueError(
-                f"stale base_plan_version: {base}; current is {current['plan_version']}"
+        with self._commit_lock():
+            current = self.snapshot()
+            base = int(base_plan_version)
+            if base != current["plan_version"]:
+                raise ValueError(
+                    f"stale base_plan_version: {base}; current is {current['plan_version']}"
+                )
+            proposer = self._required(proposer, "proposer")
+            reason = self._required(reason, "reason")
+            refs = self._clean_refs(evidence_refs or [])
+
+            required_refs = self._required_post_hoc_refs(proposer)
+            if required_refs:
+                if not reason.startswith("[proposal:"):
+                    raise ValueError(
+                        "evidence-bound interpretation must use the autonomous plan proposal handoff"
+                    )
+                if not post_hoc:
+                    raise ValueError(
+                        "evidence-bound plan change requires post_hoc=true"
+                    )
+                missing_required = [ref for ref in required_refs if ref not in refs]
+                if missing_required:
+                    raise ValueError(
+                        "post_hoc plan change must preserve triggering evidence_refs: "
+                        + ", ".join(missing_required)
+                    )
+
+            if post_hoc:
+                if not refs:
+                    raise ValueError("post_hoc plan change requires evidence_refs")
+                store = EvidenceStore(self.root)
+                missing = [ref for ref in refs if store.get_record(ref) is None]
+                if missing:
+                    raise ValueError(
+                        "post_hoc plan change has unknown evidence_refs: " + ", ".join(missing)
+                    )
+            ops = self._normalize_operations(operations)
+
+            candidate = copy.deepcopy(current)
+            self._apply_operations(candidate, ops)
+            self._validate(candidate)
+            if candidate["nodes"] == current["nodes"]:
+                raise ValueError("plan change has no structural effect")
+
+            identity = {
+                "base_plan_version": base,
+                "proposer": proposer,
+                "reason": reason,
+                "operations": ops,
+                "post_hoc": bool(post_hoc),
+                "evidence_refs": refs,
+            }
+            change_id = self._content_id(identity)
+            path = self._change_path(change_id)
+            existing = self._read_json(path)
+            if existing is not None:
+                self._validate_change_identity(existing, change_id)
+                return change_id
+
+            self._write_json(
+                path,
+                {
+                    "change_id": change_id,
+                    **identity,
+                    "status": "PROPOSED",
+                    "created_at": utc_now(),
+                    "reviewer": None,
+                    "review_verdict": None,
+                    "review_rationale": "",
+                    "reviewed_at": None,
+                    "committer": None,
+                    "committed_at": None,
+                    "committed_version": None,
+                },
             )
-        proposer = self._required(proposer, "proposer")
-        reason = self._required(reason, "reason")
-        refs = self._clean_refs(evidence_refs or [])
-
-        required_refs = self._required_post_hoc_refs(proposer)
-        if required_refs:
-            if not reason.startswith("[proposal:"):
-                raise ValueError(
-                    "evidence-bound interpretation must use the autonomous plan proposal handoff"
-                )
-            if not post_hoc:
-                raise ValueError(
-                    "evidence-bound plan change requires post_hoc=true"
-                )
-            missing_required = [ref for ref in required_refs if ref not in refs]
-            if missing_required:
-                raise ValueError(
-                    "post_hoc plan change must preserve triggering evidence_refs: "
-                    + ", ".join(missing_required)
-                )
-
-        if post_hoc:
-            if not refs:
-                raise ValueError("post_hoc plan change requires evidence_refs")
-            store = EvidenceStore(self.root)
-            missing = [ref for ref in refs if store.get_record(ref) is None]
-            if missing:
-                raise ValueError(
-                    "post_hoc plan change has unknown evidence_refs: " + ", ".join(missing)
-                )
-        ops = self._normalize_operations(operations)
-
-        candidate = copy.deepcopy(current)
-        self._apply_operations(candidate, ops)
-        self._validate(candidate)
-        if candidate["nodes"] == current["nodes"]:
-            raise ValueError("plan change has no structural effect")
-
-        identity = {
-            "base_plan_version": base,
-            "proposer": proposer,
-            "reason": reason,
-            "operations": ops,
-            "post_hoc": bool(post_hoc),
-            "evidence_refs": refs,
-        }
-        change_id = self._content_id(identity)
-        path = self._change_path(change_id)
-        existing = self._read_json(path)
-        if existing is not None:
-            self._validate_change_identity(existing, change_id)
             return change_id
-
-        self._write_json(
-            path,
-            {
-                "change_id": change_id,
-                **identity,
-                "status": "PROPOSED",
-                "created_at": utc_now(),
-                "reviewer": None,
-                "review_verdict": None,
-                "review_rationale": "",
-                "reviewed_at": None,
-                "committer": None,
-                "committed_at": None,
-                "committed_version": None,
-            },
-        )
-        return change_id
 
     def get_change(self, change_id: str) -> Dict[str, Any]:
         cid = self._clean_id(change_id)
@@ -227,23 +252,56 @@ class ResearchPlanGraph:
             raise ValueError(f"invalid change status for {cid}")
         return record
 
+    @contextmanager
+    def _commit_lock(self):
+        with (self.dir / ".commit.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
+    def committed_version(self, record: Dict[str, Any], current=None) -> Optional[int]:
+        current = current if current is not None else self.snapshot()
+        version = int(record["base_plan_version"]) + 1
+        if version > current["plan_version"]:
+            return None
+        revision = self.revision(version)
+        if revision.get("committed_change_id") != record["change_id"]:
+            return None
+        candidate = copy.deepcopy(self.revision(version - 1))
+        self._apply_operations(candidate, record["operations"])
+        candidate.update(plan_version=version, committed_change_id=record["change_id"])
+        if candidate != revision:
+            raise ValueError("committed change does not match its immutable revision")
+        return version
+
+    def _recover_commit(self, record: Dict[str, Any], current, committer: str) -> Optional[int]:
+        version = self.committed_version(record, current)
+        if version is not None and (record["status"] != "COMMITTED" or record.get("committed_version") != version):
+            record.update(status="COMMITTED", committed_version=version,
+                          committer=self._required(committer, "committer"), committed_at=utc_now())
+            self._write_json(self._change_path(record["change_id"]), record)
+        return version
+
     def pending_changes(self) -> List[Dict[str, Any]]:
         """Return current-base proposals/approvals and retire stale pending records."""
-        current_version = self.snapshot()["plan_version"]
-        pending: List[Dict[str, Any]] = []
-        if not self.changes_dir.is_dir():
+        with self._commit_lock():
+            current = self.snapshot()
+            current_version = current["plan_version"]
+            pending: List[Dict[str, Any]] = []
+            if not self.changes_dir.is_dir():
+                return pending
+            for path in sorted(self.changes_dir.glob("*.json")):
+                record = self.get_change(path.stem)
+                if self._recover_commit(record, current, "supervisor") is not None:
+                    continue
+                if record["status"] not in {"PROPOSED", "APPROVED"}:
+                    continue
+                if record["base_plan_version"] != current_version:
+                    record["status"] = "STALE"
+                    self._write_json(path, record)
+                    continue
+                pending.append(record)
+            pending.sort(key=lambda item: (str(item.get("created_at") or ""), item["change_id"]))
             return pending
-        for path in sorted(self.changes_dir.glob("*.json")):
-            record = self.get_change(path.stem)
-            if record["status"] not in {"PROPOSED", "APPROVED"}:
-                continue
-            if record["base_plan_version"] != current_version:
-                record["status"] = "STALE"
-                self._write_json(path, record)
-                continue
-            pending.append(record)
-        pending.sort(key=lambda item: (str(item.get("created_at") or ""), item["change_id"]))
-        return pending
 
     def review_change(
         self,
@@ -253,67 +311,73 @@ class ResearchPlanGraph:
         rationale: str,
         verdict: Optional[str] = None,
         approve: Optional[bool] = None,
+        review_assignment_id: str = "",
     ) -> Dict[str, Any]:
         """Record one Reviewer verdict without collapsing REVISE into REJECT.
 
         ``approve`` is retained only for old callers: ``True`` maps to APPROVE and
         ``False`` maps to REVISE. New callers must use ``verdict``.
         """
-        record = self.get_change(change_id)
-        if record["status"] != "PROPOSED":
-            raise ValueError(f"change {change_id} is not awaiting review")
-        current = self.snapshot()
-        if record["base_plan_version"] != current["plan_version"]:
-            record["status"] = "STALE"
+        with self._commit_lock():
+            record = self.get_change(change_id)
+            if record["status"] != "PROPOSED":
+                raise ValueError(f"change {change_id} is not awaiting review")
+            current = self.snapshot()
+            if record["base_plan_version"] != current["plan_version"]:
+                record["status"] = "STALE"
+                self._write_json(self._change_path(change_id), record)
+                return record
+
+            if verdict is None or not str(verdict).strip():
+                if approve is None:
+                    raise ValueError("plan review requires verdict APPROVE, REVISE, or REJECT")
+                normalized = "APPROVE" if bool(approve) else "REVISE"
+            else:
+                normalized = str(verdict).strip().upper()
+                if normalized not in self.REVIEW_VERDICTS:
+                    raise ValueError(f"verdict must be one of {self.REVIEW_VERDICTS}")
+                if approve is not None and bool(approve) != (normalized == "APPROVE"):
+                    raise ValueError("approve compatibility flag conflicts with explicit verdict")
+
+            record["reviewer"] = self._required(reviewer, "reviewer")
+            record["review_verdict"] = normalized
+            record["review_rationale"] = self._required(rationale, "rationale")
+            record["reviewed_at"] = utc_now()
+            if review_assignment_id:
+                record["review_assignment_id"] = review_assignment_id
+            record["status"] = {
+                "APPROVE": "APPROVED",
+                "REVISE": "REVISE",
+                "REJECT": "REJECTED",
+            }[normalized]
             self._write_json(self._change_path(change_id), record)
             return record
 
-        if verdict is None or not str(verdict).strip():
-            if approve is None:
-                raise ValueError("plan review requires verdict APPROVE, REVISE, or REJECT")
-            normalized = "APPROVE" if bool(approve) else "REVISE"
-        else:
-            normalized = str(verdict).strip().upper()
-            if normalized not in self.REVIEW_VERDICTS:
-                raise ValueError(f"verdict must be one of {self.REVIEW_VERDICTS}")
-            if approve is not None and bool(approve) != (normalized == "APPROVE"):
-                raise ValueError("approve compatibility flag conflicts with explicit verdict")
-
-        record["reviewer"] = self._required(reviewer, "reviewer")
-        record["review_verdict"] = normalized
-        record["review_rationale"] = self._required(rationale, "rationale")
-        record["reviewed_at"] = utc_now()
-        record["status"] = {
-            "APPROVE": "APPROVED",
-            "REVISE": "REVISE",
-            "REJECT": "REJECTED",
-        }[normalized]
-        self._write_json(self._change_path(change_id), record)
-        return record
-
     def commit_change(self, change_id: str, *, committer: str) -> int:
         """Commit one Reviewer-approved request as exactly one new plan revision."""
-        with (self.dir / ".commit.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        from .progress import ProgressLedger
+
+        committer = self._required(committer, "committer")
+        with ProgressLedger(self.root).assignment_lock(), self._commit_lock():
             record = self.get_change(change_id)
             current = self.snapshot()
 
-            # Idempotent recovery if current.json was replaced before the change record
-            # was marked COMMITTED.
-            if (
-                current.get("committed_change_id") == change_id
-                and current["plan_version"] == record["base_plan_version"] + 1
-            ):
-                if record["status"] != "COMMITTED":
-                    record["status"] = "COMMITTED"
-                    record["committer"] = self._required(committer, "committer")
-                    record["committed_at"] = utc_now()
-                    record["committed_version"] = current["plan_version"]
-                    self._write_json(self._change_path(change_id), record)
-                return current["plan_version"]
+            committed = self._recover_commit(record, current, committer)
+            if committed is not None:
+                return committed
 
             if record["status"] != "APPROVED":
                 raise ValueError(f"change {change_id} is not approved")
+            review_assignment_id = record.get("review_assignment_id")
+            if review_assignment_id:
+                from .handoff import HandoffRequests
+
+                reviews = [item for item in HandoffRequests(ProgressLedger(self.root)).all()
+                           if item.get("kind") == "REVIEW" and item.get("subject_type") == "PLAN_CHANGE"
+                           and item.get("subject_id") == change_id]
+                if not any(item.get("status") == "RESOLVED"
+                           and item.get("resolution_assignment_id") == review_assignment_id for item in reviews):
+                    raise ValueError("managed plan approval requires its completed REVIEW handoff")
             if record["base_plan_version"] != current["plan_version"]:
                 record["status"] = "STALE"
                 self._write_json(self._change_path(change_id), record)

@@ -282,6 +282,8 @@ def write_checkpoint(
     trigger: Optional[str] = None,
     migration: Optional[Dict[str, Any]] = None,
     assignment: Optional[Dict[str, Any]] = None,
+    returncode: Optional[int] = None,
+    terminal_outcome: Optional[str] = None,
 ) -> Path:
     wdir = Path(worker_dir)
     bound = dict(assignment) if assignment is not None else _assignment(wdir)
@@ -309,7 +311,10 @@ def write_checkpoint(
         "telemetry": telemetry_out,
         "last_agent_message": str(telemetry.get("last_agent_message") or "")[-8000:],
         "migration": migration,
+        "returncode": returncode,
+        "terminal_outcome": terminal_outcome,
     }
+    payload["checkpoint_id"] = ProgressLedger._content_id(payload)
     path = _path(wdir, CHECKPOINT_NAME)
     _write_json(path, payload)
     return path
@@ -329,6 +334,10 @@ def checkpoint_for_prompt(
     if not isinstance(obj, dict):
         return None
     if obj.get("schema_version") != 1 or obj.get("worker") != wdir.name:
+        return None
+    if obj.get("checkpoint_id") and obj["checkpoint_id"] != ProgressLedger._content_id({
+        key: value for key, value in obj.items() if key != "checkpoint_id"
+    }):
         return None
     if obj.get("role") != role:
         return None

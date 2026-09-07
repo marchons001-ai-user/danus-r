@@ -57,7 +57,12 @@ def test_assign_crash_cannot_execute_new_task_under_old_assignment(tmp_path: Pat
         "import os; "
         "from danus.core import ProgressLedger; "
         "from danus.orchestration import cli; "
-        "ProgressLedger.assign=lambda *a, **k: os._exit(73); "
+        "from pathlib import Path; original=Path.replace\n"
+        "def interrupted(self, target):\n"
+        "    result=original(self, target)\n"
+        "    if Path(target).name == 'TASK.md': os._exit(73)\n"
+        "    return result\n"
+        "Path.replace=interrupted\n"
         "cli.do_assign('P/researcher', 'TASK_B', node_id='root')"
     )
     process = subprocess.run([sys.executable, "-c", code], timeout=10)

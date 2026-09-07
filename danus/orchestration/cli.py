@@ -347,13 +347,6 @@ def do_assign(
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"cannot read Research Plan: {exc}") from exc
 
-    old_task = None
-    if wl.task.exists():
-        try:
-            old_task = wl.task.read_text(encoding="utf-8")
-        except OSError:
-            old_task = None
-    atomic_write(wl.task, text)
     try:
         assignment = ProgressLedger(pdir).assign(
             worker=worker,
@@ -362,12 +355,9 @@ def do_assign(
             plan_version=plan_version,
             task=text,
             handoff_id=handoff_id,
+            write_task=True,
         )
     except ValueError as exc:
-        if old_task is None:
-            wl.task.unlink(missing_ok=True)
-        else:
-            atomic_write(wl.task, old_task)
         raise SystemExit(f"cannot bind assignment: {exc}") from exc
 
     return {

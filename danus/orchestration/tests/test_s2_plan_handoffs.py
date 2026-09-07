@@ -39,6 +39,7 @@ def _write_proposal(path: Path, version: int, node_id: str) -> None:
     path.write_text(
         json.dumps(
             {
+                "assignment_id": ProgressLedger(path.parents[1]).current("low")["assignment_id"],
                 "base_plan_version": version,
                 "reason": f"bounded route {node_id}",
                 "post_hoc": False,
@@ -205,6 +206,7 @@ def test_invalid_revision_proposal_stales_handoff_before_legacy_repair(tmp_path:
         path.write_text(
             json.dumps(
                 {
+                    "assignment_id": ProgressLedger(path.parents[1]).current("low")["assignment_id"],
                     "base_plan_version": 1,
                     "reason": "invalid replacement",
                     "operations": [

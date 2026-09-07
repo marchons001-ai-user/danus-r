@@ -36,6 +36,7 @@ def _finish(project: str, worker: str) -> None:
 def _write_proposal(pdir: Path, payload: dict) -> None:
     path = planning._proposal_path(pdir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {**payload, "assignment_id": ProgressLedger(pdir).current("low")["assignment_id"]}
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 

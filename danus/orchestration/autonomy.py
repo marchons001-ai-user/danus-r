@@ -35,9 +35,9 @@ def _task_spec(project_dir: Path, node_id: str) -> Dict[str, Any]:
         try:
             old_node = graph.revision(version)["nodes"].get(node_id)
         except ValueError:
-            continue
-        if old_node != current_node:
-            continue
+            break
+        if old_node != current_node or not graph.node_compatible(node_id, version, current):
+            break
         matches = []
         for role in sorted(L.SCIENTIFIC_ROLES):
             path = project_dir / "tasks" / f"v{version}" / role / f"{node_id}.md"
@@ -70,20 +70,7 @@ def _assignment_matches_current_node(
     graph: ResearchPlanGraph,
     assignment: Dict[str, Any],
 ) -> bool:
-    try:
-        old = graph.revision(int(assignment["plan_version"]))
-        current = graph.snapshot()
-    except (KeyError, TypeError, ValueError):
-        return False
-    node_id = str(assignment.get("node_id") or "")
-    old_node = old["nodes"].get(node_id)
-    current_node = current["nodes"].get(node_id)
-    return bool(
-        old_node is not None
-        and current_node is not None
-        and current_node.get("state") == "ACTIVE"
-        and old_node == current_node
-    )
+    return not ProgressLedger(graph.root)._is_plan_stale(assignment)
 
 
 def _auto_complete(
@@ -117,12 +104,16 @@ def _auto_complete(
     if not _assignment_matches_current_node(graph, current):
         return {"action": "AUTO_COMPLETE", "node_id": node_id, "worker": worker, "result": "plan_binding_stale"}
 
-    ledger.set_node_state(
-        node_id,
-        state="DONE",
-        actor="supervisor",
-        note=f"automatic closure from assignment {assignment_id}",
-    )
+    try:
+        ledger.set_node_state(
+            node_id,
+            state="DONE",
+            actor="supervisor",
+            note=f"automatic closure from assignment {assignment_id}",
+            expected_assignment_id=assignment_id,
+        )
+    except ValueError:
+        return {"action": "AUTO_COMPLETE", "node_id": node_id, "worker": worker, "result": "assignment_changed"}
     return {"action": "AUTO_COMPLETE", "node_id": node_id, "worker": worker, "result": "completed"}
 
 
