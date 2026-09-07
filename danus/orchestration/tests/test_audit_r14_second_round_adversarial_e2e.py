@@ -95,9 +95,6 @@ def test_crash_revision_replay_assignment_and_reopen_is_single_use(tmp_path: Pat
 
 
 def test_conflicting_long_reviewer_output_fails_closed_in_reducer(tmp_path: Path):
-    ledger, source, _ = _ambiguity(tmp_path, source_role="experimenter")
-    reviewer = ledger.current("reviewer", refresh_stale=False)
-    assert reviewer is not None
     log = tmp_path / "review.log"
     log.write_text(
         json.dumps({
@@ -116,14 +113,7 @@ def test_conflicting_long_reviewer_output_fails_closed_in_reducer(tmp_path: Path
         encoding="utf-8",
     )
     bounded = C.inspect_log(log)["last_agent_message"]
-    ledger.update(
-        worker="reviewer",
-        state="DONE",
-        actor="runtime",
-        outcome="COMPLETE",
-        result=bounded,
-        expected_assignment_id=reviewer["assignment_id"],
-    )
+    ledger, source, _ = _ambiguity(tmp_path, source_role="experimenter", review_result=bounded)
 
     report = reduce_supervisor_snapshot(build_supervisor_snapshot(tmp_path, []))
     source_actions = [

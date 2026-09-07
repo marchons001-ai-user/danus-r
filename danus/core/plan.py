@@ -137,18 +137,24 @@ class ResearchPlanGraph:
             base = int(base_version)
             if base < 1 or base > current["plan_version"]:
                 return False
-            node = self.revision(base)["nodes"].get(node_id)
-            if node is None or node.get("state") != "ACTIVE":
-                return False
+            base_nodes = self.revision(base)["nodes"]
+            required = set()
+            pending = [node_id]
+            while pending:
+                nid = pending.pop()
+                if nid in required:
+                    continue
+                node = base_nodes[nid]
+                if node.get("state") != "ACTIVE":
+                    return False
+                required.add(nid)
+                pending.extend(node["depends_on"])
+                if node["parent"]:
+                    pending.append(node["parent"])
             for version in range(base, current["plan_version"] + 1):
                 nodes = self.revision(version)["nodes"]
-                if nodes.get(node_id) != node:
+                if any(nodes.get(nid) != base_nodes[nid] for nid in required):
                     return False
-                ancestor = node_id
-                while ancestor:
-                    if nodes[ancestor]["state"] != "ACTIVE":
-                        return False
-                    ancestor = nodes[ancestor]["parent"]
         except (KeyError, TypeError, ValueError):
             return False
         return True
@@ -300,8 +306,44 @@ class ResearchPlanGraph:
                     self._write_json(path, record)
                     continue
                 pending.append(record)
-            pending.sort(key=lambda item: (str(item.get("created_at") or ""), item["change_id"]))
+            prepared_id = None
+            if self._revision_path(current_version + 1).is_file():
+                prepared_id = self.revision(current_version + 1)["committed_change_id"]
+            pending.sort(key=lambda item: (
+                item["change_id"] != prepared_id,
+                str(item.get("created_at") or ""), item["change_id"],
+            ))
             return pending
+
+    def _recover_prepared_revision(self, current) -> Dict[str, Any]:
+        """Finish a validated revision left before current.json publication, under both locks."""
+        path = self._revision_path(current["plan_version"] + 1)
+        if not path.is_file():
+            return current
+        prepared = self.revision(current["plan_version"] + 1)
+        record = self.get_change(prepared["committed_change_id"])
+        if (record["status"] != "APPROVED"
+            or record["base_plan_version"] != current["plan_version"]
+            or self.committed_version(record, prepared) != prepared["plan_version"]):
+            raise ValueError("prepared plan revision lacks matching approved change")
+        self._require_completed_review(record)
+        self._write_current(prepared)
+        self._recover_commit(record, prepared, "supervisor")
+        return prepared
+
+    def _require_completed_review(self, record) -> None:
+        review_assignment_id = record.get("review_assignment_id")
+        if not review_assignment_id:
+            return
+        from .handoff import HandoffRequests
+        from .progress import ProgressLedger
+
+        reviews = [item for item in HandoffRequests(ProgressLedger(self.root)).all()
+                   if item.get("kind") == "REVIEW" and item.get("subject_type") == "PLAN_CHANGE"
+                   and item.get("subject_id") == record["change_id"]]
+        if not any(item.get("status") == "RESOLVED"
+                   and item.get("resolution_assignment_id") == review_assignment_id for item in reviews):
+            raise ValueError("managed plan approval requires its completed REVIEW handoff")
 
     def review_change(
         self,
@@ -360,7 +402,7 @@ class ResearchPlanGraph:
         committer = self._required(committer, "committer")
         with ProgressLedger(self.root).assignment_lock(), self._commit_lock():
             record = self.get_change(change_id)
-            current = self.snapshot()
+            current = self._recover_prepared_revision(self.snapshot())
 
             committed = self._recover_commit(record, current, committer)
             if committed is not None:
@@ -368,16 +410,7 @@ class ResearchPlanGraph:
 
             if record["status"] != "APPROVED":
                 raise ValueError(f"change {change_id} is not approved")
-            review_assignment_id = record.get("review_assignment_id")
-            if review_assignment_id:
-                from .handoff import HandoffRequests
-
-                reviews = [item for item in HandoffRequests(ProgressLedger(self.root)).all()
-                           if item.get("kind") == "REVIEW" and item.get("subject_type") == "PLAN_CHANGE"
-                           and item.get("subject_id") == change_id]
-                if not any(item.get("status") == "RESOLVED"
-                           and item.get("resolution_assignment_id") == review_assignment_id for item in reviews):
-                    raise ValueError("managed plan approval requires its completed REVIEW handoff")
+            self._require_completed_review(record)
             if record["base_plan_version"] != current["plan_version"]:
                 record["status"] = "STALE"
                 self._write_json(self._change_path(change_id), record)

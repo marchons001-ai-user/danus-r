@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -100,6 +102,33 @@ def test_concurrent_plan_commits_serialize_at_core_boundary(tmp_path):
     assert plan.get_change(winner)["committed_version"] == 2
     assert plan.get_change(loser)["status"] == "STALE"
     assert plan.get_change(loser)["committed_version"] is None
+
+
+@pytest.mark.parametrize("recover_via_pending", [False, True])
+def test_prepared_revision_recovers_before_competing_commit(tmp_path, recover_via_pending):
+    plan = ResearchPlanGraph.create(tmp_path, node_id="root", title="Root")
+    second, first = _approved_pair(plan)
+    code = (
+        "import os; from pathlib import Path; from danus.core import ResearchPlanGraph; "
+        "ResearchPlanGraph._write_current=lambda *a: os._exit(73); "
+        f"ResearchPlanGraph(Path({str(tmp_path)!r})).commit_change({first!r}, committer='supervisor')"
+    )
+    assert subprocess.run([sys.executable, "-c", code], timeout=10).returncode == 73
+    assert plan.snapshot()["plan_version"] == 1
+    assert plan.revision(2)["committed_change_id"] == first
+    if recover_via_pending:
+        pending = plan.pending_changes()
+        assert pending[0]["change_id"] == first
+        assert plan.snapshot()["plan_version"] == 1
+        assert plan.commit_change(pending[0]["change_id"], committer="supervisor") == 2
+        assert plan.pending_changes() == []
+    else:
+        with pytest.raises(ValueError, match="stale change"):
+            plan.commit_change(second, committer="supervisor")
+    assert plan.snapshot() == plan.revision(2)
+    assert plan.get_change(first)["status"] == "COMMITTED"
+    assert plan.get_change(second)["status"] == "STALE"
+    assert plan.commit_change(first, committer="supervisor") == 2
 
 
 def test_commit_lock_preserves_same_change_crash_recovery(tmp_path, monkeypatch):

@@ -588,6 +588,10 @@ def main(worker_dir: str) -> int:
     migration_failures = 0
     try:
         while True:
+            if wl.pause.exists() or (project_dir / L.PAUSE_FILE).exists():
+                write_status(wl, state="paused")
+                _record_exit("paused")
+                break
             round_assignment = None
             if ledger is not None:
                 current = ledger.current(worker, refresh_stale=True)
@@ -697,6 +701,8 @@ def main(worker_dir: str) -> int:
                     and not outcome
                     and not dsh_quota
                     and not wl.stop.exists()
+                    and not wl.pause.exists()
+                    and not (project_dir / L.PAUSE_FILE).exists()
                     and (not round_limit or rnd < round_limit)
                 ):
                     migration_attempted = True

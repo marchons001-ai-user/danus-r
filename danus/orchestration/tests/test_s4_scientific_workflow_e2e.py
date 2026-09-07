@@ -116,8 +116,6 @@ def _contract_to_interpret(tmp_path: Path, monkeypatch):
     pdir = L.project_dir("P")
     ledger = ProgressLedger(pdir)
     handoffs = HandoffRequests(ledger)
-    _finish("P", "low")
-
     protocol_id = _runnable_protocol(pdir)
     with _gateway(pdir, "low", "researcher"):
         contract = server.implementation_submit_contract(
@@ -128,6 +126,7 @@ def _contract_to_interpret(tmp_path: Path, monkeypatch):
             forbidden_behaviors=["result-dependent adaptation or extra experiment cells"],
             acceptance_conditions=["one immutable Evidence Record is produced by the Experiment Runtime"],
         )
+    _finish("P", "low")
 
     _apply("P")
     contract_review = _handoff(

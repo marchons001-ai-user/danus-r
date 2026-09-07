@@ -323,8 +323,10 @@ class ProgressLedger:
                         )
                         if (
                             existing is not None
+                            and self._current_by_worker().get(worker, {}).get("assignment_id") == existing["assignment_id"]
                             and existing.get("handoff_id") == handoff_id
                             and existing.get("state") != "STALE"
+                            and not self._is_plan_stale(existing)
                             and existing.get("worker") == worker
                             and str(existing.get("role") or "").lower() == role.lower()
                             and existing.get("node_id") == node_id
@@ -515,10 +517,13 @@ class ProgressLedger:
                 if current["state"] == "DONE":
                     if state == "DONE" and (
                         not result or current.get("result") == result
+                    ) and (
+                        not outcome or current.get("outcome") == outcome
+                    ) and (
+                        not checkpoint_id or current.get("checkpoint_id") == checkpoint_id
                     ):
                         return current
-                    if state != "DONE":
-                        raise ValueError(f"assignment {current['assignment_id']} is already DONE")
+                    raise ValueError(f"assignment {current['assignment_id']} is already DONE")
                 if current["state"] == state and (
                     not outcome or current.get("outcome") == outcome
                 ) and (
@@ -623,19 +628,20 @@ class ProgressLedger:
     def _reopen_affected(nodes: Dict[str, Any], node_id: str) -> set[str]:
         affected = {node_id}
         while True:
+            ancestors = set()
+            for nid in affected:
+                parent = nodes.get(nid, {}).get("parent")
+                while parent:
+                    ancestors.add(parent)
+                    parent = nodes[parent].get("parent")
             expanded = affected | {
                 nid for nid, node in nodes.items()
-                if node.get("parent") in affected or affected.intersection(node.get("depends_on", []))
+                if node.get("parent") in affected
+                or (affected | ancestors).intersection(node.get("depends_on", []))
             }
             if expanded == affected:
-                break
+                return affected | ancestors
             affected = expanded
-        for nid in list(affected):
-            parent = nodes.get(nid, {}).get("parent")
-            while parent:
-                affected.add(parent)
-                parent = nodes[parent].get("parent")
-        return affected
 
     def _reopened_after(self, record: Dict[str, Any]) -> bool:
         identity = record.get("assignment_id") or record.get("contract_id")

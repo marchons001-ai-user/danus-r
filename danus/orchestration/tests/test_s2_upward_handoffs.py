@@ -34,6 +34,7 @@ def _gateway(pdir: Path, worker: str, role: str):
         "DANUS_PROJECT_DIR": str(pdir),
         "DANUS_AUTHOR": worker,
         "DANUS_ROLE": role,
+        "DANUS_ASSIGNMENT_ID": str((ProgressLedger(pdir).current(worker) or {}).get("assignment_id") or ""),
     }
     old = {key: os.environ.get(key) for key in keys}
     os.environ.update(keys)

@@ -36,7 +36,7 @@ def _bind_layout(monkeypatch, root: Path) -> None:
     monkeypatch.setattr(S.L, "worker_dir", lambda project, worker: root / "workers" / worker)
 
 
-def _ambiguity(root: Path, *, source_role: str = "experimenter"):
+def _ambiguity(root: Path, *, source_role: str = "experimenter", review_result: str = ""):
     ResearchPlanGraph.create(root, node_id="root", title="Root", summary="reviewed ambiguity")
     ledger = ProgressLedger(root)
     source_worker = "researcher" if source_role == "researcher" else "experimenter"
@@ -94,7 +94,7 @@ def _ambiguity(root: Path, *, source_role: str = "experimenter"):
         state="DONE",
         actor="runtime",
         outcome="COMPLETE",
-        result=(
+        result=review_result or (
             "REVIEW: evidence valid, conclusion ambiguous\n"
             "DANUS_REVIEW_CLASS: SCIENTIFIC_AMBIGUITY\n"
             "DANUS_OUTCOME: COMPLETE"
@@ -113,7 +113,7 @@ def _ambiguity(root: Path, *, source_role: str = "experimenter"):
         summary="generic assignment review completed; source disposition remains explicit",
     )
     report = reduce_supervisor_snapshot(build_supervisor_snapshot(root, []))
-    action = next(item for item in report["actions"] if item.get("kind") == "SCIENTIFIC_ROUTE_REQUIRED")
+    action = next((item for item in report["actions"] if item.get("kind") == "SCIENTIFIC_ROUTE_REQUIRED"), None)
     return ledger, source, action
 
 

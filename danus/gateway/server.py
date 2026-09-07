@@ -410,6 +410,37 @@ def fact_revoke(
 # durable upward handoff                                                      #
 # --------------------------------------------------------------------------- #
 
+@contextmanager
+def _worker_write_scope(*, researcher_only: bool = False):
+    from danus.orchestration.cli import project_control_lock
+    from danus.execution import layout as L
+
+    ledger = _pl()
+    with project_control_lock(_project()), ledger.assignment_lock():
+        assignment = ledger.current(_author(), refresh_stale=True)
+        expected = os.environ.get("DANUS_ASSIGNMENT_ID", "")
+        role = str((assignment or {}).get("role") or "").lower()
+        if (
+            not assignment or not expected
+            or assignment["assignment_id"] != expected
+            or assignment["state"] not in {"ASSIGNED", "RUNNING"}
+            or role not in ({"researcher"} if researcher_only else {"researcher", "reviewer", "experimenter"})
+            or _role().lower() not in {role, "all"}
+            or ledger._is_plan_stale(assignment)
+        ):
+            raise ValueError("write requires the gateway's current active assignment")
+        if ((_project() / L.PAUSE_FILE).exists()
+            or (_project() / "workers" / _author() / L.PAUSE_FILE).exists()):
+            raise ValueError("assignment is paused")
+        if assignment.get("handoff_id"):
+            handoff = HandoffRequests(ledger).get(assignment["handoff_id"])
+            if (not handoff or handoff["status"] != "ASSIGNED"
+                or handoff.get("assigned_assignment_id") != expected):
+                raise ValueError("assignment handoff is no longer authoritative")
+        yield assignment
+
+
+@_worker_write_scope()
 def handoff_request(
     kind: str,
     reason: str,
@@ -555,6 +586,7 @@ def implementation_pending_contracts(project: Optional[str] = None) -> Dict[str,
     return {"contracts": contracts, "count": len(contracts)}
 
 
+@_worker_write_scope(researcher_only=True)
 def implementation_submit_contract(
     node_id: str,
     plan_version: int,
@@ -570,6 +602,8 @@ def implementation_submit_contract(
     architecture. The returned ``task`` is the exact task the Supervisor must bind
     after Reviewer APPROVE; changing it invalidates the approval.
     """
+    if _pl().current(_author())["node_id"] != str(node_id).strip():
+        raise ValueError("contract node does not match current assignment")
     record = _pl().submit_implementation_contract(
         proposer=_author(),
         node_id=node_id,
@@ -667,6 +701,7 @@ def plan_pending_changes(project: Optional[str] = None) -> Dict[str, Any]:
     return {"changes": changes, "count": len(changes)}
 
 
+@_worker_write_scope(researcher_only=True)
 def plan_propose_change(
     base_plan_version: int,
     reason: str,

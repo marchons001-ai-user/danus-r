@@ -30,7 +30,8 @@ def _env(**values):
 def test_plan_change_gate_round_trip_is_offline(tmp_path):
     ResearchPlanGraph.create(tmp_path, node_id="root", title="Root")
 
-    with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="researcher"):
+    source = ProgressLedger(tmp_path).assign(worker="researcher", role="researcher", node_id="root", plan_version=1, task="propose plan")
+    with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="researcher", DANUS_ROLE="researcher", DANUS_ASSIGNMENT_ID=source["assignment_id"]):
         proposed = server.plan_propose_change(
             base_plan_version=1,
             reason="A material branch is now needed.",
