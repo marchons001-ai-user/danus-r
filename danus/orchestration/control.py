@@ -442,9 +442,6 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
     completion_waiting = set()
     for node_id, assignment in latest_by_node.items():
-        current = current_by_worker.get(assignment["worker"])
-        if current and current["assignment_id"] != assignment["assignment_id"]:
-            continue
         if (
             assignment["state"] == "DONE"
             and node_id not in completed
