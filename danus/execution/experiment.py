@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from danus.core.evidence import EvidenceStore, _content_id, protocol_identity
-from danus.core.metrics import metrics_equal, reduce_metrics
+from danus.core.metrics import _reduce_metrics_in_process, metrics_equal
 from danus.core._util import append_jsonl, utc_now
 from danus.execution import layout as L
 
@@ -326,7 +326,7 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str, lock_fd
         artifacts = [ref for unit in units for ref in completed.get(unit["id"], [])]
         if record.get("artifacts") != artifacts:
             raise ValueError("completed Evidence artifacts do not match checkpoint")
-        recomputed = reduce_metrics(root, protocol, artifacts)
+        recomputed = _reduce_metrics_in_process(root, protocol, artifacts)
         if not metrics_equal(record.get("primary_metrics"), recomputed):
             raise ValueError("completed Evidence primary_metrics do not match raw artifacts")
         _write_status(
@@ -421,7 +421,7 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str, lock_fd
     artifacts: List[Dict[str, Any]] = []
     for unit in units:
         artifacts.extend(completed[unit["id"]])
-    primary_metrics = reduce_metrics(root, protocol, artifacts)
+    primary_metrics = _reduce_metrics_in_process(root, protocol, artifacts)
     evidence_id = store.add_record(
         protocol_id=protocol_id,
         author=author,

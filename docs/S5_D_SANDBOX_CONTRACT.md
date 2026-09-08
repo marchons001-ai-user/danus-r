@@ -1,7 +1,7 @@
 # S5-D0 — Sandbox execution contract
 
-Status: design/acceptance contract only. No production call site is switched by
-this phase.
+Status: S5-D0 acceptance contract. S5-D1 uses this contract for empirical
+reducer verification.
 
 ## Decision
 
@@ -9,11 +9,9 @@ Danus-R will reuse the official Linux Codex sandbox as the isolation engine. Do
 not fork Codex, vendor bubblewrap, or add another sandbox dependency unless a
 measured requirement cannot be expressed by the official implementation.
 
-S5-D0 deliberately does **not** add a `SandboxAdapter` class. There is no
-production caller yet, so an unused abstraction would only create API surface.
-When the first production caller lands, the implementation should be the
-smallest function/module that satisfies this contract and should live at
-`danus/execution/sandbox.py`.
+S5-D0 deliberately did **not** add a `SandboxAdapter` class. The first
+production caller now uses the smallest function/module that satisfies this
+contract at `danus/execution/sandbox.py`.
 
 ## Minimal future interface
 
