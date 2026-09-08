@@ -231,6 +231,7 @@ def _latest_handoff(
         if item.get("kind") == kind
         and item.get("subject_type") == subject_type
         and item.get("subject_id") == subject_id
+        and item.get("status") not in {"STALE", "CANCELLED"}
     ]
     matches.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("handoff_id") or "")))
     return matches[-1] if matches else None
