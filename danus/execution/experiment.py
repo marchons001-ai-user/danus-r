@@ -12,24 +12,28 @@ completed units are skipped after their artifact references are revalidated. The
 shared metric reducer in ``danus.core.metrics`` computes final primary metrics and
 the immutable Evidence Record.
 
-For a workspace-bound project, control state remains under the Danus project root
-while unit commands and relative scientific paths resolve from the bound workspace.
+Code, config and inputs resolve only from a verified frozen bundle. Each unit has
+a writable artifact scratch directory; declared artifact argv values map there.
+The scientific workspace is never exposed to unit commands.
 """
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import fcntl
 import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
 from danus.core.evidence import EvidenceStore, _content_id, protocol_identity
 from danus.core.metrics import reduce_metrics, metrics_equal
 from danus.core._util import append_jsonl, utc_now
-from danus.execution import layout as L
+from danus.core import bundle
+from danus import sandbox
 
 _UNIT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -221,34 +225,11 @@ def _validate_inputs(store: EvidenceStore, unit: Dict[str, Any], workspace: Path
         raise ValueError(f"frozen unit input changed: {unit['id']}")
 
 
-def _is_within(path: Path, root: Path) -> bool:
-    path = path.resolve()
-    root = root.resolve()
-    return path == root or (root.is_dir() and root in path.parents)
-
-
-def _validate_artifact_paths(workspace: Path, readonly: List[Path], unit: Dict[str, Any]) -> None:
-    for raw in unit["artifacts"]:
-        path = _resolve(workspace, raw).resolve()
-        if any(_is_within(path, root) for root in readonly):
-            raise ValueError(f"unit {unit['id']} artifact is inside read-only input: {path}")
-
-
-def _git_commit(root: Path) -> str:
-    """Best-effort provenance only; execution never depends on git being present."""
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=str(root), capture_output=True,
-            text=True, check=False,
-        )
-    except OSError:
-        return ""
-    return proc.stdout.strip() if proc.returncode == 0 else ""
-
-
-def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experimenter") -> Dict[str, Any]:
+def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experimenter", authorize=None) -> Dict[str, Any]:
     """Execute exactly one frozen protocol; one protocol has one live executor."""
     root = Path(project_dir).resolve()
+    if not re.fullmatch(r"[0-9a-f]{16}", protocol_id):
+        raise ValueError("invalid protocol_id")
     runtime_dir = _runtime_dir(root, protocol_id)
     runtime_dir.mkdir(parents=True, exist_ok=True)
     lock = (runtime_dir / ".lock").open("w")
@@ -257,7 +238,7 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError(f"experiment protocol already running: {protocol_id}") from exc
-        return _run_experiment(root, protocol_id, author=author, lock_fd=lock.fileno())
+        return _run_experiment(root, protocol_id, author=author, lock_fd=lock.fileno(), authorize=authorize)
     finally:
         try:
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -265,12 +246,8 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
             lock.close()
 
 
-def _run_experiment(project_dir: Path, protocol_id: str, *, author: str, lock_fd: int) -> Dict[str, Any]:
+def _run_experiment(project_dir: Path, protocol_id: str, *, author: str, lock_fd: int, authorize=None) -> Dict[str, Any]:
     root = Path(project_dir).resolve()
-    workspace = L.scientific_workspace(root)
-    if not workspace.is_dir():
-        raise ValueError(f"scientific workspace missing: {workspace}")
-    readonly = L.readonly_inputs(root)
     store = EvidenceStore(root)
     protocol = store.get_protocol(protocol_id)
     if protocol is None:
@@ -285,10 +262,28 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str, lock_fd
     if not isinstance(protocol.get("metric_reducer"), dict):
         raise ValueError("runnable protocol requires metric_reducer")
 
+    if not protocol.get("bundle_id"):
+        raise ValueError("runnable protocol requires frozen execution bundle; freeze a new protocol")
+    with bundle.snapshot(root, protocol["bundle_id"]) as (workspace, manifest):
+        return _run_frozen(root, protocol_id, protocol, store, workspace, manifest, author, lock_fd, authorize)
+
+
+def _run_frozen(root, protocol_id, protocol, store, workspace, manifest, author, lock_fd, authorize):
+    guard = authorize or nullcontext
+    with guard():
+        pass
     units = _units(protocol)
+    names = {ref["path"] for ref in manifest["files"]}
     for unit in units:
         _validate_inputs(store, unit, workspace)
-        _validate_artifact_paths(workspace, readonly, unit)
+        for name in unit["artifacts"]:
+            bundle.relative_path(name)
+            if name in names:
+                raise ValueError("artifact cannot replace a frozen execution file")
+        # The interpreter is trusted runtime; every program file must be frozen.
+        argv = unit["argv"]
+        if argv[0] not in {"python", "python3", sys.executable} or len(argv) < 2 or argv[1] not in names:
+            raise ValueError("unit argv must select Python and a declared frozen script")
 
     checkpoint = _load_checkpoint(root, protocol_id)
     completed = checkpoint["completed"]
@@ -329,11 +324,12 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str, lock_fd
         recomputed = reduce_metrics(root, protocol, artifacts)
         if not metrics_equal(record.get("primary_metrics"), recomputed):
             raise ValueError("completed Evidence primary_metrics do not match raw artifacts")
-        _write_status(
-            root, protocol_id, "complete", len(completed), len(units),
-            current_unit=None, attempt=None, unit_started_at=None,
-            returncode=0, evidence_id=str(evidence_id),
-        )
+        with guard():
+            _write_status(
+                root, protocol_id, "complete", len(completed), len(units),
+                current_unit=None, attempt=None, unit_started_at=None,
+                returncode=0, evidence_id=str(evidence_id),
+            )
         return {
             "protocol_id": protocol_id,
             "evidence_id": str(evidence_id),
@@ -355,95 +351,102 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str, lock_fd
         ) + 1
         log_path = logs_dir / f"{unit_id}.attempt{attempts}.log"
         unit_started_at = utc_now()
-        _write_status(
-            root, protocol_id, "running", len(completed), len(units),
-            current_unit=unit_id,
-            attempt=attempts,
-            unit_started_at=unit_started_at,
-            returncode=None,
-            evidence_id=None,
-            log=str(log_path.relative_to(root)),
-        )
-        with log_path.open("w", encoding="utf-8") as log:
-            proc = subprocess.run(
-                unit["argv"],
-                cwd=str(workspace),
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=False,
-                pass_fds=(lock_fd,),
-            )
-        # Do not accept a safe point if its frozen code/config/input changed while
-        # the unit was executing; the output may no longer represent this protocol.
-        _validate_inputs(store, unit, workspace)
-        if proc.returncode != 0:
-            checkpoint["failures"].append({
-                "unit_id": unit_id,
-                "attempt": attempts,
-                "returncode": int(proc.returncode),
-                "log": str(log_path.relative_to(root)),
-            })
-            checkpoint["updated_at"] = utc_now()
-            _write_json(_checkpoint_path(root, protocol_id), checkpoint)
+        with guard():
             _write_status(
-                root, protocol_id, "failed", len(completed), len(units),
+                root, protocol_id, "running", len(completed), len(units),
                 current_unit=unit_id,
                 attempt=attempts,
                 unit_started_at=unit_started_at,
-                returncode=int(proc.returncode),
+                returncode=None,
                 evidence_id=None,
                 log=str(log_path.relative_to(root)),
             )
+        scratch = _runtime_dir(root, protocol_id) / "artifacts" / unit_id
+        scratch.mkdir(parents=True, exist_ok=True)
+        scratch = sandbox._policy_path(scratch)
+        outputs = {name: str(scratch / name) for name in unit["artifacts"]}
+        argv = [sys.executable, "-B", str(workspace / unit["argv"][1]),
+                *[outputs.get(arg, arg) for arg in unit["argv"][2:]]]
+        proc = sandbox.run_sandboxed(
+            argv, cwd=workspace,
+            readable_paths=[workspace, Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()],
+            writable_paths=[scratch], workspace_access="read", network=False, env={},
+            pass_fds=(lock_fd,), authorize=authorize,
+        )
+        log_path.write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
+        if proc.returncode != 0:
+            with guard():
+                checkpoint["failures"].append({
+                    "unit_id": unit_id,
+                    "attempt": attempts,
+                    "returncode": int(proc.returncode),
+                    "log": str(log_path.relative_to(root)),
+                })
+                checkpoint["updated_at"] = utc_now()
+                _write_json(_checkpoint_path(root, protocol_id), checkpoint)
+                _write_status(
+                    root, protocol_id, "failed", len(completed), len(units),
+                    current_unit=unit_id,
+                    attempt=attempts,
+                    unit_started_at=unit_started_at,
+                    returncode=int(proc.returncode),
+                    evidence_id=None,
+                    log=str(log_path.relative_to(root)),
+                )
             raise RuntimeError(f"experiment unit {unit_id} failed with rc={proc.returncode}")
 
-        refs = []
-        for raw_path in unit["artifacts"]:
-            path = _resolve(workspace, raw_path)
-            refs.append(store.artifact_ref(path))
-        completed[unit_id] = refs
-        checkpoint["updated_at"] = utc_now()
-        _write_json(_checkpoint_path(root, protocol_id), checkpoint)
-        _write_status(
-            root, protocol_id, "running", len(completed), len(units),
-            current_unit=None,
-            attempt=None,
-            unit_started_at=None,
-            returncode=0,
-            evidence_id=None,
-            log=None,
-        )
+        with guard():
+            refs = []
+            for raw_path in unit["artifacts"]:
+                path = sandbox._policy_path(scratch / raw_path)
+                refs.append(store.artifact_ref(path))
+            completed[unit_id] = refs
+            checkpoint["updated_at"] = utc_now()
+            _write_json(_checkpoint_path(root, protocol_id), checkpoint)
+            _write_status(
+                root, protocol_id, "running", len(completed), len(units),
+                current_unit=None,
+                attempt=None,
+                unit_started_at=None,
+                returncode=0,
+                evidence_id=None,
+                log=None,
+            )
 
-    _write_status(
-        root, protocol_id, "finalizing", len(completed), len(units),
-        current_unit=None, attempt=None, unit_started_at=None,
-        returncode=0, evidence_id=None, log=None,
-    )
+    with guard():
+        _write_status(
+            root, protocol_id, "finalizing", len(completed), len(units),
+            current_unit=None, attempt=None, unit_started_at=None,
+            returncode=0, evidence_id=None, log=None,
+        )
     artifacts: List[Dict[str, Any]] = []
     for unit in units:
         artifacts.extend(completed[unit["id"]])
     primary_metrics = reduce_metrics(root, protocol, artifacts)
-    evidence_id = store.add_record(
-        protocol_id=protocol_id,
-        author=author,
-        code_commit=_git_commit(workspace),
-        matrix_coverage={
-            "planned": len(units),
-            "completed": len(completed),
-            "units": [unit["id"] for unit in units],
-        },
-        primary_metrics=primary_metrics,
-        failures=list(checkpoint["failures"]),
-        deviations=[],
-        artifacts=artifacts,
-    )
-    checkpoint["evidence_id"] = evidence_id
-    checkpoint["updated_at"] = utc_now()
-    _write_json(_checkpoint_path(root, protocol_id), checkpoint)
-    _write_status(
-        root, protocol_id, "complete", len(completed), len(units),
-        current_unit=None, attempt=None, unit_started_at=None,
-        returncode=0, evidence_id=evidence_id, log=None,
-    )
+    with guard():
+        evidence_id = store.add_record(
+            protocol_id=protocol_id,
+            author=author,
+            code_commit="",
+            matrix_coverage={
+                "planned": len(units),
+                "completed": len(completed),
+                "units": [unit["id"] for unit in units],
+            },
+            primary_metrics=primary_metrics,
+            failures=list(checkpoint["failures"]),
+            deviations=[],
+            artifacts=artifacts,
+        )
+        checkpoint["evidence_id"] = evidence_id
+        checkpoint["updated_at"] = utc_now()
+        _write_json(_checkpoint_path(root, protocol_id), checkpoint)
+        _write_status(
+            root, protocol_id, "complete", len(completed), len(units),
+            current_unit=None, attempt=None, unit_started_at=None,
+            returncode=0, evidence_id=evidence_id, log=None,
+        )
+
     return {
         "protocol_id": protocol_id,
         "evidence_id": evidence_id,

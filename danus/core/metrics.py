@@ -106,7 +106,16 @@ def _validated_reducer_inputs(
     if not function_name:
         raise ValueError("metric_reducer function is empty")
 
-    reducer_path = _resolve(root, raw_path)
+    if protocol.get("bundle_id"):
+        from . import bundle
+        bundle_root, manifest = bundle.load(root, protocol["bundle_id"])
+        name = bundle.relative_path(raw_path)
+        if not any(item == {"path": name, "sha256": expected_hash, "size": expected_size}
+                   for item in manifest["files"]):
+            raise ValueError("metric reducer is not bound by execution bundle")
+        reducer_path = bundle_root / name
+    else:
+        reducer_path = _resolve(root, raw_path)
     if not reducer_path.is_file():
         raise ValueError(f"metric reducer missing: {reducer_path}")
     if reducer_path.stat().st_size != expected_size:

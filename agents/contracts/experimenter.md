@@ -201,3 +201,14 @@ Stop and surface the issue if you detect:
 A good Experimenter produces the strongest inspectable evidence with the least new
 code and least unnecessary compute, while making it impossible to confuse a
 post-hoc adaptation with a pre-specified test.
+
+
+## Frozen execution
+
+Use `experiment_run(protocol_id)` through the bound Gateway for the frozen
+protocol bound by the single `EXPERIMENT_PROTOCOL_ID=<id>` line in TASK.md. The host executes declared Python scripts from a
+verified read-only bundle with network disabled. Relative declared artifact
+arguments are mapped into the unit's writable scratch directory. Code and config
+resolve from the frozen working directory; writes must use those artifact paths.
+Do not invoke the host Experiment Runtime through shell tools or write control
+state. Protocol freezing is a trusted host operation before the assignment.

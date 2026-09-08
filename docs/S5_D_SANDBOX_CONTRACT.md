@@ -157,3 +157,38 @@ are outside the tool policy. Each round requires a current active assignment.
 The DSH worker backend is refused until its tool runner integrates this same
 policy and inherited-descriptor capability model; reducer isolation is independent
 of that backend selection.
+
+
+## Frozen experiment execution
+
+`EvidenceStore.freeze_protocol(execution_files=[...], source_root=...)` snapshots
+explicit code/config files, unit input references and the reducer into
+`evidence/bundles/<bundle_id>/files`. Paths are canonical relative paths; source
+components are opened with `openat`/`O_NOFOLLOW`. Regular files only. Each manifest
+entry fixes path, SHA256 and size; the full SHA256 of canonical manifest JSON is
+the bundle identity included in the protocol identity. The bundle is flushed and
+published before the protocol. Git state is not an execution source.
+
+The runtime accepts a declared Python script as `argv[1]`, using its own Python
+environment. It rejects protocols without bundles and other command forms. A new
+protocol is required to migrate a historical path-only plan. Before executing,
+the host copies and validates every manifest file into a private snapshot. The
+official sandbox exposes that snapshot read-only (including config and declared
+inputs), plus the unit's artifact scratch directory as writable. Declared relative
+artifact argv arguments map to scratch. The live workspace is not exposed; shell
+network and inherited secret environment are disabled. Metrics use the same
+bundled reducer in Experiment and Verifier.
+
+The bound Experimenter Gateway exposes `experiment_run`. It requires exactly one
+`EXPERIMENT_PROTOCOL_ID=<id>` line in the assignment's hash-validated TASK.md;
+mentioning another protocol in prose grants no execution authority. It checks
+the current capability at launch, during execution and under the existing locks
+when committing a safe point or evidence. Protocol freezing remains a trusted
+host action before assignment and semantic review.
+
+A small standard-library host monitor owns each sandbox process group before
+starting Codex. An inherited pidfd monitors the controller's actual lifetime;
+that descriptor never enters the untrusted command. Controller/Gateway death
+kills the official engine group, whose PID namespace cleans up descendants.
+Completed units retain the existing checkpoint/hash validation and are never
+rerun. An interrupted unit without a durable safe point is refused on restart.

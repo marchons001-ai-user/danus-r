@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ctypes
+from contextlib import nullcontext
+import time
 import json
 import os
 import shutil
@@ -123,7 +125,7 @@ def _sandbox_home_root() -> Path:
 
 def _send_tree_signal(proc: subprocess.Popen[str], sig: int) -> None:
     try:
-        os.killpg(os.getpgid(proc.pid), sig)
+        os.killpg(proc.pid, sig)
         return
     except (AttributeError, OSError):
         pass
@@ -158,6 +160,9 @@ def run_sandboxed(
     network: bool = False,
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
+    workspace_access: str = "write",
+    pass_fds: Sequence[int] = (),
+    authorize=None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one command through the official Codex Linux sandbox.
 
@@ -176,7 +181,9 @@ def run_sandboxed(
     codex_bin = _resolved_codex()
     readable = tuple(_policy_path(Path(path)) for path in readable_paths)
     writable = tuple(_policy_path(Path(path)) for path in writable_paths)
-    if root not in writable:
+    if workspace_access not in {"read", "write"}:
+        raise ValueError("invalid sandbox workspace access")
+    if workspace_access == "write" and root not in writable:
         writable = (root, *writable)
     if any(not path.exists() for path in (*readable, *writable)):
         raise ValueError("sandbox policy contains a missing path")
@@ -191,6 +198,7 @@ def run_sandboxed(
             readable_paths=readable,
             writable_paths=writable,
             network=network,
+            workspace_access=workspace_access,
         )
         cmd = [
             str(codex_bin),
@@ -201,21 +209,42 @@ def run_sandboxed(
             str(root),
             *command,
         ]
+        guard = authorize or nullcontext
+        owner_fd = os.pidfd_open(os.getpid())
         try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(root),
-                env=_sandbox_env(config_home, codex_bin, env),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
-        except OSError:
-            raise
+            with guard():
+                proc = subprocess.Popen(
+                    [sys.executable, "-I", str(Path(__file__).resolve()), str(owner_fd),
+                     ",".join(map(str, pass_fds)), *cmd],
+                    cwd=str(root),
+                    env=_sandbox_env(config_home, codex_bin, env),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                    pass_fds=(owner_fd, *pass_fds),
+                )
+        finally:
+            os.close(owner_fd)
+        started = time.monotonic()
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            while True:
+                interval = None if authorize is None else 0.5
+                if timeout is not None:
+                    remaining = timeout - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(cmd, timeout)
+                    interval = min(interval, remaining) if interval is not None else remaining
+                try:
+                    stdout, stderr = proc.communicate(timeout=interval)
+                    with guard():
+                        break
+                except subprocess.TimeoutExpired:
+                    with guard():
+                        pass
+                    if timeout is not None and time.monotonic() - started >= timeout:
+                        raise
         except subprocess.TimeoutExpired as exc:
             _terminate_process_tree(proc)
             try:
@@ -225,6 +254,9 @@ def run_sandboxed(
                 proc.kill()
                 proc.wait()
             raise TimeoutError(f"sandbox command timed out after {exc.timeout}s") from exc
+        except BaseException:
+            _terminate_process_tree(proc)
+            raise
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
     finally:
         shutil.rmtree(config_home, ignore_errors=True)
@@ -241,3 +273,33 @@ def _arm_parent_death(expected_parent_pid: int) -> None:
         os._exit(126)
     if os.getppid() != expected_parent_pid:
         os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _watch_command() -> int:
+    """Own the sandbox process group before launching the official engine.
+
+    Codex can fork launch helpers; PR_SET_PDEATHSIG on its first PID alone does
+    not cover them. The inherited pidfd identifies the actual calling process.
+    """
+    import select
+
+    owner = int(sys.argv[1])
+    inherited = tuple(int(fd) for fd in sys.argv[2].split(",") if fd)
+    if select.select([owner], [], [], 0)[0]:
+        return 126
+    child = subprocess.Popen(sys.argv[3:], pass_fds=inherited)
+    try:
+        child_fd = os.pidfd_open(child.pid)
+    except ProcessLookupError:
+        return child.wait()
+    try:
+        ready, _, _ = select.select([owner, child_fd], [], [])
+        if owner in ready:
+            os.killpg(os.getpgrp(), signal.SIGKILL)
+        return child.wait()
+    finally:
+        os.close(child_fd)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_watch_command())

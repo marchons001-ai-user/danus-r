@@ -819,6 +819,25 @@ def search_arxiv_theorems(query: str, num_results: int = 10) -> Dict[str, Any]:
     return _arxiv_search(query, num_results=num_results)
 
 
+def experiment_run(protocol_id: str) -> Dict[str, Any]:
+    """Execute the frozen protocol named in this Experimenter's assigned task."""
+    from danus.execution.experiment import run_experiment
+
+    @contextmanager
+    def authorized():
+        if _BOUND_WORKER is None or _BOUND_WORKER["role"] != "experimenter":
+            raise PermissionError("experiment execution requires a bound Experimenter Gateway")
+        with capability.scope(_BOUND_WORKER):
+            task = (_project() / "workers" / _author() / "TASK.md").read_text()
+            if re.findall(r"^EXPERIMENT_PROTOCOL_ID=([0-9a-f]{16})$", task, re.MULTILINE) != [protocol_id]:
+                raise PermissionError("protocol is not named in the current assigned task")
+            yield
+
+    with authorized():
+        root, author = _project(), _author()
+    return run_experiment(root, protocol_id, author=author, authorize=authorized)
+
+
 # --------------------------------------------------------------------------- #
 # role-based registration                                                     #
 # --------------------------------------------------------------------------- #
@@ -830,6 +849,7 @@ _TOOLS = {
     "fact_search": fact_search,
     "fact_revoke": fact_revoke,
     "handoff_request": handoff_request,
+    "experiment_run": experiment_run,
     "implementation_pending_contracts": implementation_pending_contracts,
     "implementation_submit_contract": implementation_submit_contract,
     "implementation_review_contract": implementation_review_contract,
@@ -845,7 +865,7 @@ def _bound_tool(fn):
     @wraps(fn)
     def call(*args, **kwargs):
         if fn.__name__ in {
-            "handoff_request", "implementation_submit_contract", "plan_propose_change",
+            "experiment_run", "handoff_request", "implementation_submit_contract", "plan_propose_change",
             "implementation_review_contract", "plan_review_change",
         }:
             # These functions validate the capability inside their existing locks.

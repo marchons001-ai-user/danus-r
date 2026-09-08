@@ -139,7 +139,7 @@ def test_scientific_tool_sets():
         "plan_pending_changes", "plan_review_change", "search_arxiv_theorems",
     ]
     assert tools_for("experimenter") == [
-        "gm_add", "gm_search", "fact_search", "handoff_request",
+        "gm_add", "gm_search", "fact_search", "handoff_request", "experiment_run",
     ]
     assert "fact_submit" not in tools_for("reviewer")
     assert "fact_submit" not in tools_for("experimenter")

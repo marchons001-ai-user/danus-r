@@ -183,24 +183,24 @@ planning.planning_step('P')
 
 def test_experiment_checkpoint_recovers_in_fresh_process_without_duplicate_evidence(tmp_path: Path):
     store, protocol_id = E._fixture(tmp_path)
-    (tmp_path / "fail_u2").touch()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/fail_u2").touch()
     failed = _fresh(
         f"from danus.execution.experiment import run_experiment; run_experiment({str(tmp_path)!r}, {protocol_id!r})",
         cwd=tmp_path,
         check=False,
     )
     assert failed.returncode != 0
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
 
-    (tmp_path / "fail_u2").unlink()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/fail_u2").unlink()
     recovered = _fresh(
         f"import json; from danus.execution.experiment import run_experiment; "
         f"print(json.dumps(run_experiment({str(tmp_path)!r}, {protocol_id!r})))",
         cwd=tmp_path,
     )
     first = json.loads(recovered.stdout)
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
-    assert (tmp_path / "counts" / "u2.txt").read_text() == "2"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/counts/u2.txt").read_text() == "2"
 
     again = _fresh(
         f"import json; from danus.execution.experiment import run_experiment; "
@@ -209,8 +209,8 @@ def test_experiment_checkpoint_recovers_in_fresh_process_without_duplicate_evide
     )
     second = json.loads(again.stdout)
     assert second["evidence_id"] == first["evidence_id"]
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
-    assert (tmp_path / "counts" / "u2.txt").read_text() == "2"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/counts/u2.txt").read_text() == "2"
     records = list((tmp_path / "evidence" / "records").glob("*.json"))
     assert len(records) == 1
     assert store.get_record(first["evidence_id"])

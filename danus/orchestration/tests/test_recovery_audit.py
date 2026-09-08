@@ -232,22 +232,22 @@ def test_context_rollover_migrates_into_fresh_round_and_completes(tmp_path: Path
 
 def test_experiment_recovery_is_idempotent_and_verification_recomputes_tampered_metric(tmp_path: Path):
     store, protocol_id = experiment_fixture(tmp_path)
-    (tmp_path / "fail_u2").touch()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/fail_u2").touch()
 
     with pytest.raises(RuntimeError, match="u2 failed"):
         run_experiment(tmp_path, protocol_id)
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
 
-    (tmp_path / "fail_u2").unlink()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/fail_u2").unlink()
     result = run_experiment(tmp_path, protocol_id)
     assert result["primary_metrics"] == {"mean_score": 2.0}
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
-    assert (tmp_path / "counts" / "u2.txt").read_text() == "2"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/counts/u2.txt").read_text() == "2"
 
     again = run_experiment(tmp_path, protocol_id)
     assert again["evidence_id"] == result["evidence_id"]
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
-    assert (tmp_path / "counts" / "u2.txt").read_text() == "2"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/counts/u2.txt").read_text() == "2"
 
     good = store.get_record(result["evidence_id"])
     assert good

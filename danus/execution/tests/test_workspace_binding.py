@@ -54,7 +54,7 @@ def _protocol(control: Path, workspace: Path, *, artifact: str = "raw/result.jso
     runner.write_text(RUNNER, encoding="utf-8")
     reducer.write_text(REDUCER, encoding="utf-8")
     store = EvidenceStore(control)
-    reducer_ref = store.artifact_ref(reducer)
+    reducer_ref = {**store.artifact_ref(reducer), "path": "reducer.py"}
     reducer_ref["function"] = "reduce_metrics"
     return store.freeze_protocol(
         question="Does the isolated workspace run produce score 2?",
@@ -63,12 +63,13 @@ def _protocol(control: Path, workspace: Path, *, artifact: str = "raw/result.jso
             "id": "u1",
             "argv": [sys.executable, "runner.py", artifact],
             "artifacts": [artifact],
-            "inputs": [store.artifact_ref(runner)],
+            "inputs": [{**store.artifact_ref(runner), "path": "runner.py"}],
         }]},
         primary_metrics=["score"],
         decision_rule="support iff score == 2",
         author="reviewer",
         metric_reducer=reducer_ref,
+        execution_files=["runner.py"], source_root=workspace,
     )
 
 
@@ -119,7 +120,7 @@ def test_danus_new_can_bind_from_existing_env_surface(tmp_path: Path):
         assert result["readonly_inputs"] == [str(readonly.resolve())]
 
 
-def test_experiment_runtime_executes_and_writes_only_relative_science_in_workspace(tmp_path: Path):
+def test_experiment_runtime_executes_frozen_workspace_and_writes_scratch(tmp_path: Path):
     agents = tmp_path / "control-root"
     workspace = tmp_path / "scientific"
     workspace.mkdir()
@@ -131,15 +132,17 @@ def test_experiment_runtime_executes_and_writes_only_relative_science_in_workspa
         result = run_experiment(control, protocol_id)
 
     assert result["primary_metrics"] == {"score": 2.0}
-    payload = json.loads((workspace / "raw" / "result.json").read_text(encoding="utf-8"))
-    assert Path(payload["cwd"]) == workspace.resolve()
+    artifact = control / "experiment_runtime" / protocol_id / "artifacts/u1/raw/result.json"
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert Path(payload["cwd"]) != workspace.resolve()
+    assert not (workspace / "raw").exists()
     assert not (control / "raw" / "result.json").exists()
     assert (control / "experiment_runtime" / protocol_id / "checkpoint.json").is_file()
     assert (control / "evidence" / "records" / f"{result['evidence_id']}.json").is_file()
 
     record = EvidenceStore(control).get_record(result["evidence_id"])
     assert record is not None
-    assert Path(record["artifacts"][0]["path"]) == (workspace / "raw" / "result.json").resolve()
+    assert control / record["artifacts"][0]["path"] == artifact
 
 
 def test_declared_readonly_input_cannot_be_an_artifact_target(tmp_path: Path):
@@ -157,7 +160,7 @@ def test_declared_readonly_input_cannot_be_an_artifact_target(tmp_path: Path):
         )
         control = L.project_dir("P")
         protocol_id = _protocol(control, workspace, artifact=str(forbidden))
-        with pytest.raises(ValueError, match="read-only input"):
+        with pytest.raises(ValueError, match="canonical and relative"):
             run_experiment(control, protocol_id)
 
     assert not forbidden.exists()

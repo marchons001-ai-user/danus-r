@@ -15,7 +15,7 @@ from danus.orchestration import autonomy as A
 from danus.orchestration import cli, planning
 
 
-RUNNER = """from pathlib import Path\nimport json\nPath('raw').mkdir(exist_ok=True)\nPath('raw/result.json').write_text(json.dumps({'score': 2.0}))\n"""
+RUNNER = """from pathlib import Path\nimport json, sys\np=Path(sys.argv[1])\np.parent.mkdir(parents=True,exist_ok=True)\np.write_text(json.dumps({'score': 2.0}))\n"""
 
 REDUCER = """import json\n\ndef reduce_metrics(protocol, artifacts):\n    return {'score': json.loads(artifacts[0].read_text())['score']}\n"""
 
@@ -88,7 +88,7 @@ def _runnable_protocol(pdir: Path) -> str:
             "units": [
                 {
                     "id": "u1",
-                    "argv": [sys.executable, "runner.py"],
+                    "argv": [sys.executable, "runner.py", "raw/result.json"],
                     "artifacts": ["raw/result.json"],
                 }
             ]
@@ -97,6 +97,7 @@ def _runnable_protocol(pdir: Path) -> str:
         decision_rule="record the frozen score without adapting the run",
         author="low2",
         metric_reducer=reducer_ref,
+        execution_files=["runner.py"],
     )
 
 

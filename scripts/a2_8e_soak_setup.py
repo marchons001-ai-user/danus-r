@@ -41,7 +41,7 @@ def _contract(project_dir: Path, protocol_id: str) -> tuple[str, dict[str, objec
     fields: dict[str, object] = {
         "goal": (
             f"Execute frozen protocol {protocol_id} through the existing Danus Experiment Runtime "
-            f"for control project {project_dir}, and return its immutable evidence without modifying the fixture."
+            f"for control project {project_dir}, and return its immutable evidence without modifying the fixture.\nEXPERIMENT_PROTOCOL_ID={protocol_id}"
         ),
         "must_preserve_invariants": [
             f"Run exactly protocol {protocol_id}; use only its five sigma cells and hash-pinned reducer.",
@@ -53,7 +53,7 @@ def _contract(project_dir: Path, protocol_id: str) -> tuple[str, dict[str, objec
             "Do not replace RMSE or reinterpret the universal-improvement hypothesis after seeing results.",
         ],
         "acceptance_conditions": [
-            f"Run `python -m danus.execution.experiment {project_dir} {protocol_id} --author low3` successfully.",
+            f"Call Gateway experiment_run(protocol_id={protocol_id}) successfully.",
             "The Experiment Runtime checkpoint records all five completed units and one immutable Evidence Record.",
             "Report the evidence_id, primary metrics, full matrix coverage, failures, and every negative cell without making a broader claim.",
         ],
@@ -155,8 +155,8 @@ def setup_soak(project: str, workspace: Path) -> dict[str, object]:
     atomic_write(L.research_charter(project), _CHARTER)
 
     store = EvidenceStore(project_dir)
-    runner_ref = store.artifact_ref(run_case)
-    reducer_ref = store.artifact_ref(reducer)
+    runner_ref = {**store.artifact_ref(run_case), "path": "run_case.py"}
+    reducer_ref = {**store.artifact_ref(reducer), "path": "reduce_metrics.py"}
     units = []
     for sigma in _SIGMAS_E1:
         tag = f"{int(round(sigma * 100)):02d}"
@@ -164,7 +164,7 @@ def setup_soak(project: str, workspace: Path) -> dict[str, object]:
         units.append(
             {
                 "id": f"sigma-{tag}",
-                "argv": [sys.executable, str(run_case), f"{sigma:.2f}", artifact],
+                "argv": [sys.executable, "run_case.py", f"{sigma:.2f}", artifact],
                 "artifacts": [artifact],
                 "inputs": [runner_ref],
             }
@@ -177,6 +177,7 @@ def setup_soak(project: str, workspace: Path) -> dict[str, object]:
         decision_rule="Accept universal improvement only if all five cells have filtered_rmse < raw_rmse.",
         author="soak-fixture",
         metric_reducer={**reducer_ref, "function": "reduce_metrics"},
+        execution_files=["run_case.py"], source_root=workspace,
     )
 
     e1_task, _ = _contract(project_dir, protocol_id)

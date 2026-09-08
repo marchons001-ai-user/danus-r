@@ -16,11 +16,11 @@ from danus.verify.empirical import check_empirical_evidence
 RUNNER = r'''from pathlib import Path
 import json, sys
 unit, output = sys.argv[1], Path(sys.argv[2])
-counter = Path("counts") / f"{unit}.txt"
+counter = output.parent.parent / "counts" / f"{unit}.txt"
 counter.parent.mkdir(exist_ok=True)
 count = int(counter.read_text() or "0") + 1 if counter.exists() else 1
 counter.write_text(str(count))
-if unit == "u2" and Path("fail_u2").exists():
+if unit == "u2" and (output.parent.parent / "fail_u2").exists():
     raise SystemExit(7)
 output.parent.mkdir(parents=True, exist_ok=True)
 value = 1.0 if unit == "u1" else 3.0
@@ -65,13 +65,16 @@ def _fixture(root: Path):
         decision_rule="support iff mean_score == 2",
         author="reviewer",
         metric_reducer=reducer_ref,
+        execution_files=["runner.py"],
     )
+    for unit in ("u1", "u2"):
+        (root / "experiment_runtime" / protocol_id / "artifacts" / unit).mkdir(parents=True)
     return store, protocol_id
 
 
 def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
     store, protocol_id = _fixture(tmp_path)
-    (tmp_path / "fail_u2").touch()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/fail_u2").touch()
 
     with pytest.raises(RuntimeError, match="u2 failed"):
         run_experiment(tmp_path, protocol_id)
@@ -83,7 +86,7 @@ def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
     assert checkpoint["failures"][-1]["unit_id"] == "u2"
     assert checkpoint["failures"][-1]["attempt"] == 1
     assert (tmp_path / checkpoint["failures"][-1]["log"]).is_file()
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
 
     status = json.loads((runtime_dir / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "failed"
@@ -91,12 +94,12 @@ def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
     assert status["completed_units"] == 1 and status["total_units"] == 2
     assert status["attempt"] == 1 and status["returncode"] == 7
 
-    (tmp_path / "fail_u2").unlink()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/fail_u2").unlink()
     result = run_experiment(tmp_path, protocol_id)
     assert result["primary_metrics"] == {"mean_score": 2.0}
     assert result["completed_units"] == 2
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
-    assert (tmp_path / "counts" / "u2.txt").read_text() == "2"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/counts/u2.txt").read_text() == "2"
     assert (runtime_dir / "logs" / "u2.attempt2.log").is_file()
 
     status = json.loads((runtime_dir / "status.json").read_text(encoding="utf-8"))
@@ -108,8 +111,8 @@ def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
     # Completed runtime is idempotent: neither unit is run again.
     again = run_experiment(tmp_path, protocol_id)
     assert again["evidence_id"] == result["evidence_id"]
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
-    assert (tmp_path / "counts" / "u2.txt").read_text() == "2"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/counts/u2.txt").read_text() == "2"
 
     record = store.get_record(result["evidence_id"])
     assert record and record["primary_metrics"] == {"mean_score": 2.0}
@@ -127,16 +130,16 @@ def test_checkpoint_resume_reducer_and_verification(tmp_path: Path):
 def test_status_is_visible_before_each_unit_starts(tmp_path: Path, monkeypatch):
     _, protocol_id = _fixture(tmp_path)
     status_path = tmp_path / "experiment_runtime" / protocol_id / "status.json"
-    real_run = experiment_runtime.subprocess.run
+    real_run = experiment_runtime.sandbox.run_sandboxed
     seen = []
 
     def run_and_observe(argv, *args, **kwargs):
-        if isinstance(argv, list) and len(argv) >= 3 and argv[1] == "runner.py":
+        if isinstance(argv, list) and len(argv) >= 4 and Path(argv[2]).name == "runner.py":
             status = json.loads(status_path.read_text(encoding="utf-8"))
-            seen.append((argv[2], status))
+            seen.append((argv[3], status))
         return real_run(argv, *args, **kwargs)
 
-    monkeypatch.setattr(experiment_runtime.subprocess, "run", run_and_observe)
+    monkeypatch.setattr(experiment_runtime.sandbox, "run_sandboxed", run_and_observe)
     result = run_experiment(tmp_path, protocol_id)
 
     assert [unit for unit, _ in seen] == ["u1", "u2"]
@@ -155,15 +158,15 @@ def test_status_is_visible_before_each_unit_starts(tmp_path: Path, monkeypatch):
 
 def test_completed_artifact_change_blocks_resume(tmp_path: Path):
     _, protocol_id = _fixture(tmp_path)
-    (tmp_path / "fail_u2").touch()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/fail_u2").touch()
     with pytest.raises(RuntimeError):
         run_experiment(tmp_path, protocol_id)
 
-    (tmp_path / "raw" / "u1.json").write_text('{"score": 99}', encoding="utf-8")
-    (tmp_path / "fail_u2").unlink()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/raw/u1.json").write_text('{"score": 99}', encoding="utf-8")
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/fail_u2").unlink()
     with pytest.raises(ValueError, match="completed unit artifact changed: u1"):
         run_experiment(tmp_path, protocol_id)
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
 
 
 def test_verifier_rejects_wrong_metrics_even_with_valid_record_identity(tmp_path: Path):
@@ -193,21 +196,13 @@ def test_verifier_rejects_wrong_metrics_even_with_valid_record_identity(tmp_path
     assert any("primary_metrics_recompute" in error for error in out["errors"])
 
 
-def test_reducer_change_rejected_by_runtime_and_verifier(tmp_path: Path):
+def test_live_reducer_change_preserves_frozen_runtime_and_verifier(tmp_path: Path):
     _, protocol_id = _fixture(tmp_path)
     result = run_experiment(tmp_path, protocol_id)
-    (tmp_path / "reducer.py").write_text(REDUCER + "\n# changed\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="metric reducer"):
-        run_experiment(tmp_path, protocol_id)
-
-    out = check_empirical_evidence(
-        tmp_path,
-        scope={"matrix": "two-unit frozen smoke"},
-        evidence_refs=[result["evidence_id"]],
-    )
-    assert out["passed"] is False
-    assert any("primary_metrics_recompute" in error and "reducer" in error for error in out["errors"])
+    (tmp_path / "reducer.py").write_text("raise RuntimeError('replacement')")
+    assert run_experiment(tmp_path, protocol_id)["evidence_id"] == result["evidence_id"]
+    assert check_empirical_evidence(tmp_path, scope={"matrix": "two units"},
+                                    evidence_refs=[result["evidence_id"]])["passed"]
 
 
 def test_tampered_frozen_protocol_is_never_executed(tmp_path: Path):
