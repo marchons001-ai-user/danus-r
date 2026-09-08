@@ -292,13 +292,16 @@ class ProgressLedger:
             if record:
                 latest_by_node[record["node_id"]] = contract_id
         out: List[Dict[str, Any]] = []
-        executions = {a["assignment_id"]: a for a in self.snapshot()}
+        executions = {a["assignment_id"]: a for a in self.assignments()}
         for node_id in sorted(latest_by_node):
             record = records[latest_by_node[node_id]]
             view = self._implementation_contract_view(record)
             execution = executions.get(view.get("consumed_by_assignment_id"))
             if view["status"] != "CONSUMED" or not (
-                execution and execution["state"] == "DONE" and execution.get("outcome") == "COMPLETE"
+                execution
+                and execution["state"] == "DONE"
+                and execution.get("outcome") == "COMPLETE"
+                and not self._is_plan_stale(execution)
             ):
                 out.append(view)
         return out
