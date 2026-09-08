@@ -88,16 +88,16 @@ except OSError as exc:
     record("readonly_read", False, exc)
 expect_oserror("readonly_write_denied", lambda: P["readonly_file"].write_text("BAD", encoding="utf-8"))
 
-for name, key in [
-    ("plan_read_denied", "plan"),
-    ("progress_read_denied", "progress"),
-    ("fact_graph_read_denied", "fact"),
-    ("other_worker_read_denied", "other_worker"),
+for prefix, key in [
+    ("plan", "plan"),
+    ("progress", "progress"),
+    ("fact_graph", "fact"),
 ]:
-    expect_oserror(name, lambda key=key: P[key].read_text(encoding="utf-8"))
-
-expect_oserror("progress_write_denied", lambda: P["progress"].write_text("FORGED", encoding="utf-8"))
+    expect_oserror(prefix + "_read_denied", lambda key=key: P[key].read_text(encoding="utf-8"))
+    expect_oserror(prefix + "_write_denied", lambda key=key: P[key].write_text("FORGED", encoding="utf-8"))
+expect_oserror("other_worker_read_denied", lambda: P["other_worker"].read_text(encoding="utf-8"))
 expect_oserror("pause_delete_denied", lambda: P["pause"].unlink())
+expect_oserror("tmp_write_denied", lambda: Path("/tmp/danus-s5d0-probe").write_text("BAD", encoding="utf-8"))
 expect_oserror("absolute_escape_denied", lambda: Path(str(P["progress"])).read_text(encoding="utf-8"))
 expect_oserror("dotdot_escape_denied", lambda: P["dotdot_progress"].read_text(encoding="utf-8"))
 expect_oserror("existing_symlink_escape_denied", lambda: P["existing_link"].read_text(encoding="utf-8"))
@@ -105,9 +105,8 @@ expect_oserror("existing_symlink_escape_denied", lambda: P["existing_link"].read
 try:
     P["late_link"].symlink_to(P["progress"])
 except OSError as exc:
-    record("new_symlink_creation", False, exc)
+    record("new_symlink_escape_denied", True, "link creation denied: " + str(exc))
 else:
-    record("new_symlink_creation", True)
     expect_oserror("new_symlink_escape_denied", lambda: P["late_link"].read_text(encoding="utf-8"))
 
 nested = subprocess.run(
@@ -176,7 +175,14 @@ def main() -> int:
         readonly = root / "readonly"
         control = root / "control"
         config_home = root / "codex-home"
-        for path in (workspace, readonly, control / "plan", control / "progress", control / "fact_graph" / "facts", control / "workers" / "other" / "local_memory"):
+        for path in (
+            workspace,
+            readonly,
+            control / "plan",
+            control / "progress",
+            control / "fact_graph" / "facts",
+            control / "workers" / "other" / "local_memory",
+        ):
             path.mkdir(parents=True, exist_ok=True)
 
         workspace_file = workspace / "file.txt"
@@ -186,13 +192,17 @@ def main() -> int:
         fact = control / "fact_graph" / "facts" / "fact.txt"
         pause = control / "PAUSE"
         other_worker = control / "workers" / "other" / "local_memory" / "secret.txt"
-        workspace_file.write_text("WORKSPACE", encoding="utf-8")
-        readonly_file.write_text("READONLY", encoding="utf-8")
-        plan.write_text("PLAN", encoding="utf-8")
-        progress.write_text("PROGRESS", encoding="utf-8")
-        fact.write_text("FACT", encoding="utf-8")
-        pause.write_text("PAUSED", encoding="utf-8")
-        other_worker.write_text("PRIVATE", encoding="utf-8")
+        sentinels = {
+            workspace_file: "WORKSPACE",
+            readonly_file: "READONLY",
+            plan: "PLAN",
+            progress: "PROGRESS",
+            fact: "FACT",
+            pause: "PAUSED",
+            other_worker: "PRIVATE",
+        }
+        for path, value in sentinels.items():
+            path.write_text(value, encoding="utf-8")
 
         existing_link = workspace / "existing-link"
         existing_link.symlink_to(progress)
@@ -258,6 +268,28 @@ def main() -> int:
                 "pass": False,
                 "detail": "host listener accepted a sandbox connection",
             }
+
+        protected = {
+            "readonly": (readonly_file, "READONLY"),
+            "plan": (plan, "PLAN"),
+            "progress": (progress, "PROGRESS"),
+            "fact_graph": (fact, "FACT"),
+            "pause": (pause, "PAUSED"),
+            "other_worker": (other_worker, "PRIVATE"),
+        }
+        changed = []
+        for name, (path, expected) in protected.items():
+            try:
+                actual = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                changed.append(f"{name}: unreadable on host after probe ({exc})")
+                continue
+            if actual != expected:
+                changed.append(f"{name}: content changed")
+        results["host_protected_state_unchanged"] = {
+            "pass": not changed,
+            "detail": "; ".join(changed),
+        }
 
         failures = []
         for name in sorted(results):
