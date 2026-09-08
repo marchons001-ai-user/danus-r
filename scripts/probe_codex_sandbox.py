@@ -110,7 +110,7 @@ else:
     expect_oserror("new_symlink_escape_denied", lambda: P["late_link"].read_text(encoding="utf-8"))
 
 nested = subprocess.run(
-    ["/bin/bash", "-lc", "cat \"$1\" >/dev/null", "probe", str(P["progress"])],
+    ["/bin/bash", "-lc", 'cat "$1" >/dev/null', "probe", str(P["progress"])],
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
     text=True,
@@ -221,7 +221,9 @@ def main() -> int:
 
         _write_profile(config_home, codex_real, readonly)
         server, port, connected, thread = _listener()
-        (workspace / "probe_inner.py").write_text(_inner_program(paths, port), encoding="utf-8")
+        inner_source = _inner_program(paths, port)
+        compile(inner_source, "<danus-s5d0-inner>", "exec")
+        (workspace / "probe_inner.py").write_text(inner_source, encoding="utf-8")
 
         child_env = {
             "HOME": str(Path.home()),
