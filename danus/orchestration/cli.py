@@ -1188,18 +1188,19 @@ def do_resume(target: str, stagger: float = 0.2) -> List[Dict]:
     dirs = L.target_worker_dirs(target)
     if not dirs:
         raise SystemExit(f"no workers for target {target!r}")
-    if worker:
-        wl = L.WorkerLayout(dirs[0])
-        return [{"worker": wl.name, "result": _resume_one(wl)}]
+    with project_control_lock(L.project_dir(project)):
+        if worker:
+            wl = L.WorkerLayout(dirs[0])
+            return [{"worker": wl.name, "result": _resume_one(wl)}]
 
-    _project_pause(project).unlink(missing_ok=True)
-    out = []
-    for i, wdir in enumerate(dirs):
-        if i and stagger:
-            time.sleep(stagger)
-        wl = L.WorkerLayout(wdir)
-        out.append({"worker": wl.name, "result": _start_one(wl)})
-    return out
+        _project_pause(project).unlink(missing_ok=True)
+        out = []
+        for i, wdir in enumerate(dirs):
+            if i and stagger:
+                time.sleep(stagger)
+            wl = L.WorkerLayout(wdir)
+            out.append({"worker": wl.name, "result": _start_one(wl)})
+        return out
 
 
 # --------------------------------------------------------------------------- #
