@@ -855,6 +855,18 @@ def _decorate_supervisor_report(
     return report, policy, quiescent
 
 
+def _recover_project(project_dir: Path) -> List[Dict[str, Any]]:
+    """Finish durable transactions before evaluating permission for new work."""
+    from .planning import _recover_materialized_tasks
+
+    ResearchPlanGraph(project_dir).recover_governance()
+    recovered = _recover_materialized_tasks(project_dir)
+    for result in recovered:
+        if result.get("result") == "blocked":
+            raise ValueError(result["reason"])
+    return recovered
+
+
 def _do_supervise_unlocked(
     project: str,
     *,
@@ -876,6 +888,7 @@ def _do_supervise_unlocked(
 
     ledger = ProgressLedger(pdir)
     try:
+        recovered = _recover_project(pdir)
         if complete_node:
             ledger.set_node_state(complete_node, state="DONE", actor="supervisor")
         elif reopen_node:
@@ -885,6 +898,7 @@ def _do_supervise_unlocked(
         report, policy, quiescent = _decorate_supervisor_report(
             project, pdir, rows, reconcile(pdir, rows), token_budget
         )
+        report["recovery_applied"] = recovered
         if not apply:
             return report
 
@@ -924,6 +938,7 @@ def _do_supervise_unlocked(
                 break
 
         report["applied"] = applied
+        report["recovery_applied"] = recovered
         report["autonomy_applied"] = autonomy_applied
         report["reviewer_cost_applied"] = reviewer_cost_applied
         report["quota_applied"] = quota_applied
@@ -1021,6 +1036,8 @@ def watch_supervisor(
     last_reconcile = 0.0
     last_quota_refresh: Optional[float] = None
     while True:
+        with project_control_lock(pdir):
+            _recover_project(pdir)
         now = time.monotonic()
         quota_due = (
             last_quota_refresh is None
