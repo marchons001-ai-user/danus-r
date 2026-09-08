@@ -155,6 +155,8 @@ class ResearchPlanGraph:
                 nodes = self.revision(version)["nodes"]
                 if any(nodes.get(nid) != base_nodes[nid] for nid in required):
                     return False
+            if any(current["nodes"].get(nid) != base_nodes[nid] for nid in required):
+                return False
         except (KeyError, TypeError, ValueError):
             return False
         return True
@@ -330,6 +332,27 @@ class ResearchPlanGraph:
         self._write_current(prepared)
         self._recover_commit(record, prepared, "supervisor")
         return prepared
+
+    def recover_governance(self) -> None:
+        """Publish prepared work before routing, and require fresh stale reviews."""
+        from .progress import ProgressLedger
+
+        ledger = ProgressLedger(self.root)
+        with ledger.assignment_lock(), self._commit_lock():
+            current = self._recover_prepared_revision(self.snapshot())
+            assignments = {a["assignment_id"]: a for a in ledger.assignments()}
+            for path in sorted(self.changes_dir.glob("*.json")):
+                record = self.get_change(path.stem)
+                assignment = assignments.get(record.get("review_assignment_id"))
+                if (record["base_plan_version"] != current["plan_version"]
+                    or record["status"] not in {"APPROVED", "REVISE", "REJECTED"}
+                    or not assignment
+                    or not (assignment["state"] == "STALE" or ledger._is_plan_stale(assignment))):
+                    continue
+                record.update(status="PROPOSED", reviewer=None, review_verdict=None,
+                              review_rationale="", reviewed_at=None)
+                record.pop("review_assignment_id", None)
+                self._write_json(path, record)
 
     def _require_completed_review(self, record) -> None:
         review_assignment_id = record.get("review_assignment_id")
