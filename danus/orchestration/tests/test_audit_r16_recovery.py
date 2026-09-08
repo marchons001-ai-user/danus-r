@@ -155,7 +155,9 @@ def test_reopen_between_verdict_and_complete_requires_fresh_review(tmp_path, mon
             planning.planning_step("P")
         assert graph.get_change(cid)["status"] == "COMMITTED"
         assert graph.get_change(cid)["review_assignment_id"] == new["assignment_id"]
-        assert HandoffRequests(ledger).get(review["handoff_id"])["resolution_assignment_id"] == new["assignment_id"]
+        handoffs = HandoffRequests(ledger)
+        assert handoffs.get(review["handoff_id"])["status"] == "STALE"
+        assert handoffs.get(new["handoff_id"])["resolution_assignment_id"] == new["assignment_id"]
 
 
 def test_reassign_preserves_completion_but_reopen_revokes_it(tmp_path):
