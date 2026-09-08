@@ -96,6 +96,9 @@ class HandoffRequests:
         }
         if refs:
             identity["evidence_refs"] = refs
+        subject = self._subject(identity)
+        if subject_type == "PLAN_CHANGE" and subject and subject.get("review_epoch"):
+            identity["review_epoch"] = subject["review_epoch"]
         handoff_id = self.progress._content_id(identity)
         existing = self.get(handoff_id)
         if existing is not None:
@@ -115,11 +118,35 @@ class HandoffRequests:
         return self.get(handoff_id) or {}
 
     def get(self, handoff_id: str) -> Optional[Dict[str, Any]]:
-        return self._replay().get(str(handoff_id).strip())
+        record = self._replay().get(str(handoff_id).strip())
+        return self._view(record) if record else None
 
     def all(self) -> List[Dict[str, Any]]:
         records = self._replay()
-        return [records[key] for key in sorted(records)]
+        return [self._view(records[key]) for key in sorted(records)]
+
+    def _subject(self, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if record["subject_type"] == "IMPLEMENTATION_CONTRACT":
+            return self.progress.implementation_contract(record["subject_id"])
+        if record["subject_type"] == "PLAN_CHANGE":
+            graph = ResearchPlanGraph(self.root)
+            if graph._change_path(record["subject_id"]).is_file():
+                return graph.get_change(record["subject_id"])
+        return None
+
+    def _view(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Subject revocation takes precedence over handoff retry state."""
+        subject = self._subject(record)
+        if subject is None:
+            if (record["subject_type"] in {"PLAN_CHANGE", "IMPLEMENTATION_CONTRACT"}
+                and record["status"] in {"OPEN", "ASSIGNED"}):
+                return {**record, "status": "STALE"}
+            return record
+        old_epoch = (record["subject_type"] == "PLAN_CHANGE"
+                     and int(record.get("review_epoch", 0)) != int(subject.get("review_epoch", 0)))
+        if old_epoch or (subject.get("status") == "STALE" and record["status"] in {"OPEN", "ASSIGNED"}):
+            return {**record, "status": "STALE"}
+        return record
 
     def pending(self) -> List[Dict[str, Any]]:
         return [
