@@ -196,6 +196,9 @@ def initialize_research(project: str, *, brief: Optional[str] = None, model: Opt
         _set_role(L.WorkerLayout(L.worker_dir(project, workers[2])), "experimenter")
         created = True
 
+    if (pdir / "plan" / "current.json").is_file():
+        with cli.project_control_lock(pdir):
+            cli._recover_project(pdir)
     roles = _validate_roster(project)
     brief_path = pdir / BRIEF_FILE
     if brief is not None:
@@ -715,6 +718,7 @@ def _plan_handoff(pdir: Path, kind: str, change_id: str) -> Optional[Dict[str, A
         if item.get("kind") == kind
         and item.get("subject_type") == "PLAN_CHANGE"
         and item.get("subject_id") == change_id
+        and item.get("status") not in {"STALE", "CANCELLED"}
     ]
     matches.sort(key=lambda item: (str(item.get("created_at") or ""), item["handoff_id"]))
     return matches[-1] if matches else None
@@ -970,8 +974,7 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
     pdir = L.project_dir(project)
     if (pdir / L.PAUSE_FILE).is_file():
         return []
-    ResearchPlanGraph(pdir).recover_governance()
-    actions = _recover_materialized_tasks(pdir)
+    actions = []
     captured = _capture_proposal(project)
     if captured:
         actions.append(captured)
@@ -1026,7 +1029,7 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
 
             change_id = str(change["change_id"])
             review_handoff = _plan_handoff(pdir, "REVIEW", change_id)
-            legacy_review = None if review_handoff else _review_assignment(pdir, change, proposal_id)
+            legacy_review = None if review_handoff or change.get("review_epoch") else _review_assignment(pdir, change, proposal_id)
             if change["status"] == "PROPOSED":
                 open_action = _route_action(
                     route_actions,
@@ -1225,8 +1228,8 @@ def planning_step(project: str, *, token_budget: int = 0) -> List[Dict[str, Any]
             trigger="planning_stop_check",
         )
         if control.get("budget_stop"):
-            return []
-        return _planning_step_unlocked(project)
+            return control.get("recovery_applied", [])
+        return control.get("recovery_applied", []) + _planning_step_unlocked(project)
 
 
 def watch_research(project: str, *, heartbeat: float = 1800.0, poll: float = 1.0, token_budget: int = 0) -> Iterator[Dict[str, Any]]:
