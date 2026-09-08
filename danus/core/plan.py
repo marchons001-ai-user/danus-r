@@ -328,13 +328,14 @@ class ResearchPlanGraph:
             or record["base_plan_version"] != current["plan_version"]
             or self.committed_version(record, prepared) != prepared["plan_version"]):
             raise ValueError("prepared plan revision lacks matching approved change")
-        self._require_completed_review(record)
+        self._require_completed_review(record, prepared=True)
         self._write_current(prepared)
         self._recover_commit(record, prepared, "supervisor")
         return prepared
 
     def recover_governance(self) -> None:
         """Publish prepared work before routing, and require fresh stale reviews."""
+        from .handoff import HandoffRequests
         from .progress import ProgressLedger
 
         ledger = ProgressLedger(self.root)
@@ -343,25 +344,47 @@ class ResearchPlanGraph:
             assignments = {a["assignment_id"]: a for a in ledger.assignments()}
             for path in sorted(self.changes_dir.glob("*.json")):
                 record = self.get_change(path.stem)
+                if self._recover_commit(record, current, "supervisor") is not None:
+                    continue
+                if record["base_plan_version"] != current["plan_version"]:
+                    if record["status"] in {"PROPOSED", "APPROVED"}:
+                        record["status"] = "STALE"
+                        self._write_json(path, record)
+                    continue
                 assignment = assignments.get(record.get("review_assignment_id"))
-                if (record["base_plan_version"] != current["plan_version"]
-                    or record["status"] not in {"APPROVED", "REVISE", "REJECTED"}
+                if assignment is None and record["status"] == "PROPOSED":
+                    reviews = [h for h in HandoffRequests(ledger).all()
+                               if h["kind"] == "REVIEW" and h["subject_type"] == "PLAN_CHANGE"
+                               and h["subject_id"] == record["change_id"]
+                               and h["status"] in {"ASSIGNED", "RESOLVED"}]
+                    if reviews:
+                        review = max(reviews, key=lambda h: (h["created_at"], h["handoff_id"]))
+                        assignment = assignments.get(review.get("assigned_assignment_id"))
+                if (record["status"] not in {"PROPOSED", "APPROVED", "REVISE", "REJECTED"}
                     or not assignment
                     or not (assignment["state"] == "STALE" or ledger._is_plan_stale(assignment))):
                     continue
                 record.update(status="PROPOSED", reviewer=None, review_verdict=None,
-                              review_rationale="", reviewed_at=None)
+                              review_rationale="", reviewed_at=None,
+                              review_epoch=int(record.get("review_epoch", 0)) + 1)
                 record.pop("review_assignment_id", None)
                 self._write_json(path, record)
 
-    def _require_completed_review(self, record) -> None:
+    def _require_completed_review(self, record, *, prepared: bool = False) -> None:
         review_assignment_id = record.get("review_assignment_id")
         if not review_assignment_id:
             return
         from .handoff import HandoffRequests
         from .progress import ProgressLedger
 
-        reviews = [item for item in HandoffRequests(ProgressLedger(self.root)).all()
+        ledger = ProgressLedger(self.root)
+        assignment = next((a for a in ledger.assignments()
+                           if a["assignment_id"] == review_assignment_id), None)
+        if not prepared and (not assignment or assignment["state"] != "DONE"
+                             or assignment.get("outcome") != "COMPLETE"
+                             or ledger._is_plan_stale(assignment)):
+            raise ValueError("managed plan approval requires current completed review authority")
+        reviews = [item for item in HandoffRequests(ledger).all()
                    if item.get("kind") == "REVIEW" and item.get("subject_type") == "PLAN_CHANGE"
                    and item.get("subject_id") == record["change_id"]]
         if not any(item.get("status") == "RESOLVED"
