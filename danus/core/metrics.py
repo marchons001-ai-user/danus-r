@@ -1,23 +1,22 @@
 """Shared primary-metric recomputation from frozen reducer code.
 
-The public ``reduce_metrics`` entry point uses the official sandbox. The
-experiment runtime keeps a private in-process helper for its unchanged #87
-execution path. The frozen protocol names one reducer file by path/SHA-256/size
-plus a function name.
+Experiment and verifier use the same isolated runner, Python environment and
+numeric normalization. The protocol pins reducer bytes before snapshot execution.
 """
 from __future__ import annotations
 
 import hashlib
-import importlib.util
+import inspect
 import json
 import math
 import shutil
+import sys
 import tempfile
 from numbers import Real
 from pathlib import Path
 from typing import Any, Dict, List
 
-from danus.execution.sandbox import run_sandboxed
+from danus.sandbox import run_sandboxed
 
 
 REDUCER_TIMEOUT_SECONDS = 30.0
@@ -28,12 +27,15 @@ import contextlib
 import importlib.util
 import io
 import json
+import math
 import sys
+from numbers import Real
 from pathlib import Path
 
 
 MARKER = "DANUS_REDUCER_RESULT="
 
+# NORMALIZE_METRICS
 
 def main() -> int:
     request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -52,8 +54,7 @@ def main() -> int:
             request["protocol"],
             [Path(path) for path in request["artifacts"]],
         )
-    if not isinstance(result, dict):
-        raise TypeError("metric reducer must return a dict")
+    result = _normalize_metrics(request["protocol"], result)
     encoded = json.dumps(
         result,
         ensure_ascii=False,
@@ -147,40 +148,6 @@ def _normalize_metrics(protocol: Dict[str, Any], result: Any) -> Dict[str, float
     return normalized
 
 
-def _reduce_metrics_in_process(
-    project_dir: Path,
-    protocol: Dict[str, Any],
-    artifacts: List[Dict[str, Any]],
-) -> Dict[str, float]:
-    """Run the protocol-pinned reducer for the existing experiment runtime.
-
-    Reducer contract::
-
-        def reduce_metrics(protocol: dict, artifacts: list[pathlib.Path]) -> dict
-
-    ``artifacts`` are the raw artifact references already recorded by the runtime.
-    The reducer code itself is hash-pinned in ``protocol['metric_reducer']``.
-    """
-    root = Path(project_dir)
-    reducer_path, function_name, artifact_paths = _validated_reducer_inputs(
-        root, protocol, artifacts
-    )
-    expected_hash = str(protocol["metric_reducer"]["sha256"])
-
-    module_name = f"danus_metric_reducer_{expected_hash[:16]}"
-    spec = importlib.util.spec_from_file_location(module_name, reducer_path)
-    if spec is None or spec.loader is None:
-        raise ValueError(f"cannot load metric reducer: {reducer_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    reducer = getattr(module, function_name, None)
-    if not callable(reducer):
-        raise ValueError(f"metric reducer has no callable {function_name!r}")
-
-    result = reducer(protocol, artifact_paths)
-    return _normalize_metrics(protocol, result)
-
-
 def _copy_snapshot(source: Path, target: Path, ref: Dict[str, Any]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, target)
@@ -239,11 +206,13 @@ def reduce_metrics_sandboxed(
                 ),
                 encoding="utf-8",
             )
-            runner_path.write_text(_RUNNER_SOURCE, encoding="utf-8")
+            runner_source = _RUNNER_SOURCE.replace("# NORMALIZE_METRICS", inspect.getsource(_normalize_metrics))
+            compile(runner_source, str(runner_path), "exec")
+            runner_path.write_text(runner_source, encoding="utf-8")
             completed = run_sandboxed(
-                ["/usr/bin/python3", str(runner_path), str(request_path)],
+                [sys.executable, "-I", str(runner_path), str(request_path)],
                 cwd=result_dir,
-                readable_paths=[input_dir],
+                readable_paths=[input_dir, Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()],
                 writable_paths=[result_dir],
                 network=False,
                 env={},

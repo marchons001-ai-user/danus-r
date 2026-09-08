@@ -11,7 +11,7 @@ measured requirement cannot be expressed by the official implementation.
 
 S5-D0 deliberately did **not** add a `SandboxAdapter` class. The first
 production caller now uses the smallest function/module that satisfies this
-contract at `danus/execution/sandbox.py`.
+contract at `danus/sandbox.py`.
 
 ## Minimal future interface
 

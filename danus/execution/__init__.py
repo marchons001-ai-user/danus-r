@@ -11,8 +11,6 @@ Run one worker's loop directly with ``python -m danus.execution <worker_dir>``
 
 from __future__ import annotations
 
-import importlib
-
 from . import layout
 from .layout import (
     DEADLINE_FILE,
@@ -37,27 +35,8 @@ from .layout import (
     worker_skills_dir,
     workers_dir,
 )
-
-_LAZY_EXPORTS = {
-    "kickoff": "loop",
-    "main": "loop",
-    "run_round": "loop",
-    "write_status": "loop",
-    "atomic_write": "scaffold",
-    "do_new": "scaffold",
-    "spawn_loop": "scaffold",
-    "symlink": "scaffold",
-}
-
-
-def __getattr__(name: str):
-    module_name = _LAZY_EXPORTS.get(name)
-    if module_name is None:
-        raise AttributeError(name)
-    module = importlib.import_module(f".{module_name}", __name__)
-    value = getattr(module, name)
-    globals()[name] = value
-    return value
+from .loop import kickoff, main, run_round, write_status
+from .scaffold import atomic_write, do_new, spawn_loop, symlink
 
 __all__ = [
     # layout module + API

@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 from danus.core import EvidenceStore
-from danus.core.metrics import _reduce_metrics_in_process
-from danus.execution import sandbox
+from danus.core.metrics import reduce_metrics
+from danus import sandbox
 from danus.verify.empirical import check_empirical_evidence
 
 
@@ -77,18 +77,14 @@ def reduce_metrics(protocol, artifacts):
 
 
 @requires_sandbox
-def test_normal_reducer_matches_old_metrics_and_empirical_result(tmp_path: Path, monkeypatch):
+def test_experiment_and_verifier_use_same_reducer(tmp_path: Path, monkeypatch):
     store, reducer, artifact, evidence_id = _project(tmp_path, _normal_source())
     protocol = store.get_protocol(store.get_record(evidence_id)["protocol_id"])
     assert protocol is not None
     refs = store.get_record(evidence_id)["artifacts"]
-    assert _reduce_metrics_in_process(tmp_path, protocol, refs) == {"score": 1.0}
-    monkeypatch.setattr(
-        "danus.core.metrics._reduce_metrics_in_process",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("empirical verifier used the in-process reducer")
-        ),
-    )
+    from danus.execution.experiment import reduce_metrics as experiment_reducer
+    assert experiment_reducer is reduce_metrics
+    assert experiment_reducer(tmp_path, protocol, refs) == {"score": 1.0}
     out = _check(tmp_path, evidence_id)
     assert out["passed"] is True
     assert out["errors"] == []
@@ -251,7 +247,7 @@ def reduce_metrics(protocol, artifacts):
     return {{"score": 1.0}}
 '''
     _, _, _, evidence_id = _project(tmp_path, source)
-    monkeypatch.setattr(sandbox.codex, "resolve_bin", lambda: "/missing/codex")
+    monkeypatch.setenv("DANUS_SANDBOX_CODEX_BIN", "/missing/codex")
     out = _check(tmp_path, evidence_id)
     assert out["passed"] is False
     assert not sentinel.exists()
@@ -272,3 +268,109 @@ def test_invalid_reducer_output_is_rejected(tmp_path: Path, source: str):
     out = _check(tmp_path, evidence_id)
     assert out["passed"] is False
     assert any("primary_metrics_recompute" in error for error in out["errors"])
+
+
+@requires_sandbox
+def test_numeric_reducer_uses_current_python_environment(tmp_path: Path, monkeypatch):
+    import pydantic
+
+    source = f'''import sys
+from fractions import Fraction
+import pydantic
+
+def reduce_metrics(protocol, artifacts):
+    assert sys.prefix == {sys.prefix!r}
+    assert pydantic.__version__ == {pydantic.__version__!r}
+    return {{"score": Fraction(1, 1)}}
+'''
+    monkeypatch.setenv("CODEX_BACKEND", "dsh")
+    monkeypatch.setenv("DANUS_CODEX_BIN", "/missing/agent-backend")
+    store, _, _, evidence_id = _project(tmp_path, source)
+    record = store.get_record(evidence_id)
+    protocol = store.get_protocol(record["protocol_id"])
+    from danus.execution.experiment import reduce_metrics as experiment_reducer
+    assert experiment_reducer(tmp_path, protocol, record["artifacts"]) == {"score": 1.0}
+    assert _check(tmp_path, evidence_id)["passed"] is True
+
+
+@requires_sandbox
+def test_reducer_cannot_read_any_truth_control_or_other_worker(tmp_path: Path):
+    protected = [tmp_path / name for name in (
+        "plan/current.json", "progress/ledger.jsonl", "fact_graph/facts/fact.json",
+        "PAUSE", "workers/other/local_memory/secret.txt",
+    )]
+    for path in protected:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("HOST_SECRET")
+    source = f'''import errno
+from pathlib import Path
+
+def reduce_metrics(protocol, artifacts):
+    denied = 0
+    for name in {[str(p) for p in protected]!r}:
+        try:
+            Path(name).read_bytes()
+        except OSError as exc:
+            assert exc.errno in (errno.ENOENT, errno.EACCES, errno.EPERM)
+            denied += 1
+    return {{"score": denied}}
+'''
+    _, _, _, evidence_id = _project(tmp_path, source, value=5.0)
+    assert _check(tmp_path, evidence_id)["passed"] is True
+    assert all(path.read_text() == "HOST_SECRET" for path in protected)
+
+
+@requires_sandbox
+def test_snapshot_survives_reducer_and_artifact_replacement(tmp_path: Path, monkeypatch):
+    import danus.core.metrics as metrics
+
+    _, reducer, artifact, evidence_id = _project(tmp_path, _normal_source())
+    real_run = metrics.run_sandboxed
+
+    def replace_then_run(*args, **kwargs):
+        reducer.write_text("raise RuntimeError('live reducer executed')")
+        artifact.write_text('{"score": 999}')
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(metrics, "run_sandboxed", replace_then_run)
+    assert _check(tmp_path, evidence_id)["passed"] is True
+
+
+@requires_sandbox
+def test_detached_child_is_started_and_dies_on_reducer_timeout(tmp_path: Path, monkeypatch):
+    token = f"danus-detached-d1-{os.getpid()}"
+    source = f'''import subprocess
+import sys
+
+def reduce_metrics(protocol, artifacts):
+    subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)", {token!r}], start_new_session=True)
+    while True:
+        pass
+'''
+    _, _, _, evidence_id = _project(tmp_path, source)
+    seen = []
+    terminate = sandbox._terminate_process_tree
+
+    def matching():
+        found = []
+        for proc_dir in Path("/proc").glob("[0-9]*"):
+            try:
+                argv = (proc_dir / "cmdline").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if token.encode() in argv:
+                found.append(int(proc_dir.name))
+        return found
+
+    def observe_then_terminate(proc, *args, **kwargs):
+        seen.extend(matching())
+        for pid in seen:
+            assert os.getsid(pid) == pid
+        return terminate(proc, *args, **kwargs)
+
+    monkeypatch.setattr("danus.core.metrics.REDUCER_TIMEOUT_SECONDS", 2.0)
+    monkeypatch.setattr(sandbox, "_terminate_process_tree", observe_then_terminate)
+    out = _check(tmp_path, evidence_id)
+    assert out["passed"] is False
+    assert seen, "detached child never started; timeout denial alone is insufficient"
+    assert matching() == []

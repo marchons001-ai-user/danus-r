@@ -12,9 +12,6 @@ import tempfile
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from danus import codex
-
-
 _ENV_ALLOWLIST = frozenset({"HOME", "LANG", "LC_ALL", "TZ"})
 
 
@@ -38,20 +35,10 @@ def _policy_path(raw: Path) -> Path:
 def _resolved_codex() -> Path:
     if not sys.platform.startswith("linux"):
         raise RuntimeError("official Codex Linux sandbox is unavailable")
-    if codex.backend() == "dsh":
-        raise RuntimeError("official Codex Linux sandbox is unavailable for dsh")
-    raw = codex.resolve_bin()
+    raw = os.environ.get("DANUS_SANDBOX_CODEX_BIN") or shutil.which("codex")
+    if not raw:
+        raise FileNotFoundError("official Codex sandbox executable not found")
     candidate = Path(raw).expanduser()
-    wrapper = Path(codex.__file__).resolve().parents[1] / "bin" / candidate.name
-    if not os.environ.get("DANUS_CODEX_BIN") and candidate == wrapper:
-        installed = shutil.which(candidate.name)
-        if installed:
-            candidate = Path(installed)
-    if not candidate.is_absolute():
-        found = shutil.which(raw)
-        if not found:
-            raise FileNotFoundError(f"Codex executable not found: {raw}")
-        candidate = Path(found)
     candidate = candidate.resolve()
     if not candidate.is_file():
         raise FileNotFoundError(f"Codex executable not found: {candidate}")
