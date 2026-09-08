@@ -87,8 +87,8 @@ def _auto_complete(
         return None
 
     ledger = ProgressLedger(project_dir)
-    current = ledger.current(worker, refresh_stale=True)
-    if not current or str(current.get("assignment_id") or "") != assignment_id:
+    current = _assignment_by_id(ledger, assignment_id)
+    if not current or current["worker"] != worker:
         return {"action": "AUTO_COMPLETE", "node_id": node_id, "worker": worker, "result": "assignment_changed"}
     if current.get("state") != "DONE" or current.get("outcome") != "COMPLETE":
         return None
