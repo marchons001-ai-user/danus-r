@@ -359,7 +359,7 @@ def _normalize_proposal(graph: ResearchPlanGraph, raw: Dict[str, Any], proposal_
     required = {
         node_id
         for node_id in candidate_leaves
-        if node_id not in current_leaves or current["nodes"].get(node_id) != candidate["nodes"].get(node_id)
+        if node_id not in current_leaves or not graph.node_compatible(node_id, base, candidate)
     }
     required.discard(candidate["root_id"])
 
@@ -970,6 +970,7 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
     pdir = L.project_dir(project)
     if (pdir / L.PAUSE_FILE).is_file():
         return []
+    ResearchPlanGraph(pdir).recover_governance()
     actions = _recover_materialized_tasks(pdir)
     captured = _capture_proposal(project)
     if captured:
