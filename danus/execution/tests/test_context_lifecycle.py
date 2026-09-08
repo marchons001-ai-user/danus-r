@@ -108,6 +108,9 @@ def test_scientific_kickoff_injects_matching_checkpoint(tmp_path: Path):
 
 def test_run_round_rolls_over_on_structured_tool_budget(tmp_path: Path):
     wl = _worker(tmp_path)
+    from danus.core import ProgressLedger, ResearchPlanGraph
+    ResearchPlanGraph.create(wl.project_dir, node_id="root", title="Root")
+    ProgressLedger(wl.project_dir).assign(worker=wl.name, role="worker", node_id="root", plan_version=1, task="bounded task", write_task=True)
     fake = tmp_path / "fake_codex"
     fake.write_text(
         "#!/usr/bin/env python3\n"

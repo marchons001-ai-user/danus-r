@@ -82,6 +82,9 @@ def _write_fake_codex(tmp: Path, body: str) -> Path:
 
 def test_run_round_returns_codex_rc(tmp: Path):
     wl = _mk_worker(tmp)
+    from danus.core import ProgressLedger, ResearchPlanGraph
+    ResearchPlanGraph.create(wl.project_dir, node_id="root", title="Root")
+    ProgressLedger(wl.project_dir).assign(worker=wl.name, role="worker", node_id="root", plan_version=1, task="bounded task", write_task=True)
     fake = _write_fake_codex(tmp, "import sys\nsys.stdout.write('hello from codex\\n')\nsys.exit(3)\n")
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(fake)):
@@ -94,6 +97,9 @@ def test_run_round_returns_codex_rc(tmp: Path):
 
 def test_run_round_success_rc0(tmp: Path):
     wl = _mk_worker(tmp)
+    from danus.core import ProgressLedger, ResearchPlanGraph
+    ResearchPlanGraph.create(wl.project_dir, node_id="root", title="Root")
+    ProgressLedger(wl.project_dir).assign(worker=wl.name, role="worker", node_id="root", plan_version=1, task="bounded task", write_task=True)
     fake = _write_fake_codex(tmp, "import sys\nsys.exit(0)\n")
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(fake)):
@@ -106,6 +112,9 @@ def test_run_round_success_rc0(tmp: Path):
 
 def test_run_round_hard_timeout_terminates(tmp: Path):
     wl = _mk_worker(tmp)
+    from danus.core import ProgressLedger, ResearchPlanGraph
+    ResearchPlanGraph.create(wl.project_dir, node_id="root", title="Root")
+    ProgressLedger(wl.project_dir).assign(worker=wl.name, role="worker", node_id="root", plan_version=1, task="bounded task", write_task=True)
     # sleeps far past the tiny hard_timeout; a plain terminate() ends it.
     fake = _write_fake_codex(tmp, "import time\ntime.sleep(60)\n")
     log = wl.dir / "round.log"
@@ -121,51 +130,30 @@ def test_run_round_hard_timeout_terminates(tmp: Path):
 
 def test_run_round_missing_binary_returns_127(tmp: Path):
     wl = _mk_worker(tmp)
+    from danus.core import ProgressLedger, ResearchPlanGraph
+    ResearchPlanGraph.create(wl.project_dir, node_id="root", title="Root")
+    ProgressLedger(wl.project_dir).assign(worker=wl.name, role="worker", node_id="root", plan_version=1, task="bounded task", write_task=True)
     missing = tmp / "does_not_exist_codex"
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(missing)):
         rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
                             "prompt", log, hard_timeout=30)
     assert rc == 127
-    assert "codex binary not found" in log.read_text()
+    assert "required sandbox/runtime file not found" in log.read_text()
 
 
 # --- run_round: unresponsive child → terminate times out → kill → 124 ------ #
 
 def test_run_round_timeout_then_kill(tmp: Path):
-    """A child that ignores terminate() (wait(10) times out) is force-killed. We
-    fake Popen so the 10s terminate-grace does not slow the test."""
     wl = _mk_worker(tmp)
-    log = wl.dir / "round.log"
-
-    class _StubProc:
-        def __init__(self):
-            self.terminated = False
-            self.killed = False
-            self._waits = 0
-
-        def wait(self, timeout=None):
-            self._waits += 1
-            # 1st wait = the hard-timeout expiry; 2nd wait = the 10s grace expiry.
-            raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
-
-        def terminate(self):
-            self.terminated = True
-
-        def kill(self):
-            self.killed = True
-
-    stub = _StubProc()
-    orig_popen = subprocess.Popen
-    subprocess.Popen = lambda *a, **k: stub
-    try:
-        with _env(DANUS_CODEX_BIN=str(tmp / "anything")):
-            rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
-                                "prompt", log, hard_timeout=1)
-    finally:
-        subprocess.Popen = orig_popen
+    from danus.core import ProgressLedger, ResearchPlanGraph
+    ResearchPlanGraph.create(wl.project_dir, node_id="root", title="Root")
+    ProgressLedger(wl.project_dir).assign(worker=wl.name, role="worker", node_id="root", plan_version=1, task="bounded task", write_task=True)
+    fake = _write_fake_codex(tmp, "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)\n")
+    with _env(DANUS_CODEX_BIN=str(fake)):
+        rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
+                            "prompt", wl.dir / "round.log", hard_timeout=1)
     assert rc == 124
-    assert stub.terminated and stub.killed          # terminate → (grace expired) → kill
     assert loop._Child.proc is None
 
 

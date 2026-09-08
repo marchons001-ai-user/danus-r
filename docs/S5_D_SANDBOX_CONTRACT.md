@@ -132,3 +132,28 @@ python3 scripts/probe_codex_sandbox.py --codex /home/user/.local/bin/codex
 The probe is intentionally outside pytest because it depends on host WSL/Linux
 sandbox capabilities. The normal unit suite must remain runnable on machines
 without Codex installed.
+
+
+## Worker execution
+
+`danus.execution.worker.worker_session` starts one external Gateway per round.
+Its assignment, role, worker and random epoch are fixed by the controller under
+the existing project and assignment locks. Gateway calls revalidate that binding;
+pause, replacement, resume and epoch changes cannot revive the old channel.
+
+The native Codex controller and its model connection are trusted host processes.
+Model-generated filesystem/shell operations and the byte-only MCP proxy use the
+same official `danus-worker` policy, with network disabled. A pre-opened socketpair
+carries MCP; the proxy never connects a socket or reads control state. The host
+uses kernel sender credentials and a pidfd to revoke the channel on proxy death,
+including when the controller retains an inherited descriptor. Gateway loss aborts
+an active round. After an official completed-turn event, only bounded controller
+cleanup is allowed, with assignment authority rechecked.
+
+The tool view exposes the task, role instructions and a checkpoint snapshot as
+read-only files, with scientific workspace and private notes writable. Actual
+runtime checkpoints, other workers, truth/control files and controller credentials
+are outside the tool policy. Each round requires a current active assignment.
+The DSH worker backend is refused until its tool runner integrates this same
+policy and inherited-descriptor capability model; reducer isolation is independent
+of that backend selection.

@@ -31,6 +31,7 @@ is testable and reconfigurable:
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import wraps
 import json
 import os
 import re
@@ -51,6 +52,9 @@ from danus.core.handoff import HandoffRequests
 from danus.integrations import search as _arxiv_search
 
 from .roles import tools_for
+from . import capability
+
+_BOUND_WORKER = None
 
 _PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -60,6 +64,8 @@ _PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # --------------------------------------------------------------------------- #
 
 def _author() -> str:
+    if _BOUND_WORKER is not None:
+        return _BOUND_WORKER["worker"]
     return os.environ.get("DANUS_AUTHOR", "unknown")
 
 
@@ -67,6 +73,8 @@ def _role() -> str:
     # Fail-closed: an UNSET role gets the most-restrictive read-only set, same as
     # a mis-typed one (roles.tools_for). Dev use of the full set is explicit:
     # DANUS_ROLE=all.
+    if _BOUND_WORKER is not None:
+        return _BOUND_WORKER["role"]
     return os.environ.get("DANUS_ROLE", "verifier")
 
 
@@ -78,6 +86,10 @@ def _project(project: Optional[str] = None) -> Path:
     several projects. With no ``project`` we fall back to ``DANUS_PROJECT_DIR``
     (a worker is always pinned this way). The name is validated to a single path
     segment — no ``/`` or ``..`` — so it can never escape the agents root."""
+    if _BOUND_WORKER is not None:
+        if project is not None:
+            raise PermissionError("worker capability cannot select another project")
+        return Path(_BOUND_WORKER["project_dir"])
     agents_root = os.environ.get("DANUS_AGENTS_ROOT", "")
     project_dir = os.environ.get("DANUS_PROJECT_DIR", "")
     if project:
@@ -417,8 +429,11 @@ def _worker_write_scope(*, researcher_only: bool = False):
 
     ledger = _pl()
     with project_control_lock(_project()), ledger.assignment_lock():
+        if _BOUND_WORKER is not None:
+            capability.validate(_BOUND_WORKER)
         assignment = ledger.current(_author(), refresh_stale=True)
-        expected = os.environ.get("DANUS_ASSIGNMENT_ID", "")
+        expected = (_BOUND_WORKER["assignment_id"] if _BOUND_WORKER is not None
+                    else os.environ.get("DANUS_ASSIGNMENT_ID", ""))
         role = str((assignment or {}).get("role") or "").lower()
         if (
             not assignment or not expected
@@ -627,11 +642,14 @@ def _review_scope(subject_type: str, subject_id: str):
 
     ledger = _pl()
     with project_control_lock(_project()), ledger.assignment_lock():
+        if _BOUND_WORKER is not None:
+            capability.validate(_BOUND_WORKER)
         if ((_project() / L.PAUSE_FILE).exists()
             or (_project() / "workers" / _author() / L.PAUSE_FILE).exists()):
             raise ValueError("assignment is paused")
         assignment = ledger.current(_author(), refresh_stale=True)
-        expected = os.environ.get("DANUS_ASSIGNMENT_ID", "")
+        expected = (_BOUND_WORKER["assignment_id"] if _BOUND_WORKER is not None
+                    else os.environ.get("DANUS_ASSIGNMENT_ID", ""))
         if (
             _role().lower() not in {"reviewer", "all"}
             or not assignment
@@ -823,11 +841,37 @@ _TOOLS = {
 }
 
 
-def build_app(role: Optional[str] = None) -> FastMCP:
+def _bound_tool(fn):
+    @wraps(fn)
+    def call(*args, **kwargs):
+        if fn.__name__ in {
+            "handoff_request", "implementation_submit_contract", "plan_propose_change",
+            "implementation_review_contract", "plan_review_change",
+        }:
+            # These functions validate the capability inside their existing locks.
+            return fn(*args, **kwargs)
+        with capability.scope(_BOUND_WORKER):
+            return fn(*args, **kwargs)
+    return call
+
+
+def build_app(role: Optional[str] = None, *, worker_binding=None) -> FastMCP:
     """Build the stdio MCP app exposing exactly the tools ``role`` may use.
     ``role`` defaults to ``DANUS_ROLE`` (env); unset falls back to the read-only
     verifier set (fail-closed)."""
+    global _BOUND_WORKER
+    if worker_binding is not None:
+        with capability.scope(worker_binding):
+            _BOUND_WORKER = dict(worker_binding)
+        role = _BOUND_WORKER["role"]
     app = FastMCP("danus-core")
     for name in tools_for(role if role is not None else _role()):
-        app.tool(name=name)(_TOOLS[name])
+        fn = _TOOLS[name]
+        app.tool(name=name)(_bound_tool(fn) if _BOUND_WORKER is not None else fn)
+        if _BOUND_WORKER is not None:
+            tool = app._tool_manager.get_tool(name)
+            model = tool.fn_metadata.arg_model
+            model.model_config["extra"] = "forbid"
+            model.model_rebuild(force=True)
+            tool.parameters = model.model_json_schema(by_alias=True)
     return app

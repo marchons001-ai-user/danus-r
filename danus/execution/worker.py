@@ -1,0 +1,149 @@
+"""Native Codex tool isolation and an external, per-round Gateway."""
+
+from contextlib import contextmanager
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+
+from danus import codex, sandbox
+from danus.gateway import capability
+from . import layout as L
+from . import context as C
+
+
+def _outside_control(path: Path, control: Path) -> Path:
+    path = sandbox._policy_path(path)
+    if path == control or path in control.parents or control in path.parents:
+        raise ValueError("worker input/runtime must be outside the control project")
+    return path
+
+
+@contextmanager
+def worker_session(wl: L.WorkerLayout, role: dict):
+    """The agent harness is trusted; tools and its MCP proxy share one deny policy."""
+    if codex.backend() == "dsh":
+        raise RuntimeError("DSH worker tools have not integrated the official sandbox capability transport")
+    engine = sandbox._resolved_codex()
+    role_name = str(role.get("ROLE") or "worker").lower()
+    binding = capability.issue(wl.project_dir, wl.name, role_name)
+    base = Path.home() / ".cache" / "danus-worker"
+    base.mkdir(parents=True, exist_ok=True)
+    server_end = client_end = gateway = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="round-", dir=base) as directory:
+            root = Path(directory)
+            view = root / "view"
+            view.mkdir()
+            home = root / "codex-home"
+            control = wl.project_dir.resolve()
+            workspace = L.scientific_workspace(control)
+            if workspace == control:
+                workspace = wl.dir / "workspace"
+                workspace.mkdir(exist_ok=True)
+                workspace = sandbox._policy_path(workspace)
+            else:
+                workspace = _outside_control(workspace, control)
+            if not workspace.is_dir():
+                raise ValueError("worker workspace is missing")
+            notes = wl.local_memory / "notes"
+            notes.mkdir(parents=True, exist_ok=True)
+            notes = sandbox._policy_path(notes)
+            (view / "workspace").symlink_to(workspace, target_is_directory=True)
+            memory = view / "local_memory"
+            memory.mkdir()
+            (memory / "notes").symlink_to(notes, target_is_directory=True)
+            migration = memory / "migration"
+            migration.mkdir()
+            C.migration_path(view).symlink_to(migration / "result.json")
+            with capability.scope(binding):
+                (view / "TASK.md").write_text(wl.task.read_text())
+                (view / "AGENTS.md").write_text(L.harness_contract(role_name).read_text())
+                checkpoint = C.checkpoint_for_prompt(wl.dir, role_name)
+                if checkpoint:
+                    (memory / C.CHECKPOINT_NAME).write_text(json.dumps(checkpoint))
+            skills = L.harness_skills_dir(role_name)
+            if skills is not None:
+                shutil.copytree(skills, view / ".agents" / "skills")
+            proxy = view / "gateway_proxy.py"
+            shutil.copyfile(Path(__file__).resolve().parents[1] / "gateway" / "proxy.py", proxy)
+            readable = [view, _outside_control(proxy, control),
+                        _outside_control(Path(sys.prefix), control),
+                        _outside_control(Path(sys.base_prefix), control)]
+            readable += [_outside_control(path, control) for path in L.readonly_inputs(control)]
+            sandbox._write_profile(
+                home, codex_bin=engine, readable_paths=readable,
+                writable_paths=[workspace, notes, migration], network=False,
+                profile="danus-worker", workspace_access="read",
+            )
+            server_end, client_end = socket.socketpair()
+            server_end.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+            fd = client_end.fileno()
+            proxy_cmd = [str(engine), "sandbox", "-P", "danus-worker", "-C", str(view),
+                         sys.executable, "-I", str(proxy), str(fd)]
+            config = home / "config.toml"
+            with config.open("a") as stream:
+                stream.write('\n[shell_environment_policy]\ninherit = "none"\n')
+                stream.write('set = { PATH = "/usr/local/bin:/usr/bin:/bin", LANG = "C.UTF-8" }\n')
+                stream.write('\n[mcp_servers.danus]\n')
+                stream.write('command = ' + json.dumps(proxy_cmd[0]) + '\n')
+                stream.write('args = ' + json.dumps(proxy_cmd[1:]) + '\n')
+                stream.write('tool_timeout_sec = 3600\nrequired = true\ndefault_tools_approval_mode = "approve"\n')
+                stream.write('\n[mcp_servers.danus.env]\nCODEX_HOME = ' + json.dumps(str(home)) + '\n')
+            original_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+            auth = original_home / "auth.json"
+            if auth.is_file():
+                shutil.copyfile(auth, home / "auth.json")
+                (home / "auth.json").chmod(0o600)
+            agent_bin = codex.resolve_bin()
+            env = codex.subprocess_env(agent_bin)
+            env["CODEX_HOME"] = str(home)
+            gateway_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
+                           "PYTHONPATH": str(Path(__file__).resolve().parents[2])}
+            for key in ("DANUS_VERIFY_URL", "DANUS_VERIFY_TIMEOUT"):
+                if key in os.environ:
+                    gateway_env[key] = os.environ[key]
+            parent_pid = os.getpid()
+            gateway = subprocess.Popen(
+                [sys.executable, "-m", "danus.gateway", "--worker-binding", json.dumps(binding)],
+                stdin=server_end, stdout=server_end, stderr=subprocess.DEVNULL,
+                env=gateway_env, cwd=str(root), start_new_session=True,
+                preexec_fn=lambda: sandbox._arm_parent_death(parent_pid),
+            )
+            server_end.close()
+            server_end = None
+            yield {"cwd": view, "env": env, "fd": fd, "gateway": gateway,
+                   "binding": binding, "codex_bin": agent_bin, "engine": engine,
+                   "proxy_command": proxy_cmd, "home": home}
+    finally:
+        if client_end is not None:
+            try:
+                client_end.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            client_end.close()
+        if server_end is not None:
+            server_end.close()
+        if gateway is not None:
+            sandbox._terminate_process_tree(gateway)
+        capability.revoke(binding)
+
+
+def check_session(session: dict) -> None:
+    if session["gateway"].poll() is not None:
+        raise PermissionError("external Gateway disconnected")
+    with capability.scope(session["binding"]):
+        pass
+
+
+def command(session: dict, role: dict, prompt: str, *, json_output=False) -> list[str]:
+    tail = ["-C", str(session["cwd"]), "--skip-git-repo-check", "--ignore-rules", "--ephemeral"]
+    if json_output:
+        tail.append("--json")
+    prompt += "\n\nUse workspace/ for scientific files and local_memory/notes/ for your notes. Runtime checkpoint files are read-only."
+    return codex.exec_cmd(session["codex_bin"], role["MODEL"], role["REASONING_EFFORT"],
+                          *tail, prompt, permission_profile="danus-worker")

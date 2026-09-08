@@ -332,7 +332,7 @@ def test_completed_turn_token_usage_is_not_live_killed(tmp_path: Path, monkeypat
 
         rc = loop.run_round(
             wl,
-            {"MODEL": "m", "REASONING_EFFORT": "low"},
+            {"ROLE": "researcher", "MODEL": "m", "REASONING_EFFORT": "low"},
             "prompt",
             wl.logs / "token_boundary.log",
             hard_timeout=5,

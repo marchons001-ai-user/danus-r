@@ -1130,6 +1130,7 @@ def _fmt_status(rows: List[Dict]) -> str:
 # --------------------------------------------------------------------------- #
 
 def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
+    (wl.dir / ".gateway-epoch").unlink(missing_ok=True)
     pid = _read_pid(wl)
     if not force:
         if not _worker_alive(wl):
@@ -1197,6 +1198,7 @@ def do_pause(target: str) -> List[Dict]:
 
 
 def _resume_one(wl: L.WorkerLayout) -> str:
+    (wl.dir / ".gateway-epoch").unlink(missing_ok=True)
     wl.pause.unlink(missing_ok=True)
     return _start_one(wl)
 

@@ -9,7 +9,6 @@ Researcher/Reviewer have no default skills; the Experimenter gets only Ponytail.
 
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import re
@@ -24,6 +23,8 @@ from . import context as C
 from . import layout as L
 from . import scaffold
 from danus import codex
+from danus.sandbox import _arm_parent_death
+from . import worker as W
 from danus.core import ProgressLedger
 from danus.core._util import read_jsonl
 from danus.core.handoff import HandoffRequests
@@ -31,7 +32,6 @@ from danus.gateway.roles import tools_for
 
 _FACT_ID_RE = re.compile(r"(?i:fact(?:_|\s+)id)\b[\"'`\s]*[:=]?\s*[\"'`]?([0-9a-f]{16})[\"'`]?")
 _OUTCOME_RE = re.compile(r"(?im)^DANUS_OUTCOME:\s*(COMPLETE|BLOCKED|NEEDS_REVIEW)\s*$")
-_LIBC = ctypes.CDLL(None, use_errno=True) if sys.platform.startswith("linux") else None
 
 
 # --- the per-round prompt -------------------------------------------------- #
@@ -267,16 +267,6 @@ class _Child:
     proc: "subprocess.Popen | None" = None
 
 
-def _arm_parent_death(expected_parent_pid: int) -> None:
-    """Linux: a scientific model/migration process must not outlive its worker."""
-    if _LIBC is None:
-        return
-    if _LIBC.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
-        os._exit(126)
-    if os.getppid() != expected_parent_pid:
-        os.kill(os.getpid(), signal.SIGKILL)
-
-
 def _send_tree_signal(proc, sig: int) -> bool:
     pid = getattr(proc, "pid", None)
     if isinstance(pid, int) and pid > 0:
@@ -313,106 +303,113 @@ def _terminate_child() -> None:
 
 def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
               hard_timeout: int, context_budget: bool = False) -> int:
-    """Exec one session. 124=hard timeout, 125=context rollover, 127=missing."""
-    wdir = wl.dir
-    project_dir = wl.project_dir
-    # The autonomous-planning handoff writes a JSON file to <project>/.danus/.
-    # Codex's workspace-write sandbox otherwise treats that as outside -C, so
-    # add the handoff directory as an explicit writable root.
-    handoff_dir = project_dir / ".danus"
-    handoff_dir.mkdir(parents=True, exist_ok=True)
-    codex_bin = codex.resolve_bin()
-    tail = []
-    if context_budget and codex.backend() != "dsh":
-        tail.append("--json")
-    tail += [
-        "-C", str(wdir),
-        "--add-dir", str(handoff_dir),
-        "--skip-git-repo-check",
-        "--dangerously-bypass-approvals-and-sandbox",
-        prompt,
-    ]
-    cmd = codex.exec_cmd(codex_bin, role["MODEL"], role["REASONING_EFFORT"], *tail)
+    """124=timeout, 125=context rollover, 126=authority failure, 127=missing engine."""
     started = time.monotonic()
     cursor = C.LogCursor()
     parent_pid = os.getpid()
     with open(log_path, "w", encoding="utf-8") as logf:
         try:
-            _Child.proc = subprocess.Popen(
-                cmd, stdout=logf, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, cwd=str(wdir),
-                env=codex.subprocess_env(codex_bin),
-                start_new_session=True,
-                preexec_fn=(lambda: _arm_parent_death(parent_pid)) if context_budget else None,
-            )
-        except FileNotFoundError:
-            logf.write(f"[worker_loop] codex binary not found: {cmd[0]}\n")
-            return 127
-        try:
-            if not context_budget:
+            with W.worker_session(wl, role) as session:
+                cmd = W.command(session, role, prompt, json_output=True)
+                _Child.proc = subprocess.Popen(
+                    cmd, stdout=logf, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, cwd=str(session["cwd"]),
+                    env=session["env"], pass_fds=(session["fd"],), start_new_session=True,
+                    preexec_fn=lambda: _arm_parent_death(parent_pid),
+                )
                 try:
-                    return _Child.proc.wait(timeout=hard_timeout if hard_timeout > 0 else None)
-                except subprocess.TimeoutExpired:
+                    while True:
+                        try:
+                            return _Child.proc.wait(timeout=0.5)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                W.check_session(session)
+                            except PermissionError:
+                                C.inspect_log(log_path, cursor=cursor)
+                                if not cursor.structured_usage:
+                                    raise
+                                with W.capability.scope(session["binding"]):
+                                    pass
+                                remaining = 15 if hard_timeout <= 0 else min(15, hard_timeout - (time.monotonic() - started))
+                                if remaining <= 0:
+                                    return 124
+                                try:
+                                    return _Child.proc.wait(timeout=remaining)
+                                except subprocess.TimeoutExpired:
+                                    return 124
+                            elapsed = time.monotonic() - started
+                            if hard_timeout > 0 and elapsed >= hard_timeout:
+                                logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
+                                return 124
+                            if context_budget:
+                                telemetry = C.inspect_log(log_path, cursor=cursor)
+                                live_telemetry = dict(telemetry)
+                                live_telemetry["tokens"] = 0
+                                reason = C.budget_reason(live_telemetry, elapsed)
+                                if reason:
+                                    C.write_rollover_request(wl.dir, reason, telemetry)
+                                    logf.write(f"\n[worker_loop] context rollover: {reason}\n")
+                                    return 125
+                finally:
                     _terminate_child()
-                    logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
-                    return 124
-
-            while True:
-                try:
-                    return _Child.proc.wait(timeout=0.5)
-                except subprocess.TimeoutExpired:
-                    elapsed = time.monotonic() - started
-                    if hard_timeout > 0 and elapsed >= hard_timeout:
-                        _terminate_child()
-                        logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
-                        return 124
-                    telemetry = C.inspect_log(log_path, cursor=cursor)
-                    live_telemetry = dict(telemetry)
-                    live_telemetry["tokens"] = 0
-                    reason = C.budget_reason(live_telemetry, elapsed)
-                    if reason:
-                        _terminate_child()
-                        C.write_rollover_request(wdir, reason, telemetry)
-                        logf.write(f"\n[worker_loop] context rollover: {reason}\n")
-                        return 125
-        finally:
-            _Child.proc = None
+                    _Child.proc = None
+        except FileNotFoundError as exc:
+            logf.write(f"[worker_loop] required sandbox/runtime file not found: {exc}\n")
+            return 127
+        except (OSError, ValueError, RuntimeError) as exc:
+            logf.write(f"[worker_loop] worker isolation refused: {exc}\n")
+            return 126
 
 
 def _run_context_migration(
     wl: L.WorkerLayout, role: dict, reason: str, prior_log: Path, hard_timeout: int,
 ) -> Optional[dict]:
-    out_path = C.migration_path(wl.dir)
-    out_path.unlink(missing_ok=True)
     prompt = C.migration_prompt(wl.dir, reason, prior_log)
-    codex_bin = codex.resolve_bin()
-    cmd = codex.exec_cmd(
-        codex_bin, role["MODEL"], "low",
-        "-C", str(wl.dir),
-        "--skip-git-repo-check",
-        "--dangerously-bypass-approvals-and-sandbox",
-        prompt,
-    )
     log_path = wl.logs / f"migration_{prior_log.stem.removeprefix('round_')}.log"
     timeout = min(hard_timeout, 300) if hard_timeout > 0 else 300
+    cursor = C.LogCursor()
     parent_pid = os.getpid()
     with open(log_path, "w", encoding="utf-8") as logf:
         try:
-            proc = subprocess.Popen(
-                cmd, stdout=logf, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, cwd=str(wl.dir),
-                env=codex.subprocess_env(codex_bin),
-                start_new_session=True,
-                preexec_fn=lambda: _arm_parent_death(parent_pid),
-            )
-        except FileNotFoundError:
+            with W.worker_session(wl, role) as session:
+                cmd = W.command(session, {**role, "REASONING_EFFORT": "low"}, prompt, json_output=True)
+                proc = subprocess.Popen(
+                    cmd, stdout=logf, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, cwd=str(session["cwd"]), env=session["env"],
+                    pass_fds=(session["fd"],), start_new_session=True,
+                    preexec_fn=lambda: _arm_parent_death(parent_pid),
+                )
+                started = time.monotonic()
+                try:
+                    while True:
+                        try:
+                            rc = proc.wait(timeout=0.5)
+                            if rc != 0:
+                                return None
+                            with W.capability.scope(session["binding"]):
+                                return C.load_migration(session["cwd"])
+                        except subprocess.TimeoutExpired:
+                            try:
+                                W.check_session(session)
+                            except PermissionError:
+                                C.inspect_log(log_path, cursor=cursor)
+                                if not cursor.structured_usage:
+                                    raise
+                                remaining = min(15, timeout - (time.monotonic() - started))
+                                if remaining <= 0:
+                                    return None
+                                try:
+                                    rc = proc.wait(timeout=remaining)
+                                except subprocess.TimeoutExpired:
+                                    return None
+                                with W.capability.scope(session["binding"]):
+                                    return C.load_migration(session["cwd"]) if rc == 0 else None
+                            if time.monotonic() - started >= timeout:
+                                return None
+                finally:
+                    _terminate_process_tree(proc)
+        except (OSError, ValueError, RuntimeError):
             return None
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _terminate_process_tree(proc)
-            return None
-    return C.load_migration(wl.dir)
 
 
 # --- the loop -------------------------------------------------------------- #

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import shutil
@@ -52,6 +53,8 @@ def _write_profile(
     readable_paths: Sequence[Path],
     writable_paths: Sequence[Path],
     network: bool,
+    profile: str = "danus-reducer",
+    workspace_access: str = "write",
 ) -> None:
     if network:
         raise ValueError("sandbox network access must remain disabled")
@@ -73,20 +76,19 @@ def _write_profile(
             continue
         filesystem.append(f"{_toml_key(path)} = \"write\"")
         seen.add(path)
-    profile = "danus-reducer"
     config = "\n".join(
         [
             f'default_permissions = "{profile}"',
             "",
             f"[permissions.{profile}]",
-            'description = "Danus-R reducer isolation"',
+            'description = "Danus-R isolated execution"',
             'extends = ":workspace"',
             "",
             f"[permissions.{profile}.filesystem]",
             *filesystem,
             "",
             f'[permissions.{profile}.filesystem.":workspace_roots"]',
-            '"." = "write"',
+            f'"." = "{workspace_access}"',
             "",
             f"[permissions.{profile}.network]",
             "enabled = false",
@@ -226,3 +228,16 @@ def run_sandboxed(
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
     finally:
         shutil.rmtree(config_home, ignore_errors=True)
+
+
+_LIBC = ctypes.CDLL(None, use_errno=True) if sys.platform.startswith("linux") else None
+
+
+def _arm_parent_death(expected_parent_pid: int) -> None:
+    """Linux: a scientific model/migration process must not outlive its worker."""
+    if _LIBC is None:
+        return
+    if _LIBC.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+        os._exit(126)
+    if os.getppid() != expected_parent_pid:
+        os.kill(os.getpid(), signal.SIGKILL)

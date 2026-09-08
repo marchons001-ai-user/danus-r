@@ -82,6 +82,9 @@ def test_sigint_terminates_inflight_child_and_cleans_worker(tmp_path: Path, monk
 def test_sigkill_worker_cannot_leave_live_model_child(tmp_path: Path):
     """Kill the outer worker itself and prove its active model subprocess dies too."""
     wl = _worker(tmp_path)
+    from danus.core import ProgressLedger, ResearchPlanGraph
+    ResearchPlanGraph.create(wl.project_dir, node_id="root", title="Root")
+    ProgressLedger(wl.project_dir).assign(worker=wl.name, role="worker", node_id="root", plan_version=1, task="bounded task", write_task=True)
     child_pid_file = tmp_path / "model.pid"
     fake = tmp_path / "fake_codex"
     fake.write_text(
