@@ -22,6 +22,34 @@ from pathlib import Path
 
 PROFILE = "danus-probe"
 MARKER = "DANUS_SANDBOX_PROBE="
+EXPECTED_INNER_RESULTS = {
+    "workspace_rw",
+    "readonly_read",
+    "readonly_write_denied",
+    "plan_read_denied",
+    "plan_write_denied",
+    "plan_delete_denied",
+    "progress_read_denied",
+    "progress_write_denied",
+    "progress_delete_denied",
+    "fact_graph_read_denied",
+    "fact_graph_write_denied",
+    "fact_graph_delete_denied",
+    "pause_read_denied",
+    "pause_write_denied",
+    "pause_delete_denied",
+    "other_worker_read_denied",
+    "other_worker_write_denied",
+    "other_worker_delete_denied",
+    "tmp_write_denied",
+    "absolute_escape_denied",
+    "dotdot_escape_denied",
+    "existing_symlink_escape_denied",
+    "new_symlink_escape_denied",
+    "nested_process_inherits_denial",
+    "parent_secret_absent",
+    "network_loopback_denied",
+}
 
 
 def _toml_key(path: Path) -> str:
@@ -56,6 +84,7 @@ enabled = false
 def _inner_program(paths: dict[str, str], port: int) -> str:
     payload = json.dumps(paths)
     return f'''from __future__ import annotations
+import errno
 import json
 import os
 import socket
@@ -64,15 +93,25 @@ from pathlib import Path
 
 P = {{k: Path(v) for k, v in json.loads({payload!r}).items()}}
 results = {{}}
+DENIAL_ERRNOS = {{errno.ENOENT, errno.EACCES, errno.EPERM, errno.EROFS}}
+LINK_CREATION_DENIAL_ERRNOS = {{errno.EACCES, errno.EPERM, errno.EROFS}}
+NETWORK_DENIAL_ERRNOS = {{
+    errno.EACCES,
+    errno.EPERM,
+    errno.ECONNREFUSED,
+    errno.ENETUNREACH,
+    errno.EHOSTUNREACH,
+}}
 
 def record(name, passed, detail=""):
     results[name] = {{"pass": bool(passed), "detail": str(detail)}}
 
-def expect_oserror(name, fn):
+def expect_denied(name, fn):
     try:
         fn()
     except OSError as exc:
-        record(name, True, f"{{type(exc).__name__}}: {{exc}}")
+        allowed = exc.errno in DENIAL_ERRNOS
+        record(name, allowed, f"{{type(exc).__name__}} errno={{exc.errno}}: {{exc}}")
     else:
         record(name, False, "operation unexpectedly succeeded")
 
@@ -86,28 +125,35 @@ try:
     record("readonly_read", P["readonly_file"].read_text(encoding="utf-8") == "READONLY")
 except OSError as exc:
     record("readonly_read", False, exc)
-expect_oserror("readonly_write_denied", lambda: P["readonly_file"].write_text("BAD", encoding="utf-8"))
+expect_denied("readonly_write_denied", lambda: P["readonly_file"].write_text("BAD", encoding="utf-8"))
 
 for prefix, key in [
     ("plan", "plan"),
     ("progress", "progress"),
     ("fact_graph", "fact"),
+    ("pause", "pause"),
+    ("other_worker", "other_worker"),
 ]:
-    expect_oserror(prefix + "_read_denied", lambda key=key: P[key].read_text(encoding="utf-8"))
-    expect_oserror(prefix + "_write_denied", lambda key=key: P[key].write_text("FORGED", encoding="utf-8"))
-expect_oserror("other_worker_read_denied", lambda: P["other_worker"].read_text(encoding="utf-8"))
-expect_oserror("pause_delete_denied", lambda: P["pause"].unlink())
-expect_oserror("tmp_write_denied", lambda: Path("/tmp/danus-s5d0-probe").write_text("BAD", encoding="utf-8"))
-expect_oserror("absolute_escape_denied", lambda: Path(str(P["progress"])).read_text(encoding="utf-8"))
-expect_oserror("dotdot_escape_denied", lambda: P["dotdot_progress"].read_text(encoding="utf-8"))
-expect_oserror("existing_symlink_escape_denied", lambda: P["existing_link"].read_text(encoding="utf-8"))
+    expect_denied(prefix + "_read_denied", lambda key=key: P[key].read_text(encoding="utf-8"))
+    expect_denied(prefix + "_write_denied", lambda key=key: P[key].write_text("FORGED", encoding="utf-8"))
+    expect_denied(prefix + "_delete_denied", lambda key=key: P[key].unlink())
+
+expect_denied("tmp_write_denied", lambda: Path("/tmp/danus-s5d0-probe").write_text("BAD", encoding="utf-8"))
+expect_denied("absolute_escape_denied", lambda: Path(str(P["progress"])).read_text(encoding="utf-8"))
+expect_denied("dotdot_escape_denied", lambda: P["dotdot_progress"].read_text(encoding="utf-8"))
+expect_denied("existing_symlink_escape_denied", lambda: P["existing_link"].read_text(encoding="utf-8"))
 
 try:
     P["late_link"].symlink_to(P["progress"])
 except OSError as exc:
-    record("new_symlink_escape_denied", True, "link creation denied: " + str(exc))
+    allowed = exc.errno in LINK_CREATION_DENIAL_ERRNOS
+    record(
+        "new_symlink_escape_denied",
+        allowed,
+        f"link creation failed with {{type(exc).__name__}} errno={{exc.errno}}: {{exc}}",
+    )
 else:
-    expect_oserror("new_symlink_escape_denied", lambda: P["late_link"].read_text(encoding="utf-8"))
+    expect_denied("new_symlink_escape_denied", lambda: P["late_link"].read_text(encoding="utf-8"))
 
 nested = subprocess.run(
     ["/bin/bash", "-lc", 'cat "$1" >/dev/null', "probe", str(P["progress"])],
@@ -115,13 +161,23 @@ nested = subprocess.run(
     stderr=subprocess.PIPE,
     text=True,
 )
-record("nested_process_inherits_denial", nested.returncode != 0, nested.stderr.strip())
+nested_ok = nested.returncode == 1 and str(P["progress"]) in nested.stderr
+record(
+    "nested_process_inherits_denial",
+    nested_ok,
+    f"returncode={{nested.returncode}} stderr={{nested.stderr.strip()}}",
+)
 record("parent_secret_absent", os.environ.get("DANUS_TEST_SECRET") is None, os.environ.get("DANUS_TEST_SECRET", ""))
 
 try:
     sock = socket.create_connection(("127.0.0.1", {port}), timeout=1.0)
 except OSError as exc:
-    record("network_loopback_denied", True, f"{{type(exc).__name__}}: {{exc}}")
+    allowed = exc.errno in NETWORK_DENIAL_ERRNOS
+    record(
+        "network_loopback_denied",
+        allowed,
+        f"{{type(exc).__name__}} errno={{exc.errno}}: {{exc}}",
+    )
 else:
     sock.close()
     record("network_loopback_denied", False, "connected to host listener")
@@ -265,6 +321,11 @@ def main() -> int:
             return 1
 
         results = json.loads(lines[-1][len(MARKER):])
+        missing = sorted(EXPECTED_INNER_RESULTS - set(results))
+        results["probe_assertions_complete"] = {
+            "pass": not missing,
+            "detail": "missing: " + ", ".join(missing) if missing else "",
+        }
         if connected.is_set():
             results["network_loopback_denied"] = {
                 "pass": False,
