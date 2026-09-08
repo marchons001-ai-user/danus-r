@@ -157,6 +157,7 @@ class ProgressLedger:
                 and record.get("task_sha256") == task_hash
                 and record.get("proposer") == proposer
                 and str(record.get("replaces_contract_id") or "") == replaces_contract_id
+                and not self._implementation_contract_stale(record)
             ):
                 return self._implementation_contract_view(record)
 
@@ -169,6 +170,7 @@ class ProgressLedger:
                 "proposer": proposer,
                 "replaces_contract_id": replaces_contract_id,
                 "submitted_at": submitted_at,
+                "sequence": len(order),
             }
         )
         event = {
@@ -595,11 +597,17 @@ class ProgressLedger:
 
         with self.assignment_lock():
             if expected_assignment_id:
-                source = next((item for item in self._current_by_worker().values()
+                assignments = self.assignments()
+                source = next((item for item in assignments
                                if item["assignment_id"] == expected_assignment_id), None)
                 if (source is None or source["node_id"] != node_id
                     or source["state"] != "DONE" or source.get("outcome") != "COMPLETE"
                     or self._is_plan_stale(source)):
+                    raise ValueError("node completion assignment is no longer authoritative")
+                latest = next(item for item in reversed(assignments)
+                              if item["node_id"] == node_id
+                              and item["role"].lower() == source["role"].lower())
+                if latest["assignment_id"] != expected_assignment_id:
                     raise ValueError("node completion assignment is no longer authoritative")
             plan = ResearchPlanGraph(self.root)
             current = plan.snapshot()
