@@ -25,6 +25,23 @@ def temp_project():
     with tempfile.TemporaryDirectory(prefix="human-summary-test-") as d:
         dst = Path(d) / "project"
         shutil.copytree(EXAMPLE_PROJECT, dst)
+        from danus.core import FactGraph
+        from danus.core.factgraph import parse_frontmatter
+        graph = FactGraph(dst)
+        pending = {p.stem: p.read_text() for p in graph.facts_dir.glob("*.md")}
+        ids = {}
+        while pending:
+            for old, raw in list(pending.items()):
+                meta = parse_frontmatter(raw)
+                if any(p not in ids for p in meta["predecessors"]):
+                    continue
+                body = raw.split("\n## statement\n", 1)[1]
+                statement, rest = body.split("\n## proof\n", 1)
+                proof, intuition = rest.split("\n## intuition\n", 1)
+                ids[old] = graph.add(problem_id="odd-sum", author="example-worker", statement=statement,
+                                     proof=proof, intuition=intuition, predecessors=[ids[p] for p in meta["predecessors"]])
+                (graph.facts_dir / f"{old}.md").unlink()
+                del pending[old]
         yield dst
 
 

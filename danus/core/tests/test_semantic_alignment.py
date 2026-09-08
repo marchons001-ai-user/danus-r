@@ -86,6 +86,8 @@ def test_material_assignment_requires_approved_exact_contract(tmp_path):
     )
     assert assigned["implementation_contract_id"] == contract["contract_id"]
     assert ledger.implementation_contract(contract["contract_id"])["status"] == "CONSUMED"
+    assert ledger.pending_implementation_contracts()[0]["consumed_by_assignment_id"] == assigned["assignment_id"]
+    ledger.update(worker="experimenter", state="DONE", outcome="COMPLETE", actor="runtime")
     assert ledger.pending_implementation_contracts() == []
 
 

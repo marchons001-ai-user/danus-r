@@ -12,7 +12,7 @@ from danus.core.handoff import HandoffRequests
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write
 
-from .cli import do_resume as _legacy_resume
+from .cli import _do_resume_unlocked as _legacy_resume
 from .cli import do_start, do_status, do_stop, project_control_lock
 
 _GUIDANCE_FILE = "HUMAN_GUIDANCE.md"
@@ -125,6 +125,12 @@ def _resume_worker(project: str, worker: str) -> List[Dict[str, str]]:
 
 def do_resume(target: str) -> List[Dict[str, str]]:
     """Resume explicit external blockers or active project work without broad unblock."""
+    project, _ = L.resolve_target(target)
+    with project_control_lock(L.project_dir(project)):
+        return _do_resume_unlocked(target)
+
+
+def _do_resume_unlocked(target: str) -> List[Dict[str, str]]:
     project, worker = L.resolve_target(target)
     if worker:
         return _resume_worker(project, worker)

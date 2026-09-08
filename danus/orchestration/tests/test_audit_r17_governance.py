@@ -179,7 +179,11 @@ def test_stale_contract_retires_handoffs_before_retry(tmp_path, monkeypatch, kin
         for _ in range(3):
             _apply("P")
         assert handoffs.get(old["handoff_id"])["status"] == "STALE"
-        assert not handoffs.pending()
+        fresh_routes = handoffs.pending()
+        assert len(fresh_routes) == 1
+        assert fresh_routes[0]["handoff_id"] != old["handoff_id"]
+        assert fresh_routes[0]["reauthorization"] is True
+        assert ledger.implementation_contract(cid)["status"] == "STALE"
         with pytest.raises(ValueError):
             ledger.assign(worker=who, role=old["target_role"], node_id="P0", plan_version=1,
                           task=old["request"], handoff_id=old["handoff_id"])

@@ -343,6 +343,7 @@ def do_assign(
         raise SystemExit("assign on a planned project requires --node <plan_node_id>")
 
     try:
+        _recover_project(pdir)
         plan_version = ResearchPlanGraph(pdir).snapshot()["plan_version"]
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"cannot read Research Plan: {exc}") from exc
@@ -909,7 +910,7 @@ def _do_supervise_unlocked(
         )
         if not quiescent:
             _clear_recovered_budget_pauses(project, rows, report["budget"])
-        quota_applied = [] if quiescent else _apply_quota_gate(project, rows, policy)
+        quota_applied = [] if quiescent or report.get("budget_stop") else _apply_quota_gate(project, rows, policy)
         stable = False
         passes = 0
 
@@ -1201,23 +1202,28 @@ def _resume_one(wl: L.WorkerLayout) -> str:
 
 
 def do_resume(target: str, stagger: float = 0.2) -> List[Dict]:
+    project, _ = L.resolve_target(target)
+    with project_control_lock(L.project_dir(project)):
+        return _do_resume_unlocked(target, stagger)
+
+
+def _do_resume_unlocked(target: str, stagger: float = 0.2) -> List[Dict]:
     project, worker = L.resolve_target(target)
     dirs = L.target_worker_dirs(target)
     if not dirs:
         raise SystemExit(f"no workers for target {target!r}")
-    with project_control_lock(L.project_dir(project)):
-        if worker:
-            wl = L.WorkerLayout(dirs[0])
-            return [{"worker": wl.name, "result": _resume_one(wl)}]
+    if worker:
+        wl = L.WorkerLayout(dirs[0])
+        return [{"worker": wl.name, "result": _resume_one(wl)}]
 
-        _project_pause(project).unlink(missing_ok=True)
-        out = []
-        for i, wdir in enumerate(dirs):
-            if i and stagger:
-                time.sleep(stagger)
-            wl = L.WorkerLayout(wdir)
-            out.append({"worker": wl.name, "result": _start_one(wl)})
-        return out
+    _project_pause(project).unlink(missing_ok=True)
+    out = []
+    for i, wdir in enumerate(dirs):
+        if i and stagger:
+            time.sleep(stagger)
+        wl = L.WorkerLayout(wdir)
+        out.append({"worker": wl.name, "result": _start_one(wl)})
+    return out
 
 
 # --------------------------------------------------------------------------- #

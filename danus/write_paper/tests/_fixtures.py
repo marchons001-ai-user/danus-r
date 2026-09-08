@@ -66,6 +66,35 @@ def write_main_tex(project_dir: Path, tex: str = _MINIMAL_TEX) -> Path:
     return p
 
 
+def canonicalize_example(project_dir: Path):
+    """Materialize illustrative fact labels as real content-addressed test records."""
+    from danus.core import FactGraph
+    from danus.core.factgraph import parse_frontmatter
+    graph = FactGraph(project_dir)
+    pending = {p.stem: p.read_text() for p in graph.facts_dir.glob("*.md")}
+    ids = {}
+    while pending:
+        ready = [old for old, raw in pending.items() if all(p in ids for p in parse_frontmatter(raw)["predecessors"])]
+        assert ready, "example fact dependencies must form a closed DAG"
+        for old in ready:
+            raw = pending.pop(old)
+            meta = parse_frontmatter(raw)
+            statement, rest = raw.split("\n## statement\n", 1)[1].split("\n## proof\n", 1)
+            proof, _, intuition = rest.partition("\n## intuition\n")
+            ids[old] = graph.add(problem_id="odd-sum", author="example-worker", statement=statement, proof=proof,
+                                 intuition=intuition, glossary_introduces=meta["glossary_introduces"],
+                                 external_refs=meta["external_refs"], predecessors=[ids[p] for p in meta["predecessors"]])
+            (graph.facts_dir / f"{old}.md").unlink()
+    for path in project_dir.rglob("*.md"):
+        if graph.dir in path.parents:
+            continue
+        text = path.read_text()
+        for old, new in ids.items():
+            text = text.replace(old, new)
+        path.write_text(text)
+    return ids
+
+
 @contextlib.contextmanager
 def temp_project(with_ledger: bool = True, with_tex: bool = False):
     """Copy the example project to a tempdir; yield its path. Seeds the ledger by
@@ -74,6 +103,7 @@ def temp_project(with_ledger: bool = True, with_tex: bool = False):
     with tempfile.TemporaryDirectory(prefix="write-paper-test-") as d:
         dst = Path(d) / "project"
         shutil.copytree(EXAMPLE_PROJECT, dst)
+        canonicalize_example(dst)
         if with_ledger:
             write_ledger(dst)
         if with_tex:

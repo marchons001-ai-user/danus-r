@@ -348,7 +348,6 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         }
         for item in pending_implementation_contracts
         if active_route(str(item.get("node_id") or ""))
-        and _contract_status(item) != "APPROVE"
     ]
     complete = bool(
         plan.get("root_id") in completed
@@ -356,6 +355,8 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         and not pending_plan_changes
         and not unresolved_implementation_contracts
         and not pending_handoffs
+        and not any(a.get("state") in {"ASSIGNED", "RUNNING", "BLOCKED"}
+                    and active_route(str(a.get("node_id") or "")) for a in current_assignments)
     )
     project_state = (
         "COMPLETE" if complete else "PAUSED" if snapshot.get("project_paused") else "RUNNING"
@@ -726,6 +727,15 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         for contract in pending_implementation_contracts:
             status = _contract_status(contract)
             if status == "STALE":
+                if active_route(str(contract.get("node_id") or "")) and not any(
+                    h.get("kind") == "REVISION" and h.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                    and h.get("subject_id") == contract["contract_id"] and h.get("status") in {"OPEN", "ASSIGNED"}
+                    for h in handoffs
+                ):
+                    route("OPEN_HANDOFF", node_id=contract["node_id"],
+                          reason="stale_implementation_requires_fresh_authorization", handoff_kind="REVISION",
+                          subject_type="IMPLEMENTATION_CONTRACT", subject_id=contract["contract_id"],
+                          target_role="researcher", requested_by="supervisor", source_role="researcher")
                 continue
             contract_id = str(contract["contract_id"])
             review = _latest_handoff(
@@ -803,15 +813,17 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             ):
                 continue
             source_id = str(source["assignment_id"])
+            epoch_handoffs = [item for item in handoffs
+                              if int(item.get("review_epoch", 0)) == int(source.get("review_epoch", 0))]
             if any(
                 item.get("kind") in {"INTERPRET", "RETHINK", "ESCALATE"}
                 and item.get("subject_type") == "ASSIGNMENT"
                 and item.get("subject_id") == source_id
-                for item in handoffs
+                for item in epoch_handoffs
             ):
                 continue
             review = _latest_handoff(
-                handoffs,
+                epoch_handoffs,
                 kind="REVIEW",
                 subject_type="ASSIGNMENT",
                 subject_id=source_id,

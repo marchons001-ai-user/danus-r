@@ -88,4 +88,6 @@ def test_semantic_gate_round_trip_is_offline(tmp_path):
         task=proposed["task"],
     )
     assert assigned["implementation_contract_id"] == proposed["contract_id"]
+    assert ledger.pending_implementation_contracts()[0]["consumed_by_assignment_id"] == assigned["assignment_id"]
+    ledger.update(worker="experimenter", state="DONE", actor="runtime", outcome="COMPLETE")
     assert ledger.pending_implementation_contracts() == []

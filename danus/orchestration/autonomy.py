@@ -317,6 +317,12 @@ def _implementation_review_task(contract: Dict[str, Any]) -> str:
 
 
 def _implementation_correction_task(contract: Dict[str, Any], kind: str) -> str:
+    if contract.get("status") == "STALE":
+        return (f"# Reauthorize Implementation Contract\n\n"
+                f"Contract `{contract['contract_id']}` for node `{contract['node_id']}` has stale authority.\n"
+                f"Reassess this task under the current Plan and node state:\n\n{contract['task']}\n"
+                "Submit a fresh contract with implementation_submit_contract using the current Plan version and node. "
+                "Independent review is required before execution. End with COMPLETE only after submission.\n")
     heading = "Revise Implementation Contract" if kind == "REVISION" else "Rethink Rejected Implementation Contract"
     instruction = (
         "Make the smallest correction that addresses the blocking rationale."
@@ -378,7 +384,7 @@ def _open_nonplan_handoff(
         subject_type=subject_type,
         subject_id=subject_id,
     )
-    if existing is not None:
+    if existing is not None and existing.get("status") != "STALE":
         return existing
 
     if subject_type == "IMPLEMENTATION_CONTRACT":

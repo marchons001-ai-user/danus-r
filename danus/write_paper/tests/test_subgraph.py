@@ -11,8 +11,8 @@
     selection path, backward-compat when omitted, ``bad_fact_ids`` refusal.
 
 All codex is faked (a capturing stub) so nothing hits the network. The example
-project's closure is exactly three facts: ``fact_odd_sum_main`` (target) with
-predecessors ``fact_odd_recurrence`` + ``fact_square_recurrence``.
+project's closure is exactly three facts: ``5e28191721b35dbb`` (target) with
+predecessors ``a7944e5cffe7b38f`` + ``2d7f301187eebfc6``.
 
 Runs under pytest and standalone (``python -m danus.write_paper.tests.test_subgraph``).
 """
@@ -27,9 +27,9 @@ from danus.write_paper import assemble, server
 
 from ._fixtures import env, temp_project
 
-_TARGET = "fact_odd_sum_main"
-_PREDS = {"fact_odd_recurrence", "fact_square_recurrence"}
-# a proof-ONLY phrase from fact_odd_recurrence (absent when it is referenced-only,
+_TARGET = "5e28191721b35dbb"
+_PREDS = {"a7944e5cffe7b38f", "2d7f301187eebfc6"}
+# a proof-ONLY phrase from a7944e5cffe7b38f (absent when it is referenced-only,
 # i.e. embedded as a statement without its proof).
 _RECURRENCE_PROOF_PHRASE = "one-step telescoping relation between consecutive partial sums"
 
@@ -62,7 +62,7 @@ def _blank_brief_headline(pdir: Path) -> None:
     brief = pdir / "paper" / "PROJECT_BRIEF.md"
     brief.write_text(
         brief.read_text(encoding="utf-8").replace(
-            "headline_fact_ids: fact_odd_sum_main", "headline_fact_ids:"),
+            "headline_fact_ids: 5e28191721b35dbb", "headline_fact_ids:"),
         encoding="utf-8")
 
 
@@ -86,15 +86,15 @@ def test_subgraph_skeleton_shape_order_and_degrees():
             assert f["statement"], f  # non-empty one-liner
         by_id = {f["id"]: f for f in facts}
         # both predecessors are load-bearing (used by the target) -> in-degree 1
-        assert by_id["fact_odd_recurrence"]["dependents"] == 1
-        assert by_id["fact_square_recurrence"]["dependents"] == 1
+        assert by_id["a7944e5cffe7b38f"]["dependents"] == 1
+        assert by_id["2d7f301187eebfc6"]["dependents"] == 1
         assert by_id[_TARGET]["dependents"] == 0
         # the target's predecessor DAG edges are reported
         assert set(by_id[_TARGET]["predecessors"]) == _PREDS
-        # glossary term S(n) is introduced by fact_odd_recurrence
-        assert "S(n)" in by_id["fact_odd_recurrence"]["glossary_introduces"]
+        # glossary term S(n) is introduced by a7944e5cffe7b38f
+        assert "S(n)" in by_id["a7944e5cffe7b38f"]["glossary_introduces"]
         # statements only — no proof text leaks into the skeleton
-        assert _RECURRENCE_PROOF_PHRASE not in by_id["fact_odd_recurrence"]["statement"]
+        assert _RECURRENCE_PROOF_PHRASE not in by_id["a7944e5cffe7b38f"]["statement"]
 
 
 def test_subgraph_skeleton_is_deterministic():
@@ -216,15 +216,15 @@ def test_paper_write_bad_fact_ids_refuses_no_paper():
 
 
 def test_paper_write_out_of_closure_id_warns_but_writes():
-    # fact_square_recurrence IS in the closure; to exercise the warning we select the
+    # 2d7f301187eebfc6 IS in the closure; to exercise the warning we select the
     # target plus a valid fact that is NOT in the target's closure would require a
     # second terminal — instead select an explicit headline whose closure excludes a
-    # chosen fact. Here: headline=fact_odd_recurrence (closure = itself), select the
+    # chosen fact. Here: headline=a7944e5cffe7b38f (closure = itself), select the
     # main fact too -> main is outside that closure -> warning, but paper still writes.
     with temp_project() as pdir, env(DANUS_PROJECT_DIR=str(pdir), DANUS_AGENTS_ROOT=None):
         with _capture_codex():
-            out = server.paper_write(headline=["fact_odd_recurrence"],
-                                     fact_ids=["fact_odd_recurrence", _TARGET])
+            out = server.paper_write(headline=["a7944e5cffe7b38f"],
+                                     fact_ids=["a7944e5cffe7b38f", _TARGET])
         assert out["status"] == "ok"
         assert out["fact_id_warnings"] and "outside the target closure" in out["fact_id_warnings"][0]
 

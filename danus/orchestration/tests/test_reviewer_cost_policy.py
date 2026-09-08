@@ -102,6 +102,10 @@ def test_dsh_quota_failure_is_bound_to_current_assignment(tmp_path: Path, monkey
     events = []
 
     class Ledger:
+        def assignment_lock(self):
+            from contextlib import nullcontext
+            return nullcontext()
+
         def current(self, worker, refresh_stale=True):
             return {
                 "assignment_id": "assignment-1",

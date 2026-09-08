@@ -13,6 +13,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,7 +42,46 @@ class ProgressLedger:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            self._recover_assignment()
             yield
+
+    def _recover_assignment(self) -> None:
+        intent = self.path.parent / ".assignment.json"
+        if not intent.exists():
+            return
+        payload = json.loads(intent.read_text(encoding="utf-8"))
+        identity = payload.pop("intent_id", "")
+        if identity != self._content_id(payload):
+            raise ValueError("corrupt assignment intent")
+        if payload["write_task"]:
+            path = self.root / "workers" / payload["event"]["worker"] / "TASK.md"
+            self._write_assignment_file(path, payload["task"])
+        existing = read_jsonl(self.path)
+        for event in payload["superseded"] + [payload["event"]]:
+            if event not in existing:
+                append_jsonl(self.path, event)
+        with self.path.open("rb") as handle:
+            os.fsync(handle.fileno())
+        intent.unlink()
+        fd = os.open(intent.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _write_assignment_file(path: Path, text: str) -> None:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(path)
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     @staticmethod
     def task_sha256(task: str) -> str:
@@ -244,7 +284,7 @@ class ProgressLedger:
         ]
 
     def pending_implementation_contracts(self) -> List[Dict[str, Any]]:
-        """Return the latest unconsumed semantic gate per plan node."""
+        """Return latest contracts whose exact authorized execution is unfinished."""
         records, order = self._replay_implementation_contracts()
         latest_by_node: Dict[str, str] = {}
         for contract_id in order:
@@ -252,10 +292,14 @@ class ProgressLedger:
             if record:
                 latest_by_node[record["node_id"]] = contract_id
         out: List[Dict[str, Any]] = []
+        executions = {a["assignment_id"]: a for a in self.snapshot()}
         for node_id in sorted(latest_by_node):
             record = records[latest_by_node[node_id]]
             view = self._implementation_contract_view(record)
-            if view["status"] != "CONSUMED":
+            execution = executions.get(view.get("consumed_by_assignment_id"))
+            if view["status"] != "CONSUMED" or not (
+                execution and execution["state"] == "DONE" and execution.get("outcome") == "COMPLETE"
+            ):
                 out.append(view)
         return out
 
@@ -289,16 +333,17 @@ class ProgressLedger:
         def materialize_task():
             if write_task:
                 path = self.root / "workers" / worker / "TASK.md"
-                tmp = path.with_suffix(".md.tmp")
-                tmp.write_text(task, encoding="utf-8")
-                tmp.replace(path)
+                self._write_assignment_file(path, task)
 
         lock_path = self.root / "progress" / ".assign.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
+                self._recover_assignment()
                 plan = ResearchPlanGraph(self.root)
+                with plan._commit_lock():
+                    plan._recover_prepared_revision(plan.snapshot())
                 current = plan.snapshot()
                 version = int(plan_version)
                 if version != current["plan_version"]:
@@ -417,22 +462,18 @@ class ProgressLedger:
                             f"{record['assignment_id']} on worker {record['worker']}"
                         )
 
-                materialize_task()
-
                 # A worker may be deliberately rebound. A reopened handoff may also
                 # replace its previous attempt on a different worker.
+                superseded = []
                 for record in assignments.values():
                     if record["state"] in self._TERMINAL:
                         continue
                     if record["worker"] == worker or (
                         handoff_id and record.get("handoff_id") == handoff_id
                     ):
-                        self._append_state(
-                            record,
-                            state="STALE",
-                            actor="system",
-                            note="superseded by a newer assignment",
-                        )
+                        superseded.append({"event": "STATE", "assignment_id": record["assignment_id"],
+                                           "worker": record["worker"], "state": "STALE", "actor": "system",
+                                           "note": "superseded by a newer assignment", "at": utc_now()})
 
                 assigned_at = utc_now()
                 identity = {
@@ -457,7 +498,12 @@ class ProgressLedger:
                     "note": "",
                     "at": assigned_at,
                 }
-                append_jsonl(self.path, event)
+                intent = {
+                    "event": event, "superseded": superseded, "task": task, "write_task": write_task,
+                }
+                intent["intent_id"] = self._content_id(intent)
+                self._write_assignment_file(self.path.parent / ".assignment.json", json.dumps(intent))
+                self._recover_assignment()
                 return self.current(worker, refresh_stale=False) or event
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
@@ -503,6 +549,7 @@ class ProgressLedger:
         with lock_path.open("a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
+                self._recover_assignment()
                 current = self.current(worker, refresh_stale=True)
                 if current is None:
                     raise ValueError(f"worker {worker} has no assignment")
@@ -668,6 +715,16 @@ class ProgressLedger:
                     return True
         return False
 
+    def reopen_epoch(self, node_id: str) -> str:
+        epoch = ""
+        graph = ResearchPlanGraph(self.root)
+        for event in read_jsonl(self.path):
+            if event.get("event") == "NODE_STATE" and event.get("state") == "OPEN":
+                nodes = graph.revision(int(event["plan_version"]))["nodes"]
+                if node_id in self._reopen_affected(nodes, str(event["node_id"])):
+                    epoch = str(event["at"])
+        return epoch
+
     def node_states(self) -> Dict[str, Dict[str, Any]]:
         """Replay completion and cascading reopen in durable event order."""
         graph = ResearchPlanGraph(self.root)
@@ -821,6 +878,8 @@ class ProgressLedger:
             "note": note,
             "at": utc_now(),
         }
+        if state == "BLOCKED" and outcome == "NEEDS_REVIEW":
+            event["review_epoch"] = int(record.get("review_epoch", 0)) + 1
         if outcome:
             event["outcome"] = outcome
         if result:
@@ -869,6 +928,8 @@ class ProgressLedger:
                     continue
                 record = assignments[aid]
                 record["state"] = state
+                if "review_epoch" in event:
+                    record["review_epoch"] = event["review_epoch"]
                 if event.get("checkpoint_id"):
                     record["checkpoint_id"] = event["checkpoint_id"]
                 outcome = str(event.get("outcome") or "").upper()

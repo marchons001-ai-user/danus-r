@@ -62,16 +62,16 @@ def test_writer_headline_selects_facts_plus_predecessors():
     # fact's ## proof body text (frontmatter/fact_id is stripped), so order is read
     # from where the mathematics lands.
     with temp_project() as pdir:
-        p = assemble.build_prompt("writer", pdir, headline=["fact_odd_sum_main"])
+        p = assemble.build_prompt("writer", pdir, headline=["5e28191721b35dbb"])
     # predecessor slugs still appear via the DAG header line, not as frontmatter
-    assert "predecessors (DAG): fact_odd_recurrence, fact_square_recurrence" in p
+    assert "predecessors (DAG): a7944e5cffe7b38f, 2d7f301187eebfc6" in p
     i_pred = p.index("one-step telescoping relation")          # odd_recurrence proof
     i_main = p.index("We argue by induction on $n$")           # main proof
     assert i_pred < i_main, "predecessor must be embedded before the fact that needs it"
 
     # headline = a single leaf with no predecessors → the other leaf is excluded
     with temp_project() as pdir:
-        p2 = assemble.build_prompt("writer", pdir, headline=["fact_square_recurrence"])
+        p2 = assemble.build_prompt("writer", pdir, headline=["2d7f301187eebfc6"])
     assert _fact_proof_text() in p2                             # square_recurrence proof present
     assert "We argue by induction on $n$" not in p2            # main excluded
     assert "one-step telescoping relation" not in p2           # odd_recurrence excluded
@@ -223,7 +223,7 @@ def test_fact_graph_content_empty_project():
         brief = Path(pdir) / "paper" / "PROJECT_BRIEF.md"
         brief.write_text(
             brief.read_text(encoding="utf-8").replace(
-                "headline_fact_ids: fact_odd_sum_main", "headline_fact_ids:"
+                "headline_fact_ids: 5e28191721b35dbb", "headline_fact_ids:"
             ),
             encoding="utf-8",
         )

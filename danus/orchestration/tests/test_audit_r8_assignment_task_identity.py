@@ -71,20 +71,28 @@ def test_assign_crash_cannot_execute_new_task_under_old_assignment(tmp_path: Pat
     assert (worker / "TASK.md").read_text(encoding="utf-8") == "TASK_B\n"
 
     monkeypatch.setenv("DANUS_MAX_ROUNDS", "1")
-    monkeypatch.setattr(LOOP, "run_round", lambda *args, **kwargs: pytest.fail("mismatched task must not execute"))
+    calls = []
+    def recovered_round(wl, role, prompt, log_path, hard_timeout, **kwargs):
+        current = ledger.current("researcher")
+        assert current["assignment_id"] != old["assignment_id"]
+        assert current["task_sha256"] == ledger.task_sha256(wl.task.read_text())
+        calls.append(current["assignment_id"])
+        _message(log_path, "TASK_B complete\nDANUS_OUTCOME: COMPLETE")
+        return 0
+    monkeypatch.setattr(LOOP, "run_round", recovered_round)
 
     assert _run(worker) == 0
     current = ledger.current("researcher", refresh_stale=False)
     assert current is not None
-    assert current["assignment_id"] == old["assignment_id"]
-    assert current["state"] == "BLOCKED"
-    assert current["outcome"] == "BLOCKED"
-    assert "TASK.md does not match assignment task_sha256" in current["note"]
-    assert len(ledger.assignments()) == 1
+    assert calls == [current["assignment_id"]]
+    assert current["assignment_id"] != old["assignment_id"]
+    assert current["state"] == "DONE"
+    assert current["outcome"] == "COMPLETE"
+    assert len(ledger.assignments()) == 2
+    assert next(a for a in ledger.assignments() if a["assignment_id"] == old["assignment_id"])["state"] == "STALE"
 
     status = json.loads(L.WorkerLayout(worker).status.read_text(encoding="utf-8"))
-    assert status["error"] == "assignment_task_mismatch"
-    assert status["assignment_id"] == old["assignment_id"]
+    assert status["state"] == "stopped"
 
 
 def test_matching_assignment_task_still_completes_normally(tmp_path: Path, monkeypatch):

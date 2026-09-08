@@ -524,6 +524,7 @@ def _materialize_decision(
         if item.get("kind") in _ROUTES
         and item.get("subject_type") == "ASSIGNMENT"
         and item.get("subject_id") == subject_id
+        and item.get("parent_handoff_id") == decision["review_handoff_id"]
     ]
     if lineage:
         if len(lineage) != 1:

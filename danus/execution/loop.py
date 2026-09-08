@@ -485,6 +485,9 @@ def main(worker_dir: str) -> int:
         context_tokens_total = 0
 
     ledger = _progress_ledger(wl)
+    if ledger is not None:
+        with ledger.assignment_lock():
+            pass
     exit_recorded = False
 
     def _record_exit(reason: str, **details) -> None:

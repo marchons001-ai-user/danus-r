@@ -97,8 +97,14 @@ class HandoffRequests:
         if refs:
             identity["evidence_refs"] = refs
         subject = self._subject(identity)
-        if subject_type == "PLAN_CHANGE" and subject and subject.get("review_epoch"):
+        if kind == "REVISION" and subject_type == "IMPLEMENTATION_CONTRACT" and subject and subject.get("status") == "STALE":
+            identity["reauthorization"] = True
+            identity["node_epoch"] = self.progress.reopen_epoch(node_id)
+        if subject_type in {"PLAN_CHANGE", "ASSIGNMENT"} and subject and subject.get("review_epoch"):
             identity["review_epoch"] = subject["review_epoch"]
+        if (subject_type == "ASSIGNMENT" and subject and kind in {"INTERPRET", "RETHINK", "ESCALATE"}
+            and not parent_handoff_id and subject.get("state") in {"ASSIGNED", "RUNNING"}):
+            identity["review_epoch"] = int(subject.get("review_epoch", 0)) + 1
         handoff_id = self.progress._content_id(identity)
         existing = self.get(handoff_id)
         if existing is not None:
@@ -126,6 +132,8 @@ class HandoffRequests:
         return [self._view(records[key]) for key in sorted(records)]
 
     def _subject(self, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if record["subject_type"] == "ASSIGNMENT":
+            return next((a for a in self.progress.assignments() if a["assignment_id"] == record["subject_id"]), None)
         if record["subject_type"] == "IMPLEMENTATION_CONTRACT":
             return self.progress.implementation_contract(record["subject_id"])
         if record["subject_type"] == "PLAN_CHANGE":
@@ -137,13 +145,22 @@ class HandoffRequests:
     def _view(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """Subject revocation takes precedence over handoff retry state."""
         subject = self._subject(record)
+        if record.get("reauthorization"):
+            if (not ResearchPlanGraph(self.root).node_compatible(record["node_id"], record["plan_version"])
+                or record.get("node_epoch") != self.progress.reopen_epoch(record["node_id"])):
+                return {**record, "status": "STALE"}
+            return record
         if subject is None:
             if (record["subject_type"] in {"PLAN_CHANGE", "IMPLEMENTATION_CONTRACT"}
                 and record["status"] in {"OPEN", "ASSIGNED"}):
                 return {**record, "status": "STALE"}
             return record
-        old_epoch = (record["subject_type"] == "PLAN_CHANGE"
+        old_epoch = (record["subject_type"] in {"PLAN_CHANGE", "ASSIGNMENT"}
                      and int(record.get("review_epoch", 0)) != int(subject.get("review_epoch", 0)))
+        if (record["subject_type"] == "ASSIGNMENT" and record["kind"] in {"INTERPRET", "RETHINK", "ESCALATE"}
+            and not record.get("parent_handoff_id") and subject.get("state") in {"ASSIGNED", "RUNNING", "DONE"}
+            and int(record.get("review_epoch", 0)) == int(subject.get("review_epoch", 0)) + 1):
+            old_epoch = False
         if old_epoch or (subject.get("status") == "STALE" and record["status"] in {"OPEN", "ASSIGNED"}):
             return {**record, "status": "STALE"}
         return record

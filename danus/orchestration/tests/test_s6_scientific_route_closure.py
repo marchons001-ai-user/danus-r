@@ -212,7 +212,7 @@ def test_crash_after_resume_state_uses_existing_recovery(tmp_path: Path, monkeyp
     assert start["worker"] == "experimenter"
 
 
-def test_second_needs_review_waits_for_human_without_second_route(tmp_path: Path, monkeypatch):
+def test_second_needs_review_requires_fresh_review_before_second_route(tmp_path: Path, monkeypatch):
     ledger, source, _, _, _ = _resolved_route(tmp_path, monkeypatch)
     monkeypatch.setattr(CLI, "_start_one", lambda wl: "started")
     S.apply_scientific_route_dispositions("p")
@@ -225,8 +225,10 @@ def test_second_needs_review_waits_for_human_without_second_route(tmp_path: Path
     )
 
     result = S.apply_scientific_route_dispositions("p")
-    assert result[0]["result"] == "awaiting_human"
+    assert result == []
     assert ledger.current("experimenter", refresh_stale=False)["state"] == "BLOCKED"
+    assert any(item.get("kind") == "OPEN_HANDOFF" and item.get("handoff_kind") == "REVIEW"
+               for item in reduce_supervisor_snapshot(build_supervisor_snapshot(tmp_path, []))["actions"])
     assert not any(
         item.get("kind") == "SCIENTIFIC_ROUTE_REQUIRED"
         for item in reduce_supervisor_snapshot(build_supervisor_snapshot(tmp_path, []))["actions"]
