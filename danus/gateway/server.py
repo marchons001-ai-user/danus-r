@@ -623,9 +623,13 @@ def implementation_submit_contract(
 @contextmanager
 def _review_scope(subject_type: str, subject_id: str):
     from danus.orchestration.cli import project_control_lock
+    from danus.execution import layout as L
 
     ledger = _pl()
     with project_control_lock(_project()), ledger.assignment_lock():
+        if ((_project() / L.PAUSE_FILE).exists()
+            or (_project() / "workers" / _author() / L.PAUSE_FILE).exists()):
+            raise ValueError("assignment is paused")
         assignment = ledger.current(_author(), refresh_stale=True)
         expected = os.environ.get("DANUS_ASSIGNMENT_ID", "")
         if (
