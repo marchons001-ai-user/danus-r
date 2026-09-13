@@ -197,7 +197,8 @@ def test_dsh_cannot_fall_back_to_unisolated_worker(tmp_path, monkeypatch):
             pytest.fail("unisolated DSH worker was launched")
 
 
-def test_native_codex_worker_uses_policy_and_external_gateway(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lifetime", ["complete", "crash", "migration"])
+def test_native_codex_worker_uses_policy_and_external_gateway(tmp_path, monkeypatch, lifetime):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import shlex
     import threading
@@ -209,6 +210,11 @@ def test_native_codex_worker_uses_policy_and_external_gateway(tmp_path, monkeypa
     requests = []
     errors = []
     outputs = []
+    from danus.execution import context as C
+    migration_payload = {key: [] for key in C._MIGRATION_FIELDS}
+    migration_payload.update(current_objective="bounded objective", next_action="resume checkpoint")
+    marker = str(tmp_path / "detached-child")
+    alive = wl.dir / "workspace" / "child-started"
 
     class Model(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -222,7 +228,7 @@ def test_native_codex_worker_uses_policy_and_external_gateway(tmp_path, monkeypa
                 if len(requests) == 1:
                     name = next(n for n in ("exec_command", "shell_command", "shell") if n in tools)
                     program = (
-                        "import errno,os,socket; from pathlib import Path; "
+                        "import errno,os,socket,json; from pathlib import Path; "
                         f"p=Path({str(protected)!r}); "
                         "assert os.environ.get('DANUS_TEST_SECRET') is None; "
                         "\ntry: p.read_bytes()\nexcept OSError as e: assert e.errno in (1,2,13)\nelse: raise AssertionError('read escaped')"
@@ -230,12 +236,19 @@ def test_native_codex_worker_uses_policy_and_external_gateway(tmp_path, monkeypa
                         f"\ntry: socket.create_connection(('127.0.0.1', {server.server_port}), timeout=1)\nexcept OSError as e: assert e.errno in (1,13)\nelse: raise AssertionError('network escaped')"
                         "\nprint('D2_NATIVE_DENIAL_OK')"
                     )
+                    if lifetime == "migration":
+                        program += ("\nassert Path('local_memory/agent_checkpoint.json').is_file()\n" +
+                                    f"Path('local_memory/context_migration.json').write_text(json.dumps({migration_payload!r}))")
+                    if lifetime == "crash":
+                        program += ("\nimport subprocess,sys,time\n" +
+                                    f"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', {marker!r}], start_new_session=True)\n" +
+                                    "Path('workspace/child-started').touch()\ntime.sleep(60)")
                     command = "/usr/bin/python3 -c " + shlex.quote(program)
                     args = ({"cmd": command, "yield_time_ms": 1000, "max_output_tokens": 1000} if name == "exec_command"
                             else {"command": command} if name == "shell_command"
                             else {"command": ["/bin/sh", "-c", command]})
                     item = {"id": "fc1", "type": "function_call", "call_id": "c1", "name": name, "arguments": json.dumps(args)}
-                elif len(requests) == 2:
+                elif len(requests) == 2 and lifetime != "migration":
                     outputs.extend(item for item in payload.get("input", []) if item.get("type") == "function_call_output")
                     assert any(t.get("name") == "gm_add" for t in tools["mcp__danus"]["tools"])
                     name = "gm_add"
@@ -287,6 +300,66 @@ def test_native_codex_worker_uses_policy_and_external_gateway(tmp_path, monkeypa
     monkeypatch.setattr(W, "worker_session", local_model_session)
     log = wl.dir / "native.log"
     try:
+        if lifetime == "migration":
+            wl.logs.mkdir()
+            prior = wl.logs / "round_1.log"
+            prior.write_text("prior bounded execution")
+            C.write_checkpoint(wl.dir, role="researcher", round_no=1, telemetry={},
+                               assignment=ProgressLedger(wl.project_dir).current(wl.name))
+            result = loop._run_context_migration(wl, config, "context budget", prior, hard_timeout=30)
+            assert result == migration_payload, ((wl.logs / "migration_1.log").read_text(), errors)
+            assert "D2_NATIVE_DENIAL_OK" in json.dumps(outputs)
+            assert protected.read_bytes() == before
+            return
+        if lifetime == "crash":
+            import signal
+            import time
+
+            def children():
+                found = []
+                for path in Path("/proc").glob("[0-9]*/cmdline"):
+                    try:
+                        args = path.read_bytes().split(b"\0")
+                        if marker.encode() in args and args[0] == b"/usr/bin/python3":
+                            found.append(int(path.parent.name))
+                    except OSError:
+                        pass
+                return found
+
+            import inspect
+            import textwrap
+            child_source = (
+                "from contextlib import contextmanager\nfrom pathlib import Path\n"
+                "from types import SimpleNamespace\n"
+                "from danus.execution import worker as W, layout as L, loop\n"
+                f"server=SimpleNamespace(server_port={server.server_port})\n"
+                f"tmp_path=Path({str(tmp_path)!r})\nreal_session=W.worker_session\n"
+                + textwrap.dedent(inspect.getsource(local_model_session)) +
+                "\nW.worker_session=local_model_session\n"
+                f"wl=L.WorkerLayout(Path({str(wl.dir)!r}))\n"
+                f"raise SystemExit(loop.run_round(wl, {config!r}, 'Execute the bounded test.', Path({str(log)!r}), hard_timeout=30))\n"
+            )
+            controller = subprocess.Popen([sys.executable, "-c", child_source])
+            try:
+                deadline = time.monotonic() + 10
+                while not alive.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert alive.exists(), log.read_text()
+                assert children(), "detached child was never running"
+                controller.kill()
+                controller.wait(timeout=5)
+                controller = None
+                deadline = time.monotonic() + 5
+                while children() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert not children(), "detached tool survived worker SIGKILL"
+            finally:
+                if controller is not None:
+                    controller.kill()
+                    controller.wait(timeout=5)
+                for pid in children():
+                    os.kill(pid, signal.SIGKILL)
+            return
         rc = loop.run_round(wl, config, "Execute the bounded test.", log, hard_timeout=30, context_budget=True)
         assert rc == 0, (log.read_text(), errors)
         assert not errors
@@ -326,3 +399,68 @@ for name in {[str(checkpoint), str(secret)]!r}:
         assert (wl.dir / "workspace" / "result.txt").read_text() == "science"
         assert (wl.local_memory / "notes" / "result.txt").read_text() == "note"
         assert checkpoint.read_text() == "HOST_CHECKPOINT"
+
+
+@pytest.mark.parametrize("source", ["private_workspace", "private_input", "credential_input", "launcher_workspace"])
+def test_worker_rejects_scientific_paths_that_expose_its_trusted_host(tmp_path, monkeypatch, source):
+    wl, _, _, role = _worker(tmp_path)
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="danus-boundary-", dir=Path.home() / ".cache") as home_text:
+        home = Path(home_text)
+        credentials = home / ".codex"
+        credentials.mkdir()
+        (credentials / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "TEST_ONLY_SECRET"}))
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("CODEX_HOME", str(credentials))
+        metadata = {}
+        target = credentials / "auth.json"
+        if source == "private_workspace":
+            metadata["workspace"] = str(home)
+        elif source in {"private_input", "credential_input"}:
+            metadata["readonly_inputs"] = [str(home if source == "private_input" else credentials)]
+        else:
+            launcher = tmp_path / "launcher"
+            launcher.mkdir()
+            target = launcher / "codex"
+            target.write_text("TRUSTED_LAUNCHER")
+            monkeypatch.setenv("DANUS_CODEX_BIN", str(target))
+            metadata["workspace"] = str(launcher)
+        (wl.project_dir / L.PROJECT_META_FILE).write_text(json.dumps(metadata))
+        try:
+            with W.worker_session(wl, role) as session:
+                body = f"Path({str(target)!r}).write_text('FORGED')" if source == "launcher_workspace" else f"assert json.loads(Path({str(target)!r}).read_text())['OPENAI_API_KEY'] == 'TEST_ONLY_SECRET'"
+                with _attack(session, body) as proc:
+                    out, err = proc.communicate(timeout=15)
+                    assert proc.returncode != 0, "sandbox exposed credentials or allowed trusted launcher replacement"
+        except ValueError as exc:
+            assert "trusted" in str(exc)
+            return
+        pytest.fail(f"unsafe scientific policy was accepted: {out!r}, {err!r}")
+
+
+def test_worker_timeout_terminates_agent_while_control_lock_is_busy(tmp_path, monkeypatch):
+    import time
+    from danus.orchestration.cli import project_control_lock
+    wl, _, _, role = _worker(tmp_path)
+    pidfile = tmp_path / "agent.pid"
+    fake = tmp_path / "fake-agent"
+    fake.write_text("#!/usr/bin/env python3\nimport os,time\n" +
+                    f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("DANUS_CODEX_BIN", str(fake))
+    code = ("from pathlib import Path; from danus.execution import loop, layout as L; " +
+            f"raise SystemExit(loop.run_round(L.WorkerLayout(Path({str(wl.dir)!r})), {role!r}, 'bounded', Path({str(wl.dir / 'timeout.log')!r}), hard_timeout=1))")
+    controller = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        while not pidfile.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pidfile.is_file()
+        pid = int(pidfile.read_text())
+        with project_control_lock(wl.project_dir):
+            time.sleep(1.6)
+            stat = Path(f"/proc/{pid}/stat")
+            assert not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] == "Z", "control-lock wait bypassed the round timeout"
+        assert controller.wait(timeout=5) == 124
+    finally:
+        sandbox._terminate_process_tree(controller)

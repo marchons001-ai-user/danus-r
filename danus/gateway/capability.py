@@ -11,9 +11,9 @@ from danus.core.handoff import HandoffRequests
 EPOCH_FILE = ".gateway-epoch"
 
 
-def _current(root, worker, role, assignment_id=None):
+def _current(root, worker, role, assignment_id=None, *, refresh_stale=True):
     ledger = ProgressLedger(root)
-    current = ledger.current(worker, refresh_stale=True)
+    current = ledger.current(worker, refresh_stale=refresh_stale)
     if (
         not current
         or current["state"] not in {"ASSIGNED", "RUNNING"}
@@ -54,8 +54,12 @@ def issue(root: Path, worker: str, role: str) -> dict:
         return binding
 
 
-def validate(binding: dict) -> None:
-    """Caller holds the existing project/control and assignment locks."""
+def validate(binding: dict, *, refresh_stale=True) -> None:
+    """Authority checks hold the existing project/control and assignment locks.
+
+    A read-only monitor may use refresh_stale=False without locks: it can stop a
+    process, but grants no tool/write authority. It must not block its deadline.
+    """
     try:
         if binding.get("revoked"):
             raise PermissionError("worker capability was revoked")
@@ -63,7 +67,7 @@ def validate(binding: dict) -> None:
         epoch = root / "workers" / binding["worker"] / EPOCH_FILE
         if epoch.read_text() != binding["epoch"]:
             raise PermissionError("worker capability epoch is stale")
-        _current(root, binding["worker"], binding["role"], binding["assignment_id"])
+        _current(root, binding["worker"], binding["role"], binding["assignment_id"], refresh_stale=refresh_stale)
     except (KeyError, OSError, ValueError):
         binding["revoked"] = True
         raise

@@ -16,9 +16,13 @@ from . import layout as L
 from . import context as C
 
 
+def _overlaps(path: Path, other: Path) -> bool:
+    return path == other or path in other.parents or other in path.parents
+
+
 def _outside_control(path: Path, control: Path) -> Path:
     path = sandbox._policy_path(path)
-    if path == control or path in control.parents or control in path.parents:
+    if _overlaps(path, control):
         raise ValueError("worker input/runtime must be outside the control project")
     return path
 
@@ -53,6 +57,17 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             notes = wl.local_memory / "notes"
             notes.mkdir(parents=True, exist_ok=True)
             notes = sandbox._policy_path(notes)
+            inputs = [_outside_control(path, control) for path in L.readonly_inputs(control)]
+            agent_bin = codex.resolve_bin()
+            original_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+            private = [root, original_home.absolute(), original_home.resolve()]
+            if any(_overlaps(path, protected) for path in [workspace, *inputs] for protected in private):
+                raise ValueError("scientific paths overlap trusted worker state or credentials")
+            trusted = [engine, Path(agent_bin).absolute(), Path(agent_bin).resolve(),
+                       Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve(),
+                       Path(__file__).resolve().parents[1]]
+            if any(_overlaps(path, protected) for path in [workspace, notes] for protected in trusted):
+                raise ValueError("scientific writes overlap trusted runtime or launcher")
             (view / "workspace").symlink_to(workspace, target_is_directory=True)
             memory = view / "local_memory"
             memory.mkdir()
@@ -74,7 +89,7 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             readable = [view, _outside_control(proxy, control),
                         _outside_control(Path(sys.prefix), control),
                         _outside_control(Path(sys.base_prefix), control)]
-            readable += [_outside_control(path, control) for path in L.readonly_inputs(control)]
+            readable += inputs
             sandbox._write_profile(
                 home, codex_bin=engine, readable_paths=readable,
                 writable_paths=[workspace, notes, migration], network=False,
@@ -94,12 +109,10 @@ def worker_session(wl: L.WorkerLayout, role: dict):
                 stream.write('args = ' + json.dumps(proxy_cmd[1:]) + '\n')
                 stream.write('tool_timeout_sec = 3600\nrequired = true\ndefault_tools_approval_mode = "approve"\n')
                 stream.write('\n[mcp_servers.danus.env]\nCODEX_HOME = ' + json.dumps(str(home)) + '\n')
-            original_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
             auth = original_home / "auth.json"
             if auth.is_file():
                 shutil.copyfile(auth, home / "auth.json")
                 (home / "auth.json").chmod(0o600)
-            agent_bin = codex.resolve_bin()
             env = codex.subprocess_env(agent_bin)
             env["CODEX_HOME"] = str(home)
             gateway_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
@@ -136,8 +149,7 @@ def worker_session(wl: L.WorkerLayout, role: dict):
 def check_session(session: dict) -> None:
     if session["gateway"].poll() is not None:
         raise PermissionError("external Gateway disconnected")
-    with capability.scope(session["binding"]):
-        pass
+    capability.validate(session["binding"], refresh_stale=False)
 
 
 def command(session: dict, role: dict, prompt: str, *, json_output=False) -> list[str]:

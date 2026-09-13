@@ -328,8 +328,7 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
                                 C.inspect_log(log_path, cursor=cursor)
                                 if not cursor.structured_usage:
                                     raise
-                                with W.capability.scope(session["binding"]):
-                                    pass
+                                W.capability.validate(session["binding"], refresh_stale=False)
                                 remaining = 15 if hard_timeout <= 0 else min(15, hard_timeout - (time.monotonic() - started))
                                 if remaining <= 0:
                                     return 124
@@ -386,8 +385,8 @@ def _run_context_migration(
                             rc = proc.wait(timeout=0.5)
                             if rc != 0:
                                 return None
-                            with W.capability.scope(session["binding"]):
-                                return C.load_migration(session["cwd"])
+                            W.capability.validate(session["binding"], refresh_stale=False)
+                            return C.load_migration(session["cwd"])
                         except subprocess.TimeoutExpired:
                             try:
                                 W.check_session(session)
@@ -402,8 +401,8 @@ def _run_context_migration(
                                     rc = proc.wait(timeout=remaining)
                                 except subprocess.TimeoutExpired:
                                     return None
-                                with W.capability.scope(session["binding"]):
-                                    return C.load_migration(session["cwd"]) if rc == 0 else None
+                                W.capability.validate(session["binding"], refresh_stale=False)
+                                return C.load_migration(session["cwd"]) if rc == 0 else None
                             if time.monotonic() - started >= timeout:
                                 return None
                 finally:

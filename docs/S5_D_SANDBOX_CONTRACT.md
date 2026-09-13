@@ -148,12 +148,17 @@ carries MCP; the proxy never connects a socket or reads control state. The host
 uses kernel sender credentials and a pidfd to revoke the channel on proxy death,
 including when the controller retains an inherited descriptor. Gateway loss aborts
 an active round. After an official completed-turn event, only bounded controller
-cleanup is allowed, with assignment authority rechecked.
+cleanup is allowed, with assignment authority rechecked. The loop uses a
+non-mutating liveness check without taking control locks, so a long Gateway call
+cannot block round timeout handling. Tool and durable-write authority still use
+the existing locks.
 
 The tool view exposes the task, role instructions and a checkpoint snapshot as
 read-only files, with scientific workspace and private notes writable. Actual
 runtime checkpoints, other workers, truth/control files and controller credentials
-are outside the tool policy. Each round requires a current active assignment.
+are outside the tool policy. Each round requires a current active assignment. Scientific paths cannot expose
+the private round/configuration directory or Codex credentials; scientific writes
+cannot cover the trusted launcher, Python runtime or Danus package.
 The DSH worker backend is refused until its tool runner integrates this same
 policy and inherited-descriptor capability model; reducer isolation is independent
 of that backend selection.
