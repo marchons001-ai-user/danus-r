@@ -219,6 +219,8 @@ def _refreeze(store, pid, source, **changes):
     from danus.core.evidence import protocol_identity
     identity = protocol_identity(store.get_protocol(pid))
     identity.pop("bundle_id")
+    identity.pop("execution_runtime", None)
+    identity.pop("runtime_id", None)
     identity.update(changes)
     return store.freeze_protocol(**identity, execution_files=["runner.py", "config.json"], source_root=source)
 

@@ -30,7 +30,7 @@ is testable and reconfigurable:
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import wraps
 import json
 import os
@@ -231,7 +231,7 @@ def fact_submit(
     ``evidence_refs`` and routes to ``/verify/empirical``; do not fabricate a
     prose proof for numerical evidence.
 
-    Once a verdict exists, the outcome is **always** recorded to global memory
+    While authority remains valid, a verdict is recorded to global memory
     (kind ``verification``). If ``source_id`` names the shared finding being
     promoted, a successful fact write also marks that finding ``verified`` and
     back-links the returned ``fact_id``. A rejection does not mark the source
@@ -239,8 +239,10 @@ def fact_submit(
 
     ``external_refs`` remains mutable bibliographic metadata and does not affect
     either analytical or empirical fact identity."""
-    fg = _fg()
-    gm = _gm()
+    binding = _BOUND_WORKER
+    with capability.scope(binding) if binding is not None else nullcontext():
+        fg = _fg()
+        gm = _gm()
     problem_id = os.environ.get("DANUS_PROBLEM_ID", Path(_project()).name)
     kind = (fact_type or "analytical").strip().lower()
     preds = predecessors or []
@@ -308,85 +310,86 @@ def fact_submit(
             out["undefined_symbols"] = undefined
         return out
 
-    verdict = result.get("verdict")
-    accepted = verdict == "correct"
+    with capability.scope(binding) if binding is not None else nullcontext():
+        verdict = result.get("verdict")
+        accepted = verdict == "correct"
 
-    # 2) Write the verified fact. The two types share the same DAG but retain
-    # type-specific identity/body semantics.
-    fact_id = None
-    write_error = None
-    if accepted:
-        try:
+        # 2) Write the verified fact. The two types share the same DAG but retain
+        # type-specific identity/body semantics.
+        fact_id = None
+        write_error = None
+        if accepted:
+            try:
+                if kind == "analytical":
+                    fact_id = fg.add(
+                        problem_id=problem_id, author=_author(), statement=statement, proof=proof,
+                        predecessors=predecessors, glossary_introduces=glossary_introduces,
+                        intuition=intuition, external_refs=external_refs,
+                    )
+                else:
+                    fact_id = fg.add_empirical(
+                        problem_id=problem_id, author=_author(), statement=statement,
+                        scope=empirical_scope, evidence_refs=empirical_refs,
+                        evidence_summary=evidence_summary, predecessors=predecessors,
+                        intuition=intuition, external_refs=external_refs,
+                    )
+            except Exception as e:
+                write_error = str(e)
+
+        # 3) Close the source finding only after the fact really exists. Keep this
+        # separate from the verifier verdict: accepted-but-write-failed is not promoted.
+        promotion_error = None
+        if fact_id and source_id:
+            try:
+                gm.set_status(source_id, "verified", fact_id=fact_id)
+            except Exception as e:
+                promotion_error = str(e)
+
+        # 4) ALWAYS trace once a verifier verdict exists, including write/promotion
+        # failures. Empirical deterministic checks are already embedded in the report.
+        report = result.get("verification_report")
+        gm.append(
+            "verification",
+            claim=statement,
+            evidence="verdict: correct" if accepted else (result.get("repair_hints") or "verdict: wrong"),
+            author=_author(),
+            verifiable=False,
+            links={
+                "source_id": source_id,
+                "predecessors": preds,
+                "evidence_refs": empirical_refs if kind == "empirical" else [],
+            },
+            verification_type=kind,
+            scope=empirical_scope if kind == "empirical" else {},
+            verdict=verdict,
+            fact_id=fact_id,
+            write_error=write_error,
+            promotion_error=promotion_error,
+            verification_report=report,
+        )
+
+        # 5) Return.
+        if not accepted:
+            out = {
+                "accepted": False,
+                "verdict": verdict,
+                "repair_hints": result.get("repair_hints"),
+                "verification_report": report,
+            }
             if kind == "analytical":
-                fact_id = fg.add(
-                    problem_id=problem_id, author=_author(), statement=statement, proof=proof,
-                    predecessors=predecessors, glossary_introduces=glossary_introduces,
-                    intuition=intuition, external_refs=external_refs,
-                )
-            else:
-                fact_id = fg.add_empirical(
-                    problem_id=problem_id, author=_author(), statement=statement,
-                    scope=empirical_scope, evidence_refs=empirical_refs,
-                    evidence_summary=evidence_summary, predecessors=predecessors,
-                    intuition=intuition, external_refs=external_refs,
-                )
-        except Exception as e:
-            write_error = str(e)
-
-    # 3) Close the source finding only after the fact really exists. Keep this
-    # separate from the verifier verdict: accepted-but-write-failed is not promoted.
-    promotion_error = None
-    if fact_id and source_id:
-        try:
-            gm.set_status(source_id, "verified", fact_id=fact_id)
-        except Exception as e:
-            promotion_error = str(e)
-
-    # 4) ALWAYS trace once a verifier verdict exists, including write/promotion
-    # failures. Empirical deterministic checks are already embedded in the report.
-    report = result.get("verification_report")
-    gm.append(
-        "verification",
-        claim=statement,
-        evidence="verdict: correct" if accepted else (result.get("repair_hints") or "verdict: wrong"),
-        author=_author(),
-        verifiable=False,
-        links={
-            "source_id": source_id,
-            "predecessors": preds,
-            "evidence_refs": empirical_refs if kind == "empirical" else [],
-        },
-        verification_type=kind,
-        scope=empirical_scope if kind == "empirical" else {},
-        verdict=verdict,
-        fact_id=fact_id,
-        write_error=write_error,
-        promotion_error=promotion_error,
-        verification_report=report,
-    )
-
-    # 5) Return.
-    if not accepted:
-        out = {
-            "accepted": False,
-            "verdict": verdict,
-            "repair_hints": result.get("repair_hints"),
-            "verification_report": report,
-        }
+                out["undefined_symbols"] = undefined
+            return out
+        if write_error:
+            out = {"accepted": True, "fact_id": None, "write_error": write_error}
+            if kind == "analytical":
+                out["undefined_symbols"] = undefined
+            return out
+        out = {"accepted": True, "fact_id": fact_id}
+        if promotion_error:
+            out["promotion_error"] = promotion_error
         if kind == "analytical":
             out["undefined_symbols"] = undefined
         return out
-    if write_error:
-        out = {"accepted": True, "fact_id": None, "write_error": write_error}
-        if kind == "analytical":
-            out["undefined_symbols"] = undefined
-        return out
-    out = {"accepted": True, "fact_id": fact_id}
-    if promotion_error:
-        out["promotion_error"] = promotion_error
-    if kind == "analytical":
-        out["undefined_symbols"] = undefined
-    return out
 
 
 def fact_search(query: str, limit: int = 10, project: Optional[str] = None) -> Dict[str, Any]:
@@ -865,11 +868,18 @@ def _bound_tool(fn):
     @wraps(fn)
     def call(*args, **kwargs):
         if fn.__name__ in {
-            "experiment_run", "handoff_request", "implementation_submit_contract", "plan_propose_change",
+            "fact_submit", "experiment_run", "handoff_request", "implementation_submit_contract", "plan_propose_change",
             "implementation_review_contract", "plan_review_change",
         }:
             # These functions validate the capability inside their existing locks.
             return fn(*args, **kwargs)
+        if fn.__name__ == "search_arxiv_theorems":
+            binding = _BOUND_WORKER
+            with capability.scope(binding):
+                pass
+            result = fn(*args, **kwargs)
+            with capability.scope(binding):
+                return result
         with capability.scope(_BOUND_WORKER):
             return fn(*args, **kwargs)
     return call

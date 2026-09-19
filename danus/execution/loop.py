@@ -10,6 +10,7 @@ Researcher/Reviewer have no default skills; the Experimenter gets only Ponytail.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 import os
 import re
 import signal
@@ -307,14 +308,28 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
     started = time.monotonic()
     cursor = C.LogCursor()
     parent_pid = os.getpid()
+    role_key = str(role.get("ROLE") or "worker").strip().lower()
+    if role_key not in {*L.SCIENTIFIC_ROLES, "worker"}:
+        return 126
+    scientific = role_key in L.SCIENTIFIC_ROLES
+    if not scientific:
+        handoff_dir = wl.project_dir / ".danus"
+        handoff_dir.mkdir(parents=True, exist_ok=True)
+        agent = codex.resolve_bin()
+        tail = ["--json"] if context_budget and codex.backend() != "dsh" else []
+        cmd = codex.exec_cmd(agent, role["MODEL"], role["REASONING_EFFORT"],
+                            *tail, "-C", str(wl.dir), "--add-dir", str(handoff_dir),
+                            "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", prompt)
     with open(log_path, "w", encoding="utf-8") as logf:
         try:
-            with W.worker_session(wl, role) as session:
-                cmd = W.command(session, role, prompt, json_output=True)
+            with W.worker_session(wl, role) if scientific else nullcontext() as session:
+                if scientific:
+                    cmd = W.command(session, role, prompt, json_output=True)
                 _Child.proc = subprocess.Popen(
                     cmd, stdout=logf, stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL, cwd=str(session["cwd"]),
-                    env=session["env"], pass_fds=(session["fd"],), start_new_session=True,
+                    stdin=subprocess.DEVNULL, cwd=str(session["cwd"] if scientific else wl.dir),
+                    env=session["env"] if scientific else codex.subprocess_env(agent),
+                    pass_fds=(session["fd"],) if scientific else (), start_new_session=True,
                     preexec_fn=lambda: _arm_parent_death(parent_pid),
                 )
                 try:
@@ -323,7 +338,8 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
                             return _Child.proc.wait(timeout=0.5)
                         except subprocess.TimeoutExpired:
                             try:
-                                W.check_session(session)
+                                if scientific:
+                                    W.check_session(session)
                             except PermissionError:
                                 C.inspect_log(log_path, cursor=cursor)
                                 if not cursor.structured_usage:
@@ -453,11 +469,9 @@ def main(worker_dir: str) -> int:
     auto_reviewer = backend == "auto" and role_key == "reviewer"
     if backend:
         if auto_reviewer:
-            selected = str(prior_status.get("reviewer_backend_selected") or "dsh").lower()
-            os.environ["CODEX_BACKEND"] = selected if selected in {"chatgpt", "dsh"} else "dsh"
-            selected_model = str(prior_status.get("reviewer_model_selected") or "").strip()
-            if selected_model:
-                role["MODEL"] = selected_model
+            from danus.orchestration.cli import _REVIEWER_TERRA_MODEL
+            os.environ["CODEX_BACKEND"] = "chatgpt"
+            role["MODEL"] = _REVIEWER_TERRA_MODEL
         else:
             os.environ["CODEX_BACKEND"] = backend
 

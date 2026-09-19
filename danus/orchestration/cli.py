@@ -164,8 +164,8 @@ def _selected_worker_backend(wl: L.WorkerLayout) -> str:
     if backend == "dsh":
         return "dsh"
     if backend == "auto" and _read_worker_role(wl) == "reviewer":
-        selected = str(_read_status(wl).get("reviewer_backend_selected") or "dsh").lower()
-        return selected if selected in {"chatgpt", "dsh"} else "dsh"
+        selected = str(_read_status(wl).get("reviewer_backend_selected") or "chatgpt").lower()
+        return selected if selected in {"chatgpt", "dsh"} else "chatgpt"
     return "chatgpt"
 
 
@@ -225,7 +225,7 @@ def _persist_reviewer_backend(
         "reviewer_backend_quota_state": decision["quota_state"],
         "reviewer_backend_selected_at": utc_now(),
     })
-    if backend == "dsh":
+    if status.get("reviewer_dsh_quota_assignment_id") != assignment_id:
         status.pop("reviewer_dsh_quota_exhausted", None)
         status.pop("reviewer_dsh_quota_assignment_id", None)
     atomic_write(wl.status, json.dumps(status, ensure_ascii=False, indent=2) + "\n")

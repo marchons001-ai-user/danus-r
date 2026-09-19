@@ -180,6 +180,8 @@ def reduce_metrics_sandboxed(
     artifacts: List[Dict[str, Any]],
 ) -> Dict[str, float]:
     """Recompute primary metrics without executing project code in this process."""
+    from . import runtime
+    runtime.validate(protocol)
     root = Path(project_dir).resolve()
     reducer_path, function_name, artifact_paths = _validated_reducer_inputs(
         root, protocol, artifacts
@@ -218,6 +220,7 @@ def reduce_metrics_sandboxed(
             runner_source = _RUNNER_SOURCE.replace("# NORMALIZE_METRICS", inspect.getsource(_normalize_metrics))
             compile(runner_source, str(runner_path), "exec")
             runner_path.write_text(runner_source, encoding="utf-8")
+            runtime.validate(protocol)
             completed = run_sandboxed(
                 [sys.executable, "-I", str(runner_path), str(request_path)],
                 cwd=result_dir,
@@ -228,6 +231,7 @@ def reduce_metrics_sandboxed(
                 timeout=REDUCER_TIMEOUT_SECONDS,
             )
 
+    runtime.validate(protocol)
     if completed.returncode != 0:
         detail = (completed.stderr or "").strip()
         suffix = f": {detail[-500:]}" if detail else ""

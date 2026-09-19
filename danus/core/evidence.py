@@ -52,6 +52,9 @@ def protocol_identity(protocol: Dict[str, Any]) -> Dict[str, Any]:
         identity["metric_reducer"] = protocol.get("metric_reducer")
     if "bundle_id" in protocol:
         identity["bundle_id"] = protocol["bundle_id"]
+    for key in ("execution_runtime", "runtime_id"):
+        if key in protocol:
+            identity[key] = protocol[key]
     return identity
 
 
@@ -192,7 +195,10 @@ class EvidenceStore:
             "revision_reason": revision_reason.strip(),
         }
         if reducer is not None:
+            from . import runtime
             identity["metric_reducer"] = reducer
+            identity["execution_runtime"] = runtime.identity()
+            identity["runtime_id"] = runtime._digest(identity["execution_runtime"])
         if execution_files is not None:
             from . import bundle
             if reducer is None or not isinstance(matrix, dict) or not isinstance(matrix.get("units"), list):

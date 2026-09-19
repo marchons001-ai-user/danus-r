@@ -230,17 +230,21 @@ def run_sandboxed(
         started = time.monotonic()
         try:
             while True:
-                interval = None if authorize is None else 0.5
+                interval = 0.5
                 if timeout is not None:
                     remaining = timeout - (time.monotonic() - started)
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(cmd, timeout)
-                    interval = min(interval, remaining) if interval is not None else remaining
+                    interval = min(interval, remaining)
                 try:
                     stdout, stderr = proc.communicate(timeout=interval)
+                    if proc.returncode != 0:
+                        _send_tree_signal(proc, signal.SIGKILL)
                     with guard():
                         break
                 except subprocess.TimeoutExpired:
+                    if proc.poll() is not None:
+                        _send_tree_signal(proc, signal.SIGKILL)
                     with guard():
                         pass
                     if timeout is not None and time.monotonic() - started >= timeout:

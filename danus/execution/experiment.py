@@ -264,11 +264,14 @@ def _run_experiment(project_dir: Path, protocol_id: str, *, author: str, lock_fd
 
     if not protocol.get("bundle_id"):
         raise ValueError("runnable protocol requires frozen execution bundle; freeze a new protocol")
+    from danus.core import runtime
+    runtime.validate(protocol)
     with bundle.snapshot(root, protocol["bundle_id"]) as (workspace, manifest):
         return _run_frozen(root, protocol_id, protocol, store, workspace, manifest, author, lock_fd, authorize)
 
 
 def _run_frozen(root, protocol_id, protocol, store, workspace, manifest, author, lock_fd, authorize):
+    from danus.core import runtime
     guard = authorize or nullcontext
     with guard():
         pass
@@ -367,12 +370,14 @@ def _run_frozen(root, protocol_id, protocol, store, workspace, manifest, author,
         outputs = {name: str(scratch / name) for name in unit["artifacts"]}
         argv = [sys.executable, "-B", str(workspace / unit["argv"][1]),
                 *[outputs.get(arg, arg) for arg in unit["argv"][2:]]]
+        runtime.validate(protocol)
         proc = sandbox.run_sandboxed(
             argv, cwd=workspace,
             readable_paths=[workspace, Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()],
             writable_paths=[scratch], workspace_access="read", network=False, env={},
             pass_fds=(lock_fd,), authorize=authorize,
         )
+        runtime.validate(protocol)
         log_path.write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
         if proc.returncode != 0:
             with guard():

@@ -131,23 +131,13 @@ def reviewer_cost_policy(
     dsh_available: bool,
     dsh_quota_exhausted: bool = False,
 ) -> Dict[str, Any]:
-    """Choose the backend for an explicitly auto-managed Reviewer.
-
-    Reviewer heterogeneity is intentional: DSH/DeepSeek is the primary backend.
-    Terra is a fallback only after the current Reviewer assignment receives DSH's
-    explicit provider-neutral ``QUOTA`` failure. Missing DSH provisioning, transient
-    rate limits, auth failures, and other errors do not silently consume Terra.
-    """
+    """Auto Reviewers use the supported isolated Codex backend."""
     state = str(quota.get("state") or "UNKNOWN").upper()
     codex_blocked = bool(quota.get("block_new_codex_rounds"))
-    if dsh_quota_exhausted:
-        backend = "chatgpt"
-        reason = "dsh_quota_exhausted_fallback_terra"
-    else:
-        backend = "dsh"
-        reason = "dsh_primary" if dsh_available else "dsh_primary_unavailable"
+    backend = "chatgpt"
+    reason = "dsh_isolation_unavailable"
     return {
-        "policy": "dsh_first_terra_fallback",
+        "policy": "isolated_codex",
         "quota_state": state,
         "codex_blocked": codex_blocked,
         "dsh_available": bool(dsh_available),

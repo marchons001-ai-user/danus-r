@@ -85,7 +85,7 @@ def test_role_without_backend_keeps_global_backend(tmp: Path):
     assert models == ["gpt-5.5"]
 
 
-def test_auto_reviewer_uses_persisted_dsh_selection(tmp: Path):
+def test_auto_reviewer_rejects_persisted_dsh_selection(tmp: Path):
     wl = _worker(
         tmp,
         "BACKEND=auto\nROLE=reviewer\nMODEL=deepseek-v4-flash\nREASONING_EFFORT=high\n",
@@ -96,19 +96,19 @@ def test_auto_reviewer_uses_persisted_dsh_selection(tmp: Path):
     }), encoding="utf-8")
     with _env(CODEX_BACKEND="chatgpt"):
         backends, models = _run_once(wl)
-    assert backends == ["dsh", "dsh"]
-    assert models == ["deepseek-v4-flash"]
+    assert backends == ["chatgpt", "chatgpt"]
+    assert models == ["gpt-5.6-terra"]
 
 
-def test_auto_reviewer_without_selection_defaults_to_dsh(tmp: Path):
+def test_auto_reviewer_without_selection_defaults_to_isolated_codex(tmp: Path):
     wl = _worker(
         tmp,
         "BACKEND=auto\nROLE=reviewer\nMODEL=deepseek-v4-flash\nREASONING_EFFORT=high\n",
     )
     with _env(CODEX_BACKEND="chatgpt"):
         backends, models = _run_once(wl)
-    assert backends == ["dsh", "dsh"]
-    assert models == ["deepseek-v4-flash"]
+    assert backends == ["chatgpt", "chatgpt"]
+    assert models == ["gpt-5.6-terra"]
 
 
 def test_auto_reviewer_terra_fallback_uses_chatgpt_backend_and_terra_model(tmp: Path):
@@ -130,8 +130,8 @@ def main() -> None:
     tests = [
         test_role_backend_overrides_global_backend,
         test_role_without_backend_keeps_global_backend,
-        test_auto_reviewer_uses_persisted_dsh_selection,
-        test_auto_reviewer_without_selection_defaults_to_dsh,
+        test_auto_reviewer_rejects_persisted_dsh_selection,
+        test_auto_reviewer_without_selection_defaults_to_isolated_codex,
         test_auto_reviewer_terra_fallback_uses_chatgpt_backend_and_terra_model,
     ]
     for test in tests:
