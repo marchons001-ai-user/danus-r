@@ -25,9 +25,15 @@ def test_monitor_sigkill_removes_sandbox_descendants_with_caller_alive(tmp_path)
               f"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', {str(marker)!r}], start_new_session=True); "
               f"Path({str(ready)!r}).touch(); time.sleep(60)")
     command = [sys.executable, "-I", "-c", source, str(marker)]
-    caller_source = ("from pathlib import Path; from danus.sandbox import run_sandboxed; "
-        f"run_sandboxed({command!r}, cwd=Path({str(tmp_path)!r}), "
-        f"readable_paths=[Path({sys.prefix!r}),Path({sys.base_prefix!r})], timeout=20); "
+    caller_source = ("from pathlib import Path\n"
+        "from danus.sandbox import run_sandboxed, SandboxInterrupted\n"
+        "try:\n"
+        f"    run_sandboxed({command!r}, cwd=Path({str(tmp_path)!r}), "
+        f"readable_paths=[Path({sys.prefix!r}),Path({sys.base_prefix!r})], timeout=20)\n"
+        "except SandboxInterrupted:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise RuntimeError('monitor death returned an ordinary command result')\n"
         "import time; time.sleep(60)")
     caller = subprocess.Popen([sys.executable, "-c", caller_source], start_new_session=True)
     monitor = None

@@ -18,6 +18,10 @@ from typing import Mapping, Sequence
 _ENV_ALLOWLIST = frozenset({"HOME", "LANG", "LC_ALL", "TZ"})
 
 
+class SandboxInterrupted(RuntimeError):
+    """The host monitor did not establish a completed sandbox command."""
+
+
 def _toml_key(path: Path) -> str:
     return json.dumps(str(path))
 
@@ -191,7 +195,9 @@ def run_sandboxed(
     config_home = Path(
         tempfile.mkdtemp(prefix="codex-home-", dir=str(_sandbox_home_root()))
     )
+    completion = None
     try:
+        completion = tempfile.TemporaryFile()
         _write_profile(
             config_home,
             codex_bin=codex_bin,
@@ -215,7 +221,7 @@ def run_sandboxed(
             with guard():
                 proc = subprocess.Popen(
                     [sys.executable, "-I", str(Path(__file__).resolve()), str(owner_fd),
-                     ",".join(map(str, pass_fds)), *cmd],
+                     str(completion.fileno()), ",".join(map(str, pass_fds)), *cmd],
                     cwd=str(root),
                     env=_sandbox_env(config_home, codex_bin, env),
                     stdin=subprocess.DEVNULL,
@@ -223,7 +229,7 @@ def run_sandboxed(
                     stderr=subprocess.PIPE,
                     text=True,
                     start_new_session=True,
-                    pass_fds=(owner_fd, *pass_fds),
+                    pass_fds=(owner_fd, completion.fileno(), *pass_fds),
                 )
         finally:
             os.close(owner_fd)
@@ -249,6 +255,19 @@ def run_sandboxed(
                         pass
                     if timeout is not None and time.monotonic() - started >= timeout:
                         raise
+            if proc.returncode != 0:
+                raise SandboxInterrupted(f"sandbox monitor interrupted with rc={proc.returncode}")
+            completion.seek(0)
+            try:
+                returncode = int(completion.read(32))
+            except ValueError as exc:
+                _send_tree_signal(proc, signal.SIGKILL)
+                raise SandboxInterrupted("sandbox monitor exited without a command result") from exc
+            if returncode < 0:
+                _send_tree_signal(proc, signal.SIGKILL)
+                raise SandboxInterrupted(f"sandbox engine interrupted with rc={returncode}")
+            if returncode != 0:
+                _send_tree_signal(proc, signal.SIGKILL)
         except subprocess.TimeoutExpired as exc:
             _terminate_process_tree(proc)
             try:
@@ -261,8 +280,10 @@ def run_sandboxed(
         except BaseException:
             _terminate_process_tree(proc)
             raise
-        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
     finally:
+        if completion is not None:
+            completion.close()
         shutil.rmtree(config_home, ignore_errors=True)
 
 
@@ -288,21 +309,27 @@ def _watch_command() -> int:
     import select
 
     owner = int(sys.argv[1])
-    inherited = tuple(int(fd) for fd in sys.argv[2].split(",") if fd)
+    completion = int(sys.argv[2])
+    inherited = tuple(int(fd) for fd in sys.argv[3].split(",") if fd)
     if select.select([owner], [], [], 0)[0]:
         return 126
-    child = subprocess.Popen(sys.argv[3:], pass_fds=inherited)
+    # Only the trusted monitor can attest completion; neither private fd enters
+    # the sandbox command.
+    child = subprocess.Popen(sys.argv[4:], pass_fds=inherited)
     try:
         child_fd = os.pidfd_open(child.pid)
     except ProcessLookupError:
-        return child.wait()
-    try:
-        ready, _, _ = select.select([owner, child_fd], [], [])
-        if owner in ready:
-            os.killpg(os.getpgrp(), signal.SIGKILL)
-        return child.wait()
-    finally:
-        os.close(child_fd)
+        returncode = child.wait()
+    else:
+        try:
+            ready, _, _ = select.select([owner, child_fd], [], [])
+            if owner in ready:
+                os.killpg(os.getpgrp(), signal.SIGKILL)
+            returncode = child.wait()
+        finally:
+            os.close(child_fd)
+    os.write(completion, str(returncode).encode("ascii"))
+    return 0
 
 
 if __name__ == "__main__":
