@@ -31,8 +31,14 @@ def identity():
         record = dist.read_text("RECORD")
         if record is None:
             raise ValueError("execution runtime dependency has no installed RECORD")
+        unhashed = []
         for entry in dist.files or []:
             if entry.hash is None:
+                path = Path(dist.locate_file(entry))
+                unhashed.append({
+                    "path": str(entry), "sha256": _file_digest(path).hex(),
+                    "size": path.stat().st_size,
+                })
                 continue
             actual = _file_digest(dist.locate_file(entry), entry.hash.mode)
             if base64.urlsafe_b64encode(actual).rstrip(b"=").decode() != entry.hash.value:
@@ -40,6 +46,7 @@ def identity():
         dependencies.append({
             "name": dist.metadata["Name"], "version": dist.version,
             "record": hashlib.sha256(record.encode()).hexdigest(),
+            "unhashed_sha256": _digest(sorted(unhashed, key=lambda item: item["path"])),
             "metadata": hashlib.sha256((dist.read_text("METADATA") or "").encode()).hexdigest(),
             "direct_url": dist.read_text("direct_url.json"),
         })
