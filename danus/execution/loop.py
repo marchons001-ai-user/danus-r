@@ -9,8 +9,8 @@ Researcher/Reviewer have no default skills; the Experimenter gets only Ponytail.
 
 from __future__ import annotations
 
-import ctypes
 import json
+from contextlib import nullcontext
 import os
 import re
 import signal
@@ -24,6 +24,8 @@ from . import context as C
 from . import layout as L
 from . import scaffold
 from danus import codex
+from danus.sandbox import _arm_parent_death
+from . import worker as W
 from danus.core import ProgressLedger
 from danus.core._util import read_jsonl
 from danus.core.handoff import HandoffRequests
@@ -31,7 +33,6 @@ from danus.gateway.roles import tools_for
 
 _FACT_ID_RE = re.compile(r"(?i:fact(?:_|\s+)id)\b[\"'`\s]*[:=]?\s*[\"'`]?([0-9a-f]{16})[\"'`]?")
 _OUTCOME_RE = re.compile(r"(?im)^DANUS_OUTCOME:\s*(COMPLETE|BLOCKED|NEEDS_REVIEW)\s*$")
-_LIBC = ctypes.CDLL(None, use_errno=True) if sys.platform.startswith("linux") else None
 
 
 # --- the per-round prompt -------------------------------------------------- #
@@ -267,16 +268,6 @@ class _Child:
     proc: "subprocess.Popen | None" = None
 
 
-def _arm_parent_death(expected_parent_pid: int) -> None:
-    """Linux: a scientific model/migration process must not outlive its worker."""
-    if _LIBC is None:
-        return
-    if _LIBC.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
-        os._exit(126)
-    if os.getppid() != expected_parent_pid:
-        os.kill(os.getpid(), signal.SIGKILL)
-
-
 def _send_tree_signal(proc, sig: int) -> bool:
     pid = getattr(proc, "pid", None)
     if isinstance(pid, int) and pid > 0:
@@ -313,106 +304,127 @@ def _terminate_child() -> None:
 
 def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
               hard_timeout: int, context_budget: bool = False) -> int:
-    """Exec one session. 124=hard timeout, 125=context rollover, 127=missing."""
-    wdir = wl.dir
-    project_dir = wl.project_dir
-    # The autonomous-planning handoff writes a JSON file to <project>/.danus/.
-    # Codex's workspace-write sandbox otherwise treats that as outside -C, so
-    # add the handoff directory as an explicit writable root.
-    handoff_dir = project_dir / ".danus"
-    handoff_dir.mkdir(parents=True, exist_ok=True)
-    codex_bin = codex.resolve_bin()
-    tail = []
-    if context_budget and codex.backend() != "dsh":
-        tail.append("--json")
-    tail += [
-        "-C", str(wdir),
-        "--add-dir", str(handoff_dir),
-        "--skip-git-repo-check",
-        "--dangerously-bypass-approvals-and-sandbox",
-        prompt,
-    ]
-    cmd = codex.exec_cmd(codex_bin, role["MODEL"], role["REASONING_EFFORT"], *tail)
+    """124=timeout, 125=context rollover, 126=authority failure, 127=missing engine."""
     started = time.monotonic()
     cursor = C.LogCursor()
     parent_pid = os.getpid()
+    role_key = str(role.get("ROLE") or "worker").strip().lower()
+    if role_key not in {*L.SCIENTIFIC_ROLES, "worker"}:
+        return 126
+    scientific = role_key in L.SCIENTIFIC_ROLES
+    if not scientific:
+        handoff_dir = wl.project_dir / ".danus"
+        handoff_dir.mkdir(parents=True, exist_ok=True)
+        agent = codex.resolve_bin()
+        tail = ["--json"] if context_budget and codex.backend() != "dsh" else []
+        cmd = codex.exec_cmd(agent, role["MODEL"], role["REASONING_EFFORT"],
+                            *tail, "-C", str(wl.dir), "--add-dir", str(handoff_dir),
+                            "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", prompt)
     with open(log_path, "w", encoding="utf-8") as logf:
         try:
-            _Child.proc = subprocess.Popen(
-                cmd, stdout=logf, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, cwd=str(wdir),
-                env=codex.subprocess_env(codex_bin),
-                start_new_session=True,
-                preexec_fn=(lambda: _arm_parent_death(parent_pid)) if context_budget else None,
-            )
-        except FileNotFoundError:
-            logf.write(f"[worker_loop] codex binary not found: {cmd[0]}\n")
-            return 127
-        try:
-            if not context_budget:
+            with W.worker_session(wl, role) if scientific else nullcontext() as session:
+                if scientific:
+                    cmd = W.command(session, role, prompt, json_output=True)
+                _Child.proc = subprocess.Popen(
+                    cmd, stdout=logf, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, cwd=str(session["cwd"] if scientific else wl.dir),
+                    env=session["env"] if scientific else codex.subprocess_env(agent),
+                    pass_fds=(session["fd"],) if scientific else (), start_new_session=True,
+                    preexec_fn=lambda: _arm_parent_death(parent_pid),
+                )
                 try:
-                    return _Child.proc.wait(timeout=hard_timeout if hard_timeout > 0 else None)
-                except subprocess.TimeoutExpired:
+                    while True:
+                        try:
+                            return _Child.proc.wait(timeout=0.5)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                if scientific:
+                                    W.check_session(session)
+                            except PermissionError:
+                                C.inspect_log(log_path, cursor=cursor)
+                                if not cursor.structured_usage:
+                                    raise
+                                W.capability.validate(session["binding"], refresh_stale=False)
+                                remaining = 15 if hard_timeout <= 0 else min(15, hard_timeout - (time.monotonic() - started))
+                                if remaining <= 0:
+                                    return 124
+                                try:
+                                    return _Child.proc.wait(timeout=remaining)
+                                except subprocess.TimeoutExpired:
+                                    return 124
+                            elapsed = time.monotonic() - started
+                            if hard_timeout > 0 and elapsed >= hard_timeout:
+                                logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
+                                return 124
+                            if context_budget:
+                                telemetry = C.inspect_log(log_path, cursor=cursor)
+                                live_telemetry = dict(telemetry)
+                                live_telemetry["tokens"] = 0
+                                reason = C.budget_reason(live_telemetry, elapsed)
+                                if reason:
+                                    C.write_rollover_request(wl.dir, reason, telemetry)
+                                    logf.write(f"\n[worker_loop] context rollover: {reason}\n")
+                                    return 125
+                finally:
                     _terminate_child()
-                    logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
-                    return 124
-
-            while True:
-                try:
-                    return _Child.proc.wait(timeout=0.5)
-                except subprocess.TimeoutExpired:
-                    elapsed = time.monotonic() - started
-                    if hard_timeout > 0 and elapsed >= hard_timeout:
-                        _terminate_child()
-                        logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
-                        return 124
-                    telemetry = C.inspect_log(log_path, cursor=cursor)
-                    live_telemetry = dict(telemetry)
-                    live_telemetry["tokens"] = 0
-                    reason = C.budget_reason(live_telemetry, elapsed)
-                    if reason:
-                        _terminate_child()
-                        C.write_rollover_request(wdir, reason, telemetry)
-                        logf.write(f"\n[worker_loop] context rollover: {reason}\n")
-                        return 125
-        finally:
-            _Child.proc = None
+                    _Child.proc = None
+        except FileNotFoundError as exc:
+            logf.write(f"[worker_loop] required sandbox/runtime file not found: {exc}\n")
+            return 127
+        except (OSError, ValueError, RuntimeError) as exc:
+            logf.write(f"[worker_loop] worker isolation refused: {exc}\n")
+            return 126
 
 
 def _run_context_migration(
     wl: L.WorkerLayout, role: dict, reason: str, prior_log: Path, hard_timeout: int,
 ) -> Optional[dict]:
-    out_path = C.migration_path(wl.dir)
-    out_path.unlink(missing_ok=True)
     prompt = C.migration_prompt(wl.dir, reason, prior_log)
-    codex_bin = codex.resolve_bin()
-    cmd = codex.exec_cmd(
-        codex_bin, role["MODEL"], "low",
-        "-C", str(wl.dir),
-        "--skip-git-repo-check",
-        "--dangerously-bypass-approvals-and-sandbox",
-        prompt,
-    )
     log_path = wl.logs / f"migration_{prior_log.stem.removeprefix('round_')}.log"
     timeout = min(hard_timeout, 300) if hard_timeout > 0 else 300
+    cursor = C.LogCursor()
     parent_pid = os.getpid()
     with open(log_path, "w", encoding="utf-8") as logf:
         try:
-            proc = subprocess.Popen(
-                cmd, stdout=logf, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, cwd=str(wl.dir),
-                env=codex.subprocess_env(codex_bin),
-                start_new_session=True,
-                preexec_fn=lambda: _arm_parent_death(parent_pid),
-            )
-        except FileNotFoundError:
+            with W.worker_session(wl, role) as session:
+                cmd = W.command(session, {**role, "REASONING_EFFORT": "low"}, prompt, json_output=True)
+                proc = subprocess.Popen(
+                    cmd, stdout=logf, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, cwd=str(session["cwd"]), env=session["env"],
+                    pass_fds=(session["fd"],), start_new_session=True,
+                    preexec_fn=lambda: _arm_parent_death(parent_pid),
+                )
+                started = time.monotonic()
+                try:
+                    while True:
+                        try:
+                            rc = proc.wait(timeout=0.5)
+                            if rc != 0:
+                                return None
+                            W.capability.validate(session["binding"], refresh_stale=False)
+                            return C.load_migration(session["cwd"])
+                        except subprocess.TimeoutExpired:
+                            try:
+                                W.check_session(session)
+                            except PermissionError:
+                                C.inspect_log(log_path, cursor=cursor)
+                                if not cursor.structured_usage:
+                                    raise
+                                remaining = min(15, timeout - (time.monotonic() - started))
+                                if remaining <= 0:
+                                    return None
+                                try:
+                                    rc = proc.wait(timeout=remaining)
+                                except subprocess.TimeoutExpired:
+                                    return None
+                                W.capability.validate(session["binding"], refresh_stale=False)
+                                return C.load_migration(session["cwd"]) if rc == 0 else None
+                            if time.monotonic() - started >= timeout:
+                                return None
+                finally:
+                    _terminate_process_tree(proc)
+        except (OSError, ValueError, RuntimeError):
             return None
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _terminate_process_tree(proc)
-            return None
-    return C.load_migration(wl.dir)
 
 
 # --- the loop -------------------------------------------------------------- #
@@ -457,11 +469,9 @@ def main(worker_dir: str) -> int:
     auto_reviewer = backend == "auto" and role_key == "reviewer"
     if backend:
         if auto_reviewer:
-            selected = str(prior_status.get("reviewer_backend_selected") or "dsh").lower()
-            os.environ["CODEX_BACKEND"] = selected if selected in {"chatgpt", "dsh"} else "dsh"
-            selected_model = str(prior_status.get("reviewer_model_selected") or "").strip()
-            if selected_model:
-                role["MODEL"] = selected_model
+            from danus.orchestration.cli import _REVIEWER_TERRA_MODEL
+            os.environ["CODEX_BACKEND"] = "chatgpt"
+            role["MODEL"] = _REVIEWER_TERRA_MODEL
         else:
             os.environ["CODEX_BACKEND"] = backend
 
@@ -485,6 +495,9 @@ def main(worker_dir: str) -> int:
         context_tokens_total = 0
 
     ledger = _progress_ledger(wl)
+    if ledger is not None:
+        with ledger.assignment_lock():
+            pass
     exit_recorded = False
 
     def _record_exit(reason: str, **details) -> None:
@@ -515,6 +528,27 @@ def main(worker_dir: str) -> int:
         current = ledger.current(worker, refresh_stale=True)
         if current is not None:
             assignment_id = str(current.get("assignment_id") or "")
+            checkpoint = C.checkpoint_for_prompt(wl.dir, role_name, assignment=current)
+            if (
+                current["state"] in {"ASSIGNED", "RUNNING"}
+                and _assignment_task_matches(wl, current)
+                and checkpoint
+                and checkpoint.get("returncode") in (0, 125)
+                and checkpoint.get("terminal_outcome") in ProgressLedger.TERMINAL_OUTCOMES
+                and checkpoint.get("checkpoint_id")
+                and checkpoint["checkpoint_id"] != current.get("checkpoint_id")
+            ):
+                recovered_outcome = checkpoint["terminal_outcome"]
+                current = ledger.update(
+                    worker=worker,
+                    state="DONE" if recovered_outcome == "COMPLETE" else "BLOCKED",
+                    actor="runtime",
+                    note="recovered checkpointed terminal outcome",
+                    outcome=recovered_outcome,
+                    expected_assignment_id=assignment_id,
+                    result=str(checkpoint.get("last_agent_message") or ""),
+                    checkpoint_id=checkpoint["checkpoint_id"],
+                )
             ledger.runtime_event(
                 worker=worker,
                 kind="STARTED",
@@ -567,6 +601,10 @@ def main(worker_dir: str) -> int:
     migration_failures = 0
     try:
         while True:
+            if wl.pause.exists() or (project_dir / L.PAUSE_FILE).exists():
+                write_status(wl, state="paused")
+                _record_exit("paused")
+                break
             round_assignment = None
             if ledger is not None:
                 current = ledger.current(worker, refresh_stale=True)
@@ -625,6 +663,9 @@ def main(worker_dir: str) -> int:
             log_path = wl.logs / f"round_{rnd}.log"
             round_started = time.time()
             prompt = kickoff(project, worker, role_name)
+            if round_assignment is not None:
+                prompt += f"\n\nCurrent Assignment ID: `{round_assignment['assignment_id']}`. Copy this ID into any Plan proposal's `assignment_id`.\n"
+                scaffold.write_codex_config(wl, role_name, round_assignment)
             write_status(wl, state="running", round=rnd, round_started_at=round_started)
             if scientific:
                 rc = run_round(
@@ -664,6 +705,7 @@ def main(worker_dir: str) -> int:
                 C.write_checkpoint(
                     wl.dir, role=role_name, round_no=rnd, telemetry=telemetry,
                     trigger=trigger, assignment=round_assignment,
+                    returncode=rc, terminal_outcome=outcome,
                 )
 
                 migration_attempted = False
@@ -672,6 +714,8 @@ def main(worker_dir: str) -> int:
                     and not outcome
                     and not dsh_quota
                     and not wl.stop.exists()
+                    and not wl.pause.exists()
+                    and not (project_dir / L.PAUSE_FILE).exists()
                     and (not round_limit or rnd < round_limit)
                 ):
                     migration_attempted = True
@@ -710,6 +754,7 @@ def main(worker_dir: str) -> int:
             if outcome and ledger is not None and round_assignment is not None:
                 progress_state = "DONE" if outcome == "COMPLETE" else "BLOCKED"
                 assignment_id = str(round_assignment.get("assignment_id") or "")
+                checkpoint = C.checkpoint_for_prompt(wl.dir, role_name, assignment=round_assignment)
                 try:
                     ledger.update(
                         worker=worker,
@@ -719,6 +764,7 @@ def main(worker_dir: str) -> int:
                         outcome=outcome,
                         expected_assignment_id=assignment_id,
                         result=str(telemetry.get("last_agent_message") or ""),
+                        checkpoint_id=str((checkpoint or {}).get("checkpoint_id") or ""),
                     )
                 except ValueError:
                     latest = ledger.current(worker, refresh_stale=True)

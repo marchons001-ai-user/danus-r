@@ -30,10 +30,15 @@ given result.
 
 ## 2. Permission is enforced by construction, not by prompts
 
-Danus does not rely on agents "behaving". Every read/write to the truth stores goes
-through the **gateway** (a role-gated MCP server), and **what a role can do is
-exactly which tools it can even see** — ungated tools are physically absent from an
-agent's tool surface, not merely discouraged.
+Scientific roles (researcher/reviewer/experimenter) run tools and their MCP proxy
+inside the official Codex OS sandbox. Truth/control stores are inaccessible there;
+the external Gateway binds each session to its worker, role, Assignment and epoch.
+Scientific DSH execution is refused until it supports this isolation. Auto
+Reviewers use isolated Codex/ChatGPT and remain subject to its quota gate.
+
+Legacy ROLE=worker keeps its historical execution path without an Assignment.
+Its Gateway tool list is an interface restriction, not an OS isolation guarantee.
+The scientific isolation guarantee does not apply to legacy workers.
 
 The role table (`danus/gateway/roles.py`):
 
@@ -43,10 +48,10 @@ The role table (`danus/gateway/roles.py`):
 | **main** (the orchestrator) | `gm_add`, `gm_search`, `fact_search`, `fact_revoke`, `search_arxiv_theorems` — **no `fact_submit`** |
 | **verifier** | `search_arxiv_theorems` **only** (read-only) |
 
-Load-bearing separations:
+Gateway interface restrictions:
 
 - **The orchestrator can never fabricate a fact.** `main` has no `fact_submit`;
-  only a `worker` can submit, and only the verifier can accept.
+  only roles exposing `fact_submit` can submit, and only the verifier can accept.
 - **The verifier is read-only.** It can look up literature; it writes nothing to
   the truth stores.
 - **Fail-closed.** An unknown, mis-typed, or *unset* role falls back to the
@@ -58,19 +63,24 @@ Load-bearing separations:
 The single path a fact enters truth is a worker's `fact_submit`, which is a
 state machine, not a suggestion:
 
-1. call the verify service with the statement + proof;
-2. **write the fact iff the verdict is `correct`** — the gate is this one code path;
-3. **always** trace the verdict to global memory (accept, reject, or write-failed),
-   so the verifier can stay stateless and no verdict is lost.
+1. validate a bound scientific session under the control and Assignment locks;
+2. release those locks before calling the verify service;
+3. reacquire the locks and validate the same Assignment and epoch, including pause;
+4. write the fact only for a `correct` verdict with still-valid authority, then trace
+   the verdict and any promotion outcome to global memory under the same locks.
+
+Revoked authority cannot promote a fact or write a verification trace. Literature
+search also releases these locks during network I/O and revalidates before returning.
 
 If the verify service is unreachable, `fact_submit` returns a clean error and
 writes nothing — nothing is silently accepted.
 
 ## 4. The verifier runs with the sandbox bypassed — trust its home and isolate the host
 
-The worker and verifier `codex` sessions are launched with
+Legacy worker and analytical verifier `codex` sessions are launched with
 `--dangerously-bypass-approvals-and-sandbox`. This is required for autonomous
-operation, and it means Danus's host-level safety rests on two assumptions you must
+operation on those trusted paths. Scientific tools, experiment units and empirical
+reducers use the official sandbox. The trusted paths still rest on two assumptions you must
 uphold:
 
 - **The agent home is trusted.** The verifier runs inside a fixed `AGENT_HOME`

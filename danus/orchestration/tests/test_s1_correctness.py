@@ -100,6 +100,10 @@ def test_unresolved_contract_prevents_false_project_complete(tmp_path):
     ledger.review_implementation_contract(
         contract["contract_id"], reviewer="reviewer", verdict="APPROVE", rationale="ok"
     )
+    assert reconcile(tmp_path, [])["project_state"] == "RUNNING"
+    execution = ledger.assign(worker="experimenter", role="experimenter", node_id="P0", plan_version=1, task=contract["task"])
+    assert reconcile(tmp_path, [])["project_state"] == "RUNNING"
+    ledger.update(worker="experimenter", state="DONE", outcome="COMPLETE", actor="runtime", expected_assignment_id=execution["assignment_id"])
     complete = reconcile(tmp_path, [])
     assert complete["project_state"] == "COMPLETE"
     assert complete["unresolved_implementation_contracts"] == []

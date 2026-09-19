@@ -131,23 +131,13 @@ def reviewer_cost_policy(
     dsh_available: bool,
     dsh_quota_exhausted: bool = False,
 ) -> Dict[str, Any]:
-    """Choose the backend for an explicitly auto-managed Reviewer.
-
-    Reviewer heterogeneity is intentional: DSH/DeepSeek is the primary backend.
-    Terra is a fallback only after the current Reviewer assignment receives DSH's
-    explicit provider-neutral ``QUOTA`` failure. Missing DSH provisioning, transient
-    rate limits, auth failures, and other errors do not silently consume Terra.
-    """
+    """Auto Reviewers use the supported isolated Codex backend."""
     state = str(quota.get("state") or "UNKNOWN").upper()
     codex_blocked = bool(quota.get("block_new_codex_rounds"))
-    if dsh_quota_exhausted:
-        backend = "chatgpt"
-        reason = "dsh_quota_exhausted_fallback_terra"
-    else:
-        backend = "dsh"
-        reason = "dsh_primary" if dsh_available else "dsh_primary_unavailable"
+    backend = "chatgpt"
+    reason = "dsh_isolation_unavailable"
     return {
-        "policy": "dsh_first_terra_fallback",
+        "policy": "isolated_codex",
         "quota_state": state,
         "codex_blocked": codex_blocked,
         "dsh_available": bool(dsh_available),
@@ -175,7 +165,10 @@ def build_supervisor_snapshot(project_dir: Path, worker_rows: List[Dict[str, Any
         "plan_changes": pending_plan_changes,
         "all_plan_changes": _all_plan_changes(graph),
         "current_assignments": current_assignments,
-        "assignments": ledger.assignments(),
+        "assignments": [
+            {**item, "state": "STALE"} if ledger._is_plan_stale(item) else item
+            for item in ledger.assignments()
+        ],
         "completed_nodes": ledger.completed_nodes(),
         "implementation_contracts": ledger.implementation_contracts(),
         "pending_implementation_contracts": ledger.pending_implementation_contracts(),
@@ -228,6 +221,7 @@ def _latest_handoff(
         if item.get("kind") == kind
         and item.get("subject_type") == subject_type
         and item.get("subject_id") == subject_id
+        and item.get("status") not in {"STALE", "CANCELLED"}
     ]
     matches.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("handoff_id") or "")))
     return matches[-1] if matches else None
@@ -319,6 +313,7 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             if (
                 not active_route(node_id)
                 or any(child not in completed for child in active_children[node_id])
+                or any(dep not in completed for dep in nodes[node_id]["depends_on"])
             ):
                 completed.remove(node_id)
                 changed = True
@@ -343,7 +338,6 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         }
         for item in pending_implementation_contracts
         if active_route(str(item.get("node_id") or ""))
-        and _contract_status(item) != "APPROVE"
     ]
     complete = bool(
         plan.get("root_id") in completed
@@ -351,6 +345,8 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         and not pending_plan_changes
         and not unresolved_implementation_contracts
         and not pending_handoffs
+        and not any(a.get("state") in {"ASSIGNED", "RUNNING", "BLOCKED"}
+                    and active_route(str(a.get("node_id") or "")) for a in current_assignments)
     )
     project_state = (
         "COMPLETE" if complete else "PAUSED" if snapshot.get("project_paused") else "RUNNING"
@@ -380,10 +376,6 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         state = assignment["state"]
         aid = assignment["assignment_id"]
 
-        if state == "STALE":
-            add("STOP", worker=worker, node_id=node_id, assignment_id=aid,
-                reason="assignment_stale")
-            continue
         if not active_route(node_id):
             add("STOP", worker=worker, node_id=node_id, assignment_id=aid,
                 reason="plan_route_retired")
@@ -391,6 +383,10 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         if blocked_dependencies(node_id):
             add("STOP", worker=worker, node_id=node_id, assignment_id=aid,
                 reason="dependencies_not_complete")
+            continue
+        if state == "STALE":
+            add("STOP", worker=worker, node_id=node_id, assignment_id=aid,
+                reason="assignment_stale")
             continue
         if row.get("paused"):
             pause_reason = str(row.get("pause_reason") or "manual")
@@ -438,9 +434,6 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
     completion_waiting = set()
     for node_id, assignment in latest_by_node.items():
-        current = current_by_worker.get(assignment["worker"])
-        if current and current["assignment_id"] != assignment["assignment_id"]:
-            continue
         if (
             assignment["state"] == "DONE"
             and node_id not in completed
@@ -623,7 +616,9 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             elif kind == "REVIEW" and subject_type == "IMPLEMENTATION_CONTRACT":
                 contract = contracts_by_id.get(subject_id)
                 status = _contract_status(contract or {})
-                if status in ProgressLedger.IMPLEMENTATION_VERDICTS:
+                if (status in ProgressLedger.IMPLEMENTATION_VERDICTS
+                    and (not contract.get("review_assignment_id")
+                         or contract["review_assignment_id"] == assignment["assignment_id"])):
                     summary = f"implementation review recorded {status}"
             elif kind in {"REVISION", "RETHINK"} and subject_type == "IMPLEMENTATION_CONTRACT":
                 candidates = replacements.get(subject_id, [])
@@ -634,7 +629,9 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             elif kind == "REVIEW" and subject_type == "PLAN_CHANGE":
                 change = changes_by_id.get(subject_id)
                 verdict = str((change or {}).get("review_verdict") or "").upper()
-                if verdict in ResearchPlanGraph.REVIEW_VERDICTS:
+                if (verdict in ResearchPlanGraph.REVIEW_VERDICTS
+                    and (not change.get("review_assignment_id")
+                         or change["review_assignment_id"] == assignment["assignment_id"])):
                     summary = f"plan review recorded {verdict}"
             if summary:
                 route(
@@ -702,6 +699,12 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 )
 
         def review_ready(review: Optional[Dict[str, Any]]) -> bool:
+            if review:
+                subject_id = str(review.get("subject_id") or "")
+                subject = (contracts_by_id if review.get("subject_type") == "IMPLEMENTATION_CONTRACT" else changes_by_id).get(subject_id) or {}
+                bound = subject.get("review_assignment_id")
+                if bound and bound != (handoff_assignment(review) or {}).get("assignment_id"):
+                    return False
             return bool(
                 review
                 and (
@@ -714,6 +717,15 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         for contract in pending_implementation_contracts:
             status = _contract_status(contract)
             if status == "STALE":
+                if active_route(str(contract.get("node_id") or "")) and not any(
+                    h.get("kind") == "REVISION" and h.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                    and h.get("subject_id") == contract["contract_id"] and h.get("status") in {"OPEN", "ASSIGNED"}
+                    for h in handoffs
+                ):
+                    route("OPEN_HANDOFF", node_id=contract["node_id"],
+                          reason="stale_implementation_requires_fresh_authorization", handoff_kind="REVISION",
+                          subject_type="IMPLEMENTATION_CONTRACT", subject_id=contract["contract_id"],
+                          target_role="researcher", requested_by="supervisor", source_role="researcher")
                 continue
             contract_id = str(contract["contract_id"])
             review = _latest_handoff(
@@ -745,7 +757,7 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                         source_assignment_id=source_id,
                     )
                 continue
-            if status == "APPROVE" and (review is None or review_ready(review)):
+            if status == "APPROVE" and ((review is None and not contract.get("review_assignment_id")) or review_ready(review)):
                 route(
                     "ASSIGN_CONTRACT",
                     node_id=contract.get("node_id"),
@@ -791,15 +803,17 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             ):
                 continue
             source_id = str(source["assignment_id"])
+            epoch_handoffs = [item for item in handoffs
+                              if int(item.get("review_epoch", 0)) == int(source.get("review_epoch", 0))]
             if any(
                 item.get("kind") in {"INTERPRET", "RETHINK", "ESCALATE"}
                 and item.get("subject_type") == "ASSIGNMENT"
                 and item.get("subject_id") == source_id
-                for item in handoffs
+                for item in epoch_handoffs
             ):
                 continue
             review = _latest_handoff(
-                handoffs,
+                epoch_handoffs,
                 kind="REVIEW",
                 subject_type="ASSIGNMENT",
                 subject_id=source_id,

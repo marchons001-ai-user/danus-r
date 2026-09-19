@@ -181,26 +181,13 @@ def test_rebound_round_cannot_complete_new_assignment(tmp_path, monkeypatch):
 
 def test_reused_reviewer_keeps_completed_result_for_route(tmp_path, monkeypatch):
     _bind_layout(monkeypatch, tmp_path)
-    ledger, _, action = _ambiguity(tmp_path)
-    reviewer = next(
-        item
-        for item in ledger.assignments()
-        if str(item.get("role") or "").lower() == "reviewer"
-        and item.get("state") == "DONE"
-    )
     immutable = (
         "REVIEW A: evidence valid, conclusion ambiguous\n"
         "DANUS_REVIEW_CLASS: SCIENTIFIC_AMBIGUITY\n"
         "DANUS_OUTCOME: COMPLETE"
     )
-    ledger.update(
-        worker="reviewer",
-        state="DONE",
-        actor="runtime",
-        outcome="COMPLETE",
-        expected_assignment_id=reviewer["assignment_id"],
-        result=immutable,
-    )
+    ledger, _, action = _ambiguity(tmp_path, review_result=immutable)
+    reviewer = ledger.current("reviewer")
 
     reviewer_dir = tmp_path / "workers" / "reviewer"
     next_task = "Review the next independent assignment\n"

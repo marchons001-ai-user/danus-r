@@ -47,8 +47,15 @@ Legacy workers retain the historical adaptive mathematical skill loop. Scientifi
 roles receive a smaller kickoff focused on `TASK.md`, the common scientific spine,
 their role contract, the Charter, relevant project state, and only the tool names
 actually exposed to that role. The Experimenter's single Ponytail skill is also
-included in DSH prompt shaping and exposed through the worker-home skill link for
-Codex.
+exposed through the worker-home skill link for Codex. Scientific DSH rounds are
+refused; Reviewer auto selects isolated Codex/ChatGPT. Legacy ROLE=worker retains
+its separate historical execution path without requiring an Assignment.
+
+Runnable protocols bind the frozen bundle and a canonical execution runtime
+identity: Python implementation/version, executable hash, environment paths and
+installed dependency RECORD digest. Recorded dependency file hashes are checked
+before execution. Experiment and reducer execution reject a changed runtime;
+historical protocols remain readable but need a new freeze before execution.
 
 ## Connects to
 

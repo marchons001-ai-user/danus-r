@@ -146,10 +146,10 @@ def test_paper_revise_gap_fill_carries_feedback_notes_and_facts():
         with _fake_codex_seq([revised]) as calls, _fake_compile([{"ok": True}]):
             out = server.paper_revise(
                 verifier_feedback="The paper uses the recurrence S(n+1)=S(n)+(2n+1) but never proves it.",
-                add_facts=["fact_odd_recurrence"],
+                add_facts=["a7944e5cffe7b38f"],
                 notes="present it as a Lemma before the main theorem")
         assert out["status"] == "ok"
-        assert out["gap_fill_facts"] == ["fact_odd_recurrence"]
+        assert out["gap_fill_facts"] == ["a7944e5cffe7b38f"]
         p = calls["prompts"][0]
         assert "MODE: gap-fill" in p
         assert "VERIFIER FEEDBACK" in p and "never proves it" in p       # verifier opinion
@@ -200,12 +200,12 @@ def test_main_module_runs_build_app(monkeypatch=None):
 def test_paper_write_reports_resolved_headline_from_brief():
     # server.paper_write flows the default through resolve_headline and reports the
     # target ids used + their source (honesty). The example brief names
-    # headline_fact_ids: fact_odd_sum_main -> source 'brief'.
+    # headline_fact_ids: 5e28191721b35dbb -> source 'brief'.
     with temp_project() as pdir, env(DANUS_PROJECT_DIR=str(pdir), DANUS_AGENTS_ROOT=None), \
             _fake_codex(stdout=_GOOD_TEX, returncode=0):
         out = server.paper_write()
         assert out["status"] == "ok"
-        assert out["headline"] == ["fact_odd_sum_main"]
+        assert out["headline"] == ["5e28191721b35dbb"]
         assert out["headline_source"] == "brief"
 
 
@@ -217,13 +217,13 @@ def test_paper_write_needs_target_when_brief_blank_and_no_target_md():
         brief = _P(pdir) / "paper" / "PROJECT_BRIEF.md"
         brief.write_text(
             brief.read_text(encoding="utf-8").replace(
-                "headline_fact_ids: fact_odd_sum_main", "headline_fact_ids:"),
+                "headline_fact_ids: 5e28191721b35dbb", "headline_fact_ids:"),
             encoding="utf-8")
         with _fake_codex(stdout=_GOOD_TEX, returncode=0):
             out = server.paper_write()
         assert out["status"] == "needs_target"
         assert out["headline_source"] == "unset" and out["headline"] == []
-        assert "candidates" in out and out["candidates"] == ["fact_odd_sum_main"]
+        assert "candidates" in out and out["candidates"] == ["5e28191721b35dbb"]
         assert "message" in out and "danus finalize" in out["message"]
         assert not _P(out["tex_path"]).exists(), "no main.tex when the target is unset"
 
@@ -236,22 +236,22 @@ def test_paper_write_reads_target_md_when_brief_blank():
         brief = _P(pdir) / "paper" / "PROJECT_BRIEF.md"
         brief.write_text(
             brief.read_text(encoding="utf-8").replace(
-                "headline_fact_ids: fact_odd_sum_main", "headline_fact_ids:"),
+                "headline_fact_ids: 5e28191721b35dbb", "headline_fact_ids:"),
             encoding="utf-8")
         from danus.write_paper import assemble as _assemble
-        _assemble.write_target_fact_ids(pdir, ["fact_odd_sum_main"])
+        _assemble.write_target_fact_ids(pdir, ["5e28191721b35dbb"])
         with _fake_codex(stdout=_GOOD_TEX, returncode=0):
             out = server.paper_write()
         assert out["status"] == "ok"
-        assert out["headline"] == ["fact_odd_sum_main"]
+        assert out["headline"] == ["5e28191721b35dbb"]
         assert out["headline_source"] == "target"
 
 
 def test_paper_write_explicit_headline_arg_overrides_brief():
     with temp_project() as pdir, env(DANUS_PROJECT_DIR=str(pdir), DANUS_AGENTS_ROOT=None), \
             _fake_codex(stdout=_GOOD_TEX, returncode=0):
-        out = server.paper_write(headline=["fact_square_recurrence"])
-        assert out["headline"] == ["fact_square_recurrence"]
+        out = server.paper_write(headline=["2d7f301187eebfc6"])
+        assert out["headline"] == ["2d7f301187eebfc6"]
         assert out["headline_source"] == "arg"
 
 
@@ -526,6 +526,8 @@ def test_project_resolution_by_name():
     with tempfile.TemporaryDirectory() as root:
         proj = Path(root) / "odd_sum"
         shutil.copytree(EXAMPLE_PROJECT, proj)
+        from ._fixtures import canonicalize_example
+        canonicalize_example(proj)
         write_main_tex(proj)
         write_ledger(proj)
         with env(DANUS_AGENTS_ROOT=root, DANUS_PROJECT_DIR=None):
@@ -1081,7 +1083,7 @@ def test_run_log_paper_write_needs_target_early_return():
         brief = _P(pdir) / "paper" / "PROJECT_BRIEF.md"
         brief.write_text(
             brief.read_text(encoding="utf-8").replace(
-                "headline_fact_ids: fact_odd_sum_main", "headline_fact_ids:"),
+                "headline_fact_ids: 5e28191721b35dbb", "headline_fact_ids:"),
             encoding="utf-8")
         out = server.paper_write()
         assert out["status"] == "needs_target"

@@ -33,9 +33,9 @@ _RUNNER = r'''from pathlib import Path
 import json, sys, time
 output, data, started = map(Path, sys.argv[1:4])
 delay = float(sys.argv[4])
-counter = Path("count.txt")
+counter = output.parent.parent / "count.txt"
 counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))
-started.write_text("started")
+(output.parent.parent / started).write_text("started")
 time.sleep(delay)
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps({"score": float(data.read_text())}))
@@ -85,6 +85,7 @@ def _protocol(root: Path, *, delay: float = 0.0):
         decision_rule="support iff mean_score == 2",
         author="reviewer",
         metric_reducer=reducer_ref,
+        execution_files=["runner.py"],
     )
     return store, protocol_id
 
@@ -107,18 +108,18 @@ def test_concurrent_experiment_runtime_has_one_executor(tmp_path: Path):
         text=True,
     )
     try:
-        _wait_for(tmp_path / "started.txt")
+        _wait_for(tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/started.txt")
         with pytest.raises(RuntimeError, match="already running"):
             run_experiment(tmp_path, protocol_id)
         stdout, stderr = proc.communicate(timeout=10)
         assert proc.returncode == 0, stderr or stdout
-        assert (tmp_path / "count.txt").read_text() == "1"
+        assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/count.txt").read_text() == "1"
 
         # The lock is released by normal exit; a repeated completed invocation is
         # still idempotent and does not execute the unit again.
         result = run_experiment(tmp_path, protocol_id)
         assert result["completed_units"] == 1
-        assert (tmp_path / "count.txt").read_text() == "1"
+        assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/count.txt").read_text() == "1"
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -126,18 +127,15 @@ def test_concurrent_experiment_runtime_has_one_executor(tmp_path: Path):
 
 
 @pytest.mark.parametrize("changed", ["runner.py", "input.txt"])
-def test_frozen_code_or_input_change_before_execution_is_rejected(tmp_path: Path, changed: str):
+def test_live_code_or_input_change_does_not_change_frozen_execution(tmp_path: Path, changed: str):
     _, protocol_id = _protocol(tmp_path)
     path = tmp_path / changed
     path.write_text(path.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="frozen unit input changed: u1"):
-        run_experiment(tmp_path, protocol_id)
-    assert not (tmp_path / "raw" / "u1.json").exists()
-    assert not (tmp_path / "count.txt").exists()
+    assert run_experiment(tmp_path, protocol_id)["primary_metrics"] == {"mean_score": 2.0}
 
 
-def test_input_change_during_unit_never_reaches_safe_point(tmp_path: Path):
+def test_live_input_change_during_unit_preserves_frozen_safe_point(tmp_path: Path):
     store, protocol_id = _protocol(tmp_path, delay=1.0)
     proc = subprocess.Popen(
         [sys.executable, "-m", "danus.execution.experiment", str(tmp_path), protocol_id],
@@ -146,18 +144,13 @@ def test_input_change_during_unit_never_reaches_safe_point(tmp_path: Path):
         text=True,
     )
     try:
-        _wait_for(tmp_path / "started.txt")
+        _wait_for(tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/started.txt")
         (tmp_path / "input.txt").write_text("9", encoding="utf-8")
         stdout, stderr = proc.communicate(timeout=10)
-        assert proc.returncode != 0
-        assert "frozen unit input changed: u1" in (stdout + stderr)
-
-        checkpoint = tmp_path / "experiment_runtime" / protocol_id / "checkpoint.json"
-        if checkpoint.exists():
-            obj = json.loads(checkpoint.read_text(encoding="utf-8"))
-            assert "u1" not in obj.get("completed", {})
-            assert obj.get("evidence_id") is None
-        assert not list(store.records_dir.glob("*.json")) if store.records_dir.exists() else True
+        assert proc.returncode == 0, stderr
+        result = json.loads(stdout)
+        assert result["primary_metrics"] == {"mean_score": 2.0}
+        assert store.get_record(result["evidence_id"])
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -166,7 +159,7 @@ def test_input_change_during_unit_never_reaches_safe_point(tmp_path: Path):
 
 def test_stray_partial_checkpoint_temp_does_not_replace_last_safe_point(tmp_path: Path):
     _, protocol_id = experiment_fixture(tmp_path)
-    (tmp_path / "fail_u2").touch()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/fail_u2").touch()
     with pytest.raises(RuntimeError):
         run_experiment(tmp_path, protocol_id)
 
@@ -175,10 +168,10 @@ def test_stray_partial_checkpoint_temp_does_not_replace_last_safe_point(tmp_path
     assert set(before["completed"]) == {"u1"}
     checkpoint.with_suffix(".json.tmp").write_text('{"broken":', encoding="utf-8")
 
-    (tmp_path / "fail_u2").unlink()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u2/fail_u2").unlink()
     result = run_experiment(tmp_path, protocol_id)
     assert result["completed_units"] == 2
-    assert (tmp_path / "counts" / "u1.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/counts/u1.txt").read_text() == "1"
 
 
 def test_two_supervisor_passes_cannot_start_two_worker_processes(tmp_path: Path, monkeypatch):

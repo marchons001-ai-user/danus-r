@@ -244,7 +244,7 @@ def test_assign_crash_window_is_recovered_by_next_supervisor(tmp_path: Path, mon
     monkeypatch.setattr(ProgressLedger, "assign", crash_assign)
     with pytest.raises(KeyboardInterrupt):
         cli.do_assign("P/high", task, node_id="leaf")
-    assert wl.task.read_text(encoding="utf-8") == task
+    assert wl.task.read_text(encoding="utf-8") == "old task\n"
     assert ProgressLedger(root).current("high") is None
 
     monkeypatch.setattr(ProgressLedger, "assign", original_assign)

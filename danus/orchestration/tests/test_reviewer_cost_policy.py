@@ -31,7 +31,7 @@ def _quota(state: str = "NORMAL", block: bool = False) -> dict:
     return {"state": state, "reason": state.lower(), "block_new_codex_rounds": block}
 
 
-def test_reviewer_is_dsh_first_across_codex_quota_states():
+def test_auto_reviewer_uses_isolated_codex_across_quota_states():
     for state, block in [
         ("NORMAL", False),
         ("UNKNOWN", False),
@@ -44,11 +44,11 @@ def test_reviewer_is_dsh_first_across_codex_quota_states():
             dsh_available=True,
             dsh_quota_exhausted=False,
         )
-        assert decision["selected_backend"] == "dsh"
-        assert decision["policy"] == "dsh_first_terra_fallback"
+        assert decision["selected_backend"] == "chatgpt"
+        assert decision["policy"] == "isolated_codex"
 
 
-def test_only_explicit_dsh_quota_exhaustion_selects_terra():
+def test_auto_reviewer_never_selects_unisolated_dsh():
     normal = reviewer_cost_policy(
         _quota("NORMAL", False),
         dsh_available=True,
@@ -59,19 +59,19 @@ def test_only_explicit_dsh_quota_exhaustion_selects_terra():
         dsh_available=True,
         dsh_quota_exhausted=True,
     )
-    assert normal["selected_backend"] == "dsh"
+    assert normal["selected_backend"] == "chatgpt"
     assert exhausted["selected_backend"] == "chatgpt"
-    assert exhausted["reason"] == "dsh_quota_exhausted_fallback_terra"
+    assert exhausted["reason"] == "dsh_isolation_unavailable"
 
 
-def test_missing_dsh_does_not_silently_consume_terra():
+def test_missing_dsh_still_selects_isolated_codex():
     decision = reviewer_cost_policy(
         _quota("NORMAL", False),
         dsh_available=False,
         dsh_quota_exhausted=False,
     )
-    assert decision["selected_backend"] == "dsh"
-    assert decision["reason"] == "dsh_primary_unavailable"
+    assert decision["selected_backend"] == "chatgpt"
+    assert decision["reason"] == "dsh_isolation_unavailable"
 
 
 def test_dsh_quota_machine_code_is_not_confused_with_other_failures(tmp_path: Path):
@@ -88,59 +88,8 @@ def test_dsh_quota_machine_code_is_not_confused_with_other_failures(tmp_path: Pa
     assert loop._dsh_quota_exhausted(log) is True
 
 
-def test_dsh_quota_failure_is_bound_to_current_assignment(tmp_path: Path, monkeypatch):
-    wl = _worker(tmp_path, monkeypatch)
-    wl.status.write_text(json.dumps({
-        "reviewer_backend_selected": "dsh",
-        "reviewer_model_selected": "deepseek-v4-flash",
-    }), encoding="utf-8")
-    monkeypatch.setattr(loop.scaffold, "sync_worker_harness", lambda *a, **k: None)
-    monkeypatch.setattr(loop.scaffold, "write_codex_config", lambda *a, **k: None)
-    monkeypatch.setattr(loop, "kickoff", lambda *a, **k: "prompt")
-    monkeypatch.setenv("DANUS_ROUND_BEAT", "0")
 
-    events = []
-
-    class Ledger:
-        def current(self, worker, refresh_stale=True):
-            return {
-                "assignment_id": "assignment-1",
-                "state": "RUNNING",
-                "outcome": None,
-                "task_sha256": loop.ProgressLedger.task_sha256(wl.task.read_text(encoding="utf-8")),
-            }
-
-        def runtime_event(self, **event):
-            events.append(event)
-
-        def update(self, **_kwargs):
-            return None
-
-    monkeypatch.setattr(loop, "_progress_ledger", lambda _wl: Ledger())
-
-    def fake_round(_wl, _role, _prompt, log_path, _hard_timeout, context_budget=False):
-        assert context_budget is True
-        log_path.write_text("dsh: QUOTA: account quota exhausted\n", encoding="utf-8")
-        return 1
-
-    monkeypatch.setattr(loop, "run_round", fake_round)
-    monkeypatch.setattr(loop.C, "pop_rollover_request", lambda *_: None)
-    monkeypatch.setattr(loop.C, "write_checkpoint", lambda *a, **k: None)
-
-    old = signal.getsignal(signal.SIGTERM)
-    try:
-        assert loop.main(str(wl.dir)) == 0
-    finally:
-        signal.signal(signal.SIGTERM, old)
-
-    status = json.loads(wl.status.read_text(encoding="utf-8"))
-    assert status["state"] == "stopped"
-    assert status["reviewer_dsh_quota_exhausted"] is True
-    assert status["reviewer_dsh_quota_assignment_id"] == "assignment-1"
-    assert any(event.get("note") == "dsh_quota_exhausted" for event in events)
-
-
-def test_current_assignment_falls_back_to_terra_but_new_assignment_retries_dsh(
+def test_current_and_new_assignments_use_isolated_codex(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -167,8 +116,8 @@ def test_current_assignment_falls_back_to_terra_but_new_assignment_retries_dsh(
 
     rows[0]["assignment_id"] = "assignment-2"
     new = cli._reviewer_cost_rows("P", rows, _quota(), apply=True)
-    assert new[0]["selected_backend"] == "dsh"
-    assert new[0]["selected_model"] == "deepseek-v4-flash"
+    assert new[0]["selected_backend"] == "chatgpt"
+    assert new[0]["selected_model"] == "gpt-5.6-terra"
     status = json.loads(wl.status.read_text(encoding="utf-8"))
     assert "reviewer_dsh_quota_exhausted" not in status
     assert "reviewer_dsh_quota_assignment_id" not in status
@@ -214,7 +163,7 @@ def test_pinned_reviewer_backend_is_never_managed(tmp_path: Path, monkeypatch):
     assert "reviewer_backend_selected" not in json.loads(wl.status.read_text(encoding="utf-8"))
 
 
-def test_direct_start_resolves_auto_reviewer_to_dsh_before_spawn(tmp_path: Path, monkeypatch):
+def test_direct_start_resolves_auto_reviewer_to_isolated_codex_before_spawn(tmp_path: Path, monkeypatch):
     wl = _worker(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "_dsh_available", lambda: True)
     monkeypatch.setattr(cli, "quota_policy", lambda _snapshot: _quota("NORMAL", False))
@@ -224,8 +173,8 @@ def test_direct_start_resolves_auto_reviewer_to_dsh_before_spawn(tmp_path: Path,
     assert cli._start_one(wl) == "started"
     assert spawned == [wl.dir]
     status = json.loads(wl.status.read_text(encoding="utf-8"))
-    assert status["reviewer_backend_selected"] == "dsh"
-    assert status["reviewer_model_selected"] == "deepseek-v4-flash"
+    assert status["reviewer_backend_selected"] == "chatgpt"
+    assert status["reviewer_model_selected"] == "gpt-5.6-terra"
 
 
 def test_pending_stop_skips_context_migration_turn(tmp_path: Path, monkeypatch):

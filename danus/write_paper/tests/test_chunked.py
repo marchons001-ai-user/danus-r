@@ -61,7 +61,7 @@ def _fake_codex_router(planner_out, section_outs, planner_rc=0, section_rc=0):
 
 
 # The example project closure (deterministic; asserted in a threshold test below).
-_CLOSURE = ["fact_odd_recurrence", "fact_square_recurrence", "fact_odd_sum_main"]
+_CLOSURE = ["a7944e5cffe7b38f", "2d7f301187eebfc6", "5e28191721b35dbb"]
 
 _PREAMBLE = (
     "\\documentclass{amsart}\n"
@@ -151,7 +151,7 @@ def test_threshold_over_budget_triggers_chunking():
 
 # a selection-aware plan: the extreme fallback chunks the CURATED subset (only the
 # target), never the referenced-only predecessors.
-_TARGET = "fact_odd_sum_main"
+_TARGET = "5e28191721b35dbb"
 _SELECTED_SECTIONS = [
     {"title": "Introduction", "label": "sec:intro", "fact_ids": []},
     {"title": "Main results", "label": "sec:main", "fact_ids": [_TARGET]},
@@ -179,7 +179,7 @@ def test_chunked_fallback_respects_fact_ids_selection():
         # statements (context to \ref), even though they are NOT assigned to a section.
         main_prompt = next(p for p in state["prompts"]
                            if "You are the PAPER SECTION WRITER" in p and "sec:main" in p)
-        assert "fact_odd_recurrence" in main_prompt or "fact_square_recurrence" in main_prompt
+        assert "a7944e5cffe7b38f" in main_prompt or "2d7f301187eebfc6" in main_prompt
 
 
 
@@ -190,16 +190,16 @@ def test_section_ref_context_is_bounded_to_direct_predecessors():
     with temp_project() as pdir, env(DANUS_PROJECT_DIR=str(pdir), DANUS_AGENTS_ROOT=None):
         order = assemble.closure_order(pdir, None, None)
         # the main result \refs its two direct predecessors — and nothing else.
-        ctx = assemble.section_ref_context_ids(pdir, ["fact_odd_sum_main"], order)
-        assert set(ctx) == {"fact_odd_recurrence", "fact_square_recurrence"}
+        ctx = assemble.section_ref_context_ids(pdir, ["5e28191721b35dbb"], order)
+        assert set(ctx) == {"a7944e5cffe7b38f", "2d7f301187eebfc6"}
         # ordered by the coverage order (predecessors first), for coherent reading.
         assert ctx == [f for f in order if f in set(ctx)]
         # a LEAF fact (no predecessors) needs NO \ref context — not the whole closure.
-        assert assemble.section_ref_context_ids(pdir, ["fact_odd_recurrence"], order) == []
+        assert assemble.section_ref_context_ids(pdir, ["a7944e5cffe7b38f"], order) == []
         # a section never lists its OWN facts as \ref context.
         both = assemble.section_ref_context_ids(
-            pdir, ["fact_odd_sum_main", "fact_odd_recurrence"], order)
-        assert "fact_odd_recurrence" not in both and both == ["fact_square_recurrence"]
+            pdir, ["5e28191721b35dbb", "a7944e5cffe7b38f"], order)
+        assert "a7944e5cffe7b38f" not in both and both == ["2d7f301187eebfc6"]
 
 
 # --------------------------------------------------------------------------- #

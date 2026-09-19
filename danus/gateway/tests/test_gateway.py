@@ -295,13 +295,15 @@ def test_main_module_builds_and_runs():
     # `python -m danus.gateway` builds an app from DANUS_ROLE and calls .run();
     # stub FastMCP.run so no stdio server actually starts.
     import runpy
+    import sys
+    from unittest.mock import patch
     from danus._mcp import FastMCP
 
     orig_run = FastMCP.run
     calls = {"n": 0}
     FastMCP.run = lambda self, *a, **k: calls.__setitem__("n", calls["n"] + 1)
     try:
-        with _env(DANUS_ROLE="verifier"):
+        with _env(DANUS_ROLE="verifier"), patch.object(sys, "argv", ["danus.gateway"]):
             runpy.run_module("danus.gateway", run_name="__main__")
         assert calls["n"] == 1
     finally:

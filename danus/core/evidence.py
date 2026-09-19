@@ -50,6 +50,11 @@ def protocol_identity(protocol: Dict[str, Any]) -> Dict[str, Any]:
     # Omit this field for historical protocols so their existing ids remain valid.
     if "metric_reducer" in protocol:
         identity["metric_reducer"] = protocol.get("metric_reducer")
+    if "bundle_id" in protocol:
+        identity["bundle_id"] = protocol["bundle_id"]
+    for key in ("execution_runtime", "runtime_id"):
+        if key in protocol:
+            identity[key] = protocol[key]
     return identity
 
 
@@ -135,6 +140,8 @@ class EvidenceStore:
         post_hoc: bool = False,
         revision_reason: str = "",
         metric_reducer: Optional[Dict[str, Any]] = None,
+        execution_files: Optional[List[str]] = None,
+        source_root: Optional[Path] = None,
     ) -> str:
         """Write one immutable frozen protocol and return its content id.
 
@@ -143,7 +150,11 @@ class EvidenceStore:
         explicit provenance statement: A2-4a records it; later workflow code will
         decide it automatically when results have already been observed.
 
-        Runnable protocols may additionally pin one metric reducer by the same
+        Execution requires execution_files and optional source_root to publish a
+        content-addressed bundle before this protocol. Historical records remain
+        readable; path-only protocols cannot execute.
+
+        Protocols may additionally pin one metric reducer by the same
         path/SHA-256/size reference shape used for artifacts plus a ``function``
         name. The field is omitted entirely for historical protocols so their
         content ids remain backward-compatible.
@@ -184,7 +195,16 @@ class EvidenceStore:
             "revision_reason": revision_reason.strip(),
         }
         if reducer is not None:
+            from . import runtime
             identity["metric_reducer"] = reducer
+            identity["execution_runtime"] = runtime.identity()
+            identity["runtime_id"] = runtime._digest(identity["execution_runtime"])
+        if execution_files is not None:
+            from . import bundle
+            if reducer is None or not isinstance(matrix, dict) or not isinstance(matrix.get("units"), list):
+                raise ValueError("execution bundle requires matrix.units and metric_reducer")
+            refs = [reducer] + [ref for unit in matrix["units"] for ref in unit.get("inputs", [])]
+            identity["bundle_id"] = bundle.freeze(self.root, source_root or self.root, execution_files, refs)
         protocol_id = _content_id(identity)
         payload = {
             "protocol_id": protocol_id,

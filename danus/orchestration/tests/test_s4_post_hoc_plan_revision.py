@@ -34,6 +34,7 @@ def _gateway(pdir: Path, worker: str, role: str):
         "DANUS_PROJECT_DIR": str(pdir),
         "DANUS_AUTHOR": worker,
         "DANUS_ROLE": role,
+        "DANUS_ASSIGNMENT_ID": str((ProgressLedger(pdir).current(worker) or {}).get("assignment_id") or ""),
     }
     old = {key: os.environ.get(key) for key in keys}
     os.environ.update(keys)
@@ -153,6 +154,7 @@ def _proposal(refs: list[str], *, post_hoc: bool = True, node_id: str = "R1") ->
 def _write_proposal(pdir: Path, payload: dict) -> None:
     path = planning._proposal_path(pdir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {**payload, "assignment_id": ProgressLedger(pdir).current("low")["assignment_id"]}
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 

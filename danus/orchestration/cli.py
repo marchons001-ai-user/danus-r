@@ -164,8 +164,8 @@ def _selected_worker_backend(wl: L.WorkerLayout) -> str:
     if backend == "dsh":
         return "dsh"
     if backend == "auto" and _read_worker_role(wl) == "reviewer":
-        selected = str(_read_status(wl).get("reviewer_backend_selected") or "dsh").lower()
-        return selected if selected in {"chatgpt", "dsh"} else "dsh"
+        selected = str(_read_status(wl).get("reviewer_backend_selected") or "chatgpt").lower()
+        return selected if selected in {"chatgpt", "dsh"} else "chatgpt"
     return "chatgpt"
 
 
@@ -225,7 +225,7 @@ def _persist_reviewer_backend(
         "reviewer_backend_quota_state": decision["quota_state"],
         "reviewer_backend_selected_at": utc_now(),
     })
-    if backend == "dsh":
+    if status.get("reviewer_dsh_quota_assignment_id") != assignment_id:
         status.pop("reviewer_dsh_quota_exhausted", None)
         status.pop("reviewer_dsh_quota_assignment_id", None)
     atomic_write(wl.status, json.dumps(status, ensure_ascii=False, indent=2) + "\n")
@@ -343,17 +343,11 @@ def do_assign(
         raise SystemExit("assign on a planned project requires --node <plan_node_id>")
 
     try:
+        _recover_project(pdir)
         plan_version = ResearchPlanGraph(pdir).snapshot()["plan_version"]
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"cannot read Research Plan: {exc}") from exc
 
-    old_task = None
-    if wl.task.exists():
-        try:
-            old_task = wl.task.read_text(encoding="utf-8")
-        except OSError:
-            old_task = None
-    atomic_write(wl.task, text)
     try:
         assignment = ProgressLedger(pdir).assign(
             worker=worker,
@@ -362,12 +356,9 @@ def do_assign(
             plan_version=plan_version,
             task=text,
             handoff_id=handoff_id,
+            write_task=True,
         )
     except ValueError as exc:
-        if old_task is None:
-            wl.task.unlink(missing_ok=True)
-        else:
-            atomic_write(wl.task, old_task)
         raise SystemExit(f"cannot bind assignment: {exc}") from exc
 
     return {
@@ -865,6 +856,18 @@ def _decorate_supervisor_report(
     return report, policy, quiescent
 
 
+def _recover_project(project_dir: Path) -> List[Dict[str, Any]]:
+    """Finish durable transactions before evaluating permission for new work."""
+    from .planning import _recover_materialized_tasks
+
+    ResearchPlanGraph(project_dir).recover_governance()
+    recovered = _recover_materialized_tasks(project_dir)
+    for result in recovered:
+        if result.get("result") == "blocked":
+            raise ValueError(result["reason"])
+    return recovered
+
+
 def _do_supervise_unlocked(
     project: str,
     *,
@@ -886,6 +889,7 @@ def _do_supervise_unlocked(
 
     ledger = ProgressLedger(pdir)
     try:
+        recovered = _recover_project(pdir)
         if complete_node:
             ledger.set_node_state(complete_node, state="DONE", actor="supervisor")
         elif reopen_node:
@@ -895,6 +899,7 @@ def _do_supervise_unlocked(
         report, policy, quiescent = _decorate_supervisor_report(
             project, pdir, rows, reconcile(pdir, rows), token_budget
         )
+        report["recovery_applied"] = recovered
         if not apply:
             return report
 
@@ -905,7 +910,7 @@ def _do_supervise_unlocked(
         )
         if not quiescent:
             _clear_recovered_budget_pauses(project, rows, report["budget"])
-        quota_applied = [] if quiescent else _apply_quota_gate(project, rows, policy)
+        quota_applied = [] if quiescent or report.get("budget_stop") else _apply_quota_gate(project, rows, policy)
         stable = False
         passes = 0
 
@@ -934,6 +939,7 @@ def _do_supervise_unlocked(
                 break
 
         report["applied"] = applied
+        report["recovery_applied"] = recovered
         report["autonomy_applied"] = autonomy_applied
         report["reviewer_cost_applied"] = reviewer_cost_applied
         report["quota_applied"] = quota_applied
@@ -1031,6 +1037,8 @@ def watch_supervisor(
     last_reconcile = 0.0
     last_quota_refresh: Optional[float] = None
     while True:
+        with project_control_lock(pdir):
+            _recover_project(pdir)
         now = time.monotonic()
         quota_due = (
             last_quota_refresh is None
@@ -1122,6 +1130,7 @@ def _fmt_status(rows: List[Dict]) -> str:
 # --------------------------------------------------------------------------- #
 
 def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
+    (wl.dir / ".gateway-epoch").unlink(missing_ok=True)
     pid = _read_pid(wl)
     if not force:
         if not _worker_alive(wl):
@@ -1189,11 +1198,18 @@ def do_pause(target: str) -> List[Dict]:
 
 
 def _resume_one(wl: L.WorkerLayout) -> str:
+    (wl.dir / ".gateway-epoch").unlink(missing_ok=True)
     wl.pause.unlink(missing_ok=True)
     return _start_one(wl)
 
 
 def do_resume(target: str, stagger: float = 0.2) -> List[Dict]:
+    project, _ = L.resolve_target(target)
+    with project_control_lock(L.project_dir(project)):
+        return _do_resume_unlocked(target, stagger)
+
+
+def _do_resume_unlocked(target: str, stagger: float = 0.2) -> List[Dict]:
     project, worker = L.resolve_target(target)
     dirs = L.target_worker_dirs(target)
     if not dirs:

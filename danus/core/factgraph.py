@@ -13,18 +13,32 @@ integrity, readable storage, search, and cascade revocation.
 from __future__ import annotations
 
 import json
+import fcntl
+import hashlib
+import os
 import re
-import shutil
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import bm25
 from . import glossary as _glossary
-from ._util import append_jsonl, utc_now
+from ._util import append_jsonl, read_jsonl, utc_now
 from .schema import Fact, clean_external_refs, compute_empirical_fact_id, compute_fact_id
 
 _PRED_RE = re.compile(r"^predecessors:\s*\[(.*)\]\s*$")
 _GLOSS_LINE_RE = re.compile(r"^\s{2}([^:]+):\s*(.*)$")
+
+
+def _mutation(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        with (self.dir / ".mutation.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self._recover_revocation()
+            return method(self, *args, **kwargs)
+    return locked
 
 
 def statement_of(text: str) -> str:
@@ -162,14 +176,103 @@ class FactGraph:
         self.revocation_log = self.dir / "revocation_log.jsonl"
 
     def _path(self, fact_id: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{16}", fact_id):
+            raise ValueError(f"invalid fact_id: {fact_id}")
         return self.facts_dir / f"{fact_id}.md"
+
+    @staticmethod
+    def _atomic_write(path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _seal(raw: str) -> str:
+        header, body = raw.split("\n---\n", 1)
+        header = re.sub(r"^integrity_sha256: [0-9a-f]{64}\n", "", header, count=1, flags=re.M)
+        raw = header + "\n---\n" + body
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return raw.replace("---\n", f"---\nintegrity_sha256: {digest}\n", 1)
+
+    def _publish(self, fact: Fact) -> None:
+        if self._was_revoked(fact.fact_id):
+            raise ValueError(f"fact_revoked: {fact.fact_id}")
+        if self.get_raw(fact.fact_id) is None:
+            raw = self._seal(serialize_fact(fact))
+            self._validate(fact.fact_id, raw)
+            self._atomic_write(self._path(fact.fact_id), raw)
+
+    def _was_revoked(self, fact_id: str) -> bool:
+        return ((self.revoked_dir / f"{fact_id}.md").exists()
+                or any(record.get("fact_id") == fact_id for record in read_jsonl(self.revocation_log)))
+
+    def _validate(self, fact_id: str, raw: str) -> None:
+        try:
+            header, body = raw.removeprefix("---\n").split("\n---\n", 1)
+            fields = dict(line.split(": ", 1) for line in header.splitlines() if ": " in line)
+            if "integrity_sha256" in fields and self._seal(raw) != raw:
+                raise ValueError("serialized content checksum mismatch")
+            meta = parse_frontmatter(raw)
+            if meta["fact_type"] not in {"analytical", "empirical"}:
+                raise ValueError("invalid fact type")
+            empirical = meta["fact_type"] == "empirical"
+            marker = "\n## evidence\n" if empirical else "\n## proof\n"
+            statement, support = body.split("\n## statement\n", 1)[1].split(marker, 1)
+            support = support.split("\n## intuition\n", 1)[0]
+            common = dict(problem_id=fields["problem_id"], predecessors=meta["predecessors"], statement=statement)
+            computed = (compute_empirical_fact_id(**common, scope=meta["scope"], evidence_refs=meta["evidence_refs"])
+                        if empirical else compute_fact_id(**common, glossary_introduces=meta["glossary_introduces"], proof=support))
+            if not raw.startswith("---\n") or not raw.endswith("\n") or fields["fact_id"] != fact_id or computed != fact_id:
+                raise ValueError("content identity mismatch")
+        except (KeyError, ValueError, IndexError) as exc:
+            raise ValueError(f"malformed or corrupt fact: {fact_id}") from exc
+
+    def _recover_revocation(self) -> None:
+        intent = self.dir / ".revoke.json"
+        if not intent.exists():
+            return
+        records = json.loads(intent.read_text(encoding="utf-8"))
+        logged = read_jsonl(self.revocation_log)
+        self.revoked_dir.mkdir(parents=True, exist_ok=True)
+        for record in records:
+            src = self._path(record["fact_id"])
+            if src.exists():
+                os.replace(src, self.revoked_dir / src.name)
+            if record not in logged:
+                append_jsonl(self.revocation_log, record)
+        with self.revocation_log.open("rb") as handle:
+            os.fsync(handle.fileno())
+        for path in (self.facts_dir, self.revoked_dir, self.dir):
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        intent.unlink()
+        fd = os.open(self.dir, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def _check_predecessors(self, predecessors: List[str]) -> None:
         for pid in predecessors:
             if (self.revoked_dir / f"{pid}.md").exists():
                 raise ValueError(f"predecessor_revoked: {pid}")
+            if not self.exists(pid):
+                raise ValueError(f"predecessor_missing: {pid}")
 
     # ------------------------------------------------------------------ write
+    @_mutation
     def add(
         self,
         *,
@@ -200,11 +303,11 @@ class FactGraph:
             glossary_introduces=glossary_introduces, intuition=intuition,
             external_refs=external_refs,
         )
-        self.facts_dir.mkdir(parents=True, exist_ok=True)
-        self._path(fact_id).write_text(serialize_fact(fact), encoding="utf-8")
+        self._publish(fact)
         self._merge_glossary(glossary_introduces)
         return fact_id
 
+    @_mutation
     def add_empirical(
         self,
         *,
@@ -247,8 +350,7 @@ class FactGraph:
             fact_type="empirical", scope=scope, evidence_refs=refs,
             evidence_summary=evidence_summary,
         )
-        self.facts_dir.mkdir(parents=True, exist_ok=True)
-        self._path(fact_id).write_text(serialize_fact(fact), encoding="utf-8")
+        self._publish(fact)
         return fact_id
 
     def _merge_glossary(self, new: Dict[str, str]) -> None:
@@ -261,17 +363,33 @@ class FactGraph:
 
     # ------------------------------------------------------------------- read
     def exists(self, fact_id: str) -> bool:
-        return self._path(fact_id).exists()
+        return self.get_raw(fact_id) is not None
 
     def list(self) -> List[str]:
         if not self.facts_dir.exists():
             return []
-        return sorted(p.stem for p in self.facts_dir.glob("*.md"))
+        return sorted(p.stem for p in self.facts_dir.glob("*.md") if self.exists(p.stem))
 
     def get_raw(self, fact_id: str) -> Optional[str]:
         """The fact's markdown (agents read markdown directly)."""
+        if not re.fullmatch(r"[0-9a-f]{16}", fact_id):
+            return None
         p = self._path(fact_id)
-        return p.read_text(encoding="utf-8") if p.exists() else None
+        intent = self.dir / ".revoke.json"
+        if self._was_revoked(fact_id):
+            return None
+        try:
+            revoked = json.loads(intent.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            revoked = []
+        if any(r["fact_id"] == fact_id for r in revoked):
+            return None
+        try:
+            raw = p.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        self._validate(fact_id, raw)
+        return raw
 
     def fact_type(self, fact_id: str) -> str:
         raw = self.get_raw(fact_id) or ""
@@ -330,10 +448,11 @@ class FactGraph:
         raw = self.get_raw(fact_id) or ""
         return parse_frontmatter(raw)["external_refs"]  # type: ignore[return-value]
 
+    @_mutation
     def set_external_refs(self, fact_id: str, external_refs: List[Dict[str, object]]) -> List[Dict[str, object]]:
         """Replace a fact's mutable ``external_refs`` without changing its id."""
         p = self._path(fact_id)
-        if not p.exists():
+        if not self.exists(fact_id):
             raise ValueError(f"unknown fact_id: {fact_id}")
         refs = clean_external_refs(external_refs)
         new_line = "external_refs: " + json.dumps(refs, ensure_ascii=False)
@@ -346,7 +465,7 @@ class FactGraph:
             lines[idx] = new_line
         else:
             lines.insert(close, new_line)
-        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self._atomic_write(p, self._seal("\n".join(lines) + "\n"))
         return refs
 
     def descendants(self, fact_id: str) -> List[str]:
@@ -388,6 +507,7 @@ class FactGraph:
         )
 
     # --------------------------------------------------------------- revoke
+    @_mutation
     def revoke(
         self,
         fact_id: str,
@@ -407,19 +527,14 @@ class FactGraph:
         if replacement and replacement in to_revoke:
             raise ValueError("replacement_fact_id depends on the fact being revoked")
 
-        self.revoked_dir.mkdir(parents=True, exist_ok=True)
-        for fid in to_revoke:
-            src = self._path(fid)
-            if src.exists():
-                shutil.move(str(src), str(self.revoked_dir / f"{fid}.md"))
-            append_jsonl(
-                self.revocation_log,
+        records = [
                 {
                     "timestamp_utc": utc_now(),
                     "fact_id": fid,
                     "reason": reason,
                     "revoked_as_dependent_of": fid != fact_id and fact_id or None,
                     "superseded_by": replacement if fid == fact_id else None,
-                },
-            )
+                } for fid in to_revoke]
+        self._atomic_write(self.dir / ".revoke.json", json.dumps(records))
+        self._recover_revocation()
         return to_revoke

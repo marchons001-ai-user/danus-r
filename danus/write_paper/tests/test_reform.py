@@ -41,7 +41,7 @@ def _seed_ledger_mod():
 def _add_side_lemma(pdir: Path) -> str:
     """Add a proven-but-UNUSED side lemma to the example graph: it is nothing's
     predecessor (so it is itself a terminal) but the headline target
-    ``fact_odd_sum_main`` does not depend on it — so it is OFF the target closure.
+    ``5e28191721b35dbb`` does not depend on it — so it is OFF the target closure.
     It carries a unique external_ref so we can detect ledger leakage. Returns the
     marker string that appears only in its proof body."""
     fg = FactGraph(pdir)
@@ -58,13 +58,7 @@ def _add_side_lemma(pdir: Path) -> str:
                         "title": "An unrelated result", "year": "1999",
                         "cited_for": "an unrelated fact"}],
     )
-    # rename the file to a readable fact_ slug so it is recognizably a fact and the
-    # terminal-inference sorts deterministically alongside the example facts.
-    src = pdir / "fact_graph" / "facts" / f"{fid}.md"
-    dst = pdir / "fact_graph" / "facts" / "fact_side_lemma.md"
-    raw = src.read_text(encoding="utf-8").replace(f"fact_id: {fid}", "fact_id: fact_side_lemma")
-    dst.write_text(raw, encoding="utf-8")
-    src.unlink()
+    assert fg.exists(fid)
     return marker
 
 
@@ -74,22 +68,22 @@ def _add_side_lemma(pdir: Path) -> str:
 
 def test_resolve_headline_arg_wins():
     with temp_project() as pdir:
-        ids, source = assemble.resolve_headline(pdir, ["fact_square_recurrence"])
-        assert ids == ["fact_square_recurrence"] and source == "arg"
+        ids, source = assemble.resolve_headline(pdir, ["2d7f301187eebfc6"])
+        assert ids == ["2d7f301187eebfc6"] and source == "arg"
 
 
 def test_resolve_headline_reads_brief_when_no_arg():
-    # the example brief names headline_fact_ids: fact_odd_sum_main
+    # the example brief names headline_fact_ids: 5e28191721b35dbb
     with temp_project() as pdir:
         ids, source = assemble.resolve_headline(pdir, None)
-        assert ids == ["fact_odd_sum_main"] and source == "brief"
+        assert ids == ["5e28191721b35dbb"] and source == "brief"
 
 
 def _blank_brief_headline(pdir: Path) -> None:
     brief = Path(pdir) / "paper" / "PROJECT_BRIEF.md"
     brief.write_text(
         brief.read_text(encoding="utf-8").replace(
-            "headline_fact_ids: fact_odd_sum_main", "headline_fact_ids:"),
+            "headline_fact_ids: 5e28191721b35dbb", "headline_fact_ids:"),
         encoding="utf-8")
 
 
@@ -97,9 +91,9 @@ def test_resolve_headline_reads_target_md_when_brief_blank():
     # blank the brief field -> resolve from the finalized <project>/TARGET.md.
     with temp_project() as pdir:
         _blank_brief_headline(pdir)
-        assemble.write_target_fact_ids(pdir, ["fact_odd_sum_main"])
+        assemble.write_target_fact_ids(pdir, ["5e28191721b35dbb"])
         ids, source = assemble.resolve_headline(pdir, None)
-        assert ids == ["fact_odd_sum_main"] and source == "target"
+        assert ids == ["5e28191721b35dbb"] and source == "target"
 
 
 def test_resolve_headline_unset_refuses_no_guess():
@@ -118,10 +112,10 @@ def test_resolve_headline_unset_refuses_no_guess():
 
 def test_terminal_facts_is_finalize_suggestion_helper():
     # _terminal_facts stays only as the finalize SUGGESTION helper (not a resolve
-    # fallback): in the example only fact_odd_sum_main is terminal.
+    # fallback): in the example only 5e28191721b35dbb is terminal.
     with temp_project() as pdir:
         term = assemble._terminal_facts(FactGraph(Path(pdir)))
-        assert term == ["fact_odd_sum_main"]  # the two leaves are predecessors of it
+        assert term == ["5e28191721b35dbb"]  # the two leaves are predecessors of it
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +144,7 @@ def test_writer_prompt_default_excludes_off_closure_lemma():
 def test_explicit_headline_leaf_excludes_the_other_branch():
     with temp_project() as pdir:
         _add_side_lemma(pdir)
-        content = assemble.fact_graph_content(pdir, headline=["fact_square_recurrence"])
+        content = assemble.fact_graph_content(pdir, headline=["2d7f301187eebfc6"])
         assert "The perfect squares grow by the consecutive odd numbers" in content
         assert "We argue by induction on $n$" not in content   # target excluded
         assert "one-step telescoping relation" not in content  # sibling excluded
@@ -164,7 +158,7 @@ def test_ledger_scoped_to_closure_excludes_side_lemma_ref():
     mod = _seed_ledger_mod()
     with temp_project() as pdir:
         _add_side_lemma(pdir)
-        # default (closure) seeding: the closure is fact_odd_sum_main + its two
+        # default (closure) seeding: the closure is 5e28191721b35dbb + its two
         # predecessors, whose refs are AC24 (odd_recurrence) and Exm20 (main).
         ledger = mod.render(mod.collect(Path(pdir)))
         assert "AC24" in ledger and "Exm20" in ledger
@@ -185,8 +179,8 @@ def test_ledger_and_writer_share_one_closure():
     with temp_project() as pdir:
         _add_side_lemma(pdir)
         closure = set(mod.closure_fact_ids(Path(pdir)))
-        assert closure == {"fact_odd_sum_main", "fact_odd_recurrence", "fact_square_recurrence"}
-        assert "fact_side_lemma" not in closure
+        assert closure == {"5e28191721b35dbb", "a7944e5cffe7b38f", "2d7f301187eebfc6"}
+        assert all(not any(ref.get("key") == "Side99" for ref in FactGraph(pdir).external_refs(fid)) for fid in closure)
 
 
 def test_ledger_headline_arg_scopes_to_a_single_leaf():
@@ -194,7 +188,7 @@ def test_ledger_headline_arg_scopes_to_a_single_leaf():
     with temp_project() as pdir:
         _add_side_lemma(pdir)
         # headline = odd_recurrence only (a leaf with the AC24 ref); closure = {itself}
-        ledger = mod.render(mod.collect(Path(pdir), headline=["fact_odd_recurrence"]))
+        ledger = mod.render(mod.collect(Path(pdir), headline=["a7944e5cffe7b38f"]))
         assert "AC24" in ledger
         assert "Exm20" not in ledger and "Side99" not in ledger
 
@@ -251,7 +245,7 @@ def test_brief_headline_ignores_template_placeholder():
         brief = Path(pdir) / "paper" / "PROJECT_BRIEF.md"
         brief.write_text(
             brief.read_text(encoding="utf-8").replace(
-                "headline_fact_ids: fact_odd_sum_main",
+                "headline_fact_ids: 5e28191721b35dbb",
                 "headline_fact_ids: <fact ids here>"),
             encoding="utf-8")
         assert assemble.brief_headline_fact_ids(pdir) == []
@@ -259,9 +253,9 @@ def test_brief_headline_ignores_template_placeholder():
         ids, source = assemble.resolve_headline(pdir, None)
         assert ids == [] and source == "unset"
         # but a finalized TARGET.md then resolves it
-        assemble.write_target_fact_ids(pdir, ["fact_odd_sum_main"])
+        assemble.write_target_fact_ids(pdir, ["5e28191721b35dbb"])
         ids, source = assemble.resolve_headline(pdir, None)
-        assert ids == ["fact_odd_sum_main"] and source == "target"
+        assert ids == ["5e28191721b35dbb"] and source == "target"
 
 
 def test_target_fact_ids_reader_formats():
@@ -270,13 +264,13 @@ def test_target_fact_ids_reader_formats():
     with temp_project() as pdir:
         assert assemble.target_fact_ids(pdir) == []              # absent -> []
         (Path(pdir) / "TARGET.md").write_text(
-            "# a comment header\n\nfact_odd_sum_main\nfact_odd_recurrence\n",
+            "# a comment header\n\n5e28191721b35dbb\na7944e5cffe7b38f\n",
             encoding="utf-8")
-        assert assemble.target_fact_ids(pdir) == ["fact_odd_sum_main", "fact_odd_recurrence"]
+        assert assemble.target_fact_ids(pdir) == ["5e28191721b35dbb", "a7944e5cffe7b38f"]
         # a label line with inline ids + stray prose is parsed for fact_ tokens
         (Path(pdir) / "TARGET.md").write_text(
-            "target_fact_ids: fact_odd_sum_main, not_a_fact\n", encoding="utf-8")
-        assert assemble.target_fact_ids(pdir) == ["fact_odd_sum_main"]
+            "target_fact_ids: 5e28191721b35dbb, not_a_fact\n", encoding="utf-8")
+        assert assemble.target_fact_ids(pdir) == ["5e28191721b35dbb"]
         # blank file -> []
         (Path(pdir) / "TARGET.md").write_text("\n\n# only comments\n", encoding="utf-8")
         assert assemble.target_fact_ids(pdir) == []

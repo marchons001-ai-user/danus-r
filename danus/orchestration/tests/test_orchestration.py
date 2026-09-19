@@ -172,6 +172,10 @@ def test_force_stop(tmp: Path):
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
                       DANUS_MAX_ROUNDS="0", FAKE_CODEX_SLEEP="30"):
         cli.do_new("P", roles="high:1")
+        wl = L.WorkerLayout(L.worker_dir("P", "high"))
+        from danus.core import ProgressLedger, ResearchPlanGraph
+        ResearchPlanGraph.create(wl.project_dir, node_id="root", title="Root")
+        ProgressLedger(wl.project_dir).assign(worker=wl.name, role="worker", node_id="root", plan_version=1, task="bounded task", write_task=True)
         try:
             cli.do_start("P/high")
             assert _wait_until(lambda: _st("P", "high")["state"] == "running"), "round should run"

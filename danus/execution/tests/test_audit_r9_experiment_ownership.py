@@ -17,13 +17,14 @@ from danus.execution.experiment import run_experiment
 RUNNER = r'''from pathlib import Path
 import json, os, sys, time
 output = Path(sys.argv[1])
-count = Path("count.txt")
+scratch = output.parent.parent
+count = (scratch / "count.txt")
 count.write_text(str(int(count.read_text()) + 1 if count.exists() else 1))
-Path("unit.pid").write_text(str(os.getpid()))
-if Path("fail").exists():
+(scratch / "unit.pid").write_text(str(os.getpid()))
+if (scratch / "fail").exists():
     raise SystemExit(7)
 deadline = time.time() + 15
-while not Path("release").exists():
+while not (scratch / "release").exists():
     if time.time() >= deadline:
         raise SystemExit(91)
     time.sleep(0.05)
@@ -46,7 +47,7 @@ def _fixture(root: Path) -> str:
     store = EvidenceStore(root)
     reducer_ref = store.artifact_ref(reducer)
     reducer_ref["function"] = "reduce_metrics"
-    return store.freeze_protocol(
+    protocol_id = store.freeze_protocol(
         question="Does the owned unit produce score 1?",
         hypothesis="The frozen unit produces score 1.",
         matrix={
@@ -60,7 +61,11 @@ def _fixture(root: Path) -> str:
         decision_rule="support iff score == 1",
         author="reviewer",
         metric_reducer=reducer_ref,
+        execution_files=["runner.py"],
     )
+
+    (root / "experiment_runtime" / protocol_id / "artifacts/u1").mkdir(parents=True)
+    return protocol_id
 
 
 def _controller(root: Path, protocol_id: str, **kwargs):
@@ -82,16 +87,15 @@ def _wait_for(path: Path, timeout: float = 5.0) -> None:
 
 def _pid_alive(pid: int) -> bool:
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
         return False
-    return True
 
 
-def test_controller_death_keeps_protocol_owned_and_unknown_unit_is_not_rerun(tmp_path: Path):
+def test_controller_death_terminates_unit_and_unknown_unit_is_not_rerun(tmp_path: Path):
     protocol_id = _fixture(tmp_path)
-    pid_path = tmp_path / "unit.pid"
-    release = tmp_path / "release"
+    pid_path = tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/unit.pid"
+    release = tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/release"
     controller = subprocess.Popen(
         [sys.executable, "-m", "danus.execution.experiment", str(tmp_path), protocol_id],
         stdout=subprocess.DEVNULL,
@@ -100,19 +104,14 @@ def test_controller_death_keeps_protocol_owned_and_unknown_unit_is_not_rerun(tmp
     unit_pid = None
     try:
         _wait_for(pid_path)
-        unit_pid = int(pid_path.read_text())
+        marker = str(pid_path.parent / "raw/u1.json").encode()
+        unit_pid = next(int(p.parent.name) for p in Path("/proc").glob("[0-9]*/cmdline")
+                        if marker in p.read_bytes().split(b"\0") and p.read_bytes().split(b"\0")[0] == sys.executable.encode())
         assert _pid_alive(unit_pid)
 
         os.kill(controller.pid, signal.SIGKILL)
         assert controller.wait(timeout=5) == -signal.SIGKILL
 
-        concurrent = _controller(tmp_path, protocol_id, capture_output=True, timeout=5)
-        assert concurrent.returncode != 0
-        assert "experiment protocol already running" in concurrent.stderr
-        assert (tmp_path / "count.txt").read_text() == "1"
-        assert _pid_alive(unit_pid)
-
-        release.touch()
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and _pid_alive(unit_pid):
             time.sleep(0.02)
@@ -121,7 +120,7 @@ def test_controller_death_keeps_protocol_owned_and_unknown_unit_is_not_rerun(tmp
         replay = _controller(tmp_path, protocol_id, capture_output=True, timeout=5)
         assert replay.returncode != 0
         assert "interrupted before safe point; refusing automatic rerun" in replay.stderr
-        assert (tmp_path / "count.txt").read_text() == "1"
+        assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/count.txt").read_text() == "1"
     finally:
         release.touch()
         if controller.poll() is None:
@@ -133,9 +132,9 @@ def test_controller_death_keeps_protocol_owned_and_unknown_unit_is_not_rerun(tmp
 
 def test_completed_safe_point_is_not_blocked_by_stale_running_status(tmp_path: Path):
     protocol_id = _fixture(tmp_path)
-    (tmp_path / "release").touch()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/release").touch()
     first = run_experiment(tmp_path, protocol_id)
-    assert (tmp_path / "count.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/count.txt").read_text() == "1"
 
     status_path = tmp_path / "experiment_runtime" / protocol_id / "status.json"
     status_path.write_text(
@@ -152,18 +151,18 @@ def test_completed_safe_point_is_not_blocked_by_stale_running_status(tmp_path: P
 
     again = run_experiment(tmp_path, protocol_id)
     assert again["evidence_id"] == first["evidence_id"]
-    assert (tmp_path / "count.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/count.txt").read_text() == "1"
 
 
 def test_durable_failed_unit_remains_retryable(tmp_path: Path):
     protocol_id = _fixture(tmp_path)
-    (tmp_path / "fail").touch()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/fail").touch()
     with pytest.raises(RuntimeError, match="u1 failed"):
         run_experiment(tmp_path, protocol_id)
-    assert (tmp_path / "count.txt").read_text() == "1"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/count.txt").read_text() == "1"
 
-    (tmp_path / "fail").unlink()
-    (tmp_path / "release").touch()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/fail").unlink()
+    (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/release").touch()
     result = run_experiment(tmp_path, protocol_id)
     assert result["completed_units"] == 1
-    assert (tmp_path / "count.txt").read_text() == "2"
+    assert (tmp_path / "experiment_runtime" / protocol_id / "artifacts/u1/count.txt").read_text() == "2"

@@ -20,6 +20,7 @@ is testable and reconfigurable:
   DANUS_AGENTS_ROOT   root holding all projects (<root>/<project>); lets main
                       address any project by name via the ``project`` arg
   DANUS_AUTHOR        this agent's id, for attribution
+  DANUS_ASSIGNMENT_ID the runtime-bound assignment allowed to submit Reviewer verdicts
   DANUS_ROLE          worker | main | verifier | all  (selects exposed tools;
                       unset falls back to the read-only verifier set — fail-closed)
   DANUS_VERIFY_URL    analytical verify endpoint, normally .../verify; the
@@ -29,6 +30,8 @@ is testable and reconfigurable:
 
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
+from functools import wraps
 import json
 import os
 import re
@@ -49,6 +52,9 @@ from danus.core.handoff import HandoffRequests
 from danus.integrations import search as _arxiv_search
 
 from .roles import tools_for
+from . import capability
+
+_BOUND_WORKER = None
 
 _PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -58,6 +64,8 @@ _PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # --------------------------------------------------------------------------- #
 
 def _author() -> str:
+    if _BOUND_WORKER is not None:
+        return _BOUND_WORKER["worker"]
     return os.environ.get("DANUS_AUTHOR", "unknown")
 
 
@@ -65,6 +73,8 @@ def _role() -> str:
     # Fail-closed: an UNSET role gets the most-restrictive read-only set, same as
     # a mis-typed one (roles.tools_for). Dev use of the full set is explicit:
     # DANUS_ROLE=all.
+    if _BOUND_WORKER is not None:
+        return _BOUND_WORKER["role"]
     return os.environ.get("DANUS_ROLE", "verifier")
 
 
@@ -76,6 +86,10 @@ def _project(project: Optional[str] = None) -> Path:
     several projects. With no ``project`` we fall back to ``DANUS_PROJECT_DIR``
     (a worker is always pinned this way). The name is validated to a single path
     segment — no ``/`` or ``..`` — so it can never escape the agents root."""
+    if _BOUND_WORKER is not None:
+        if project is not None:
+            raise PermissionError("worker capability cannot select another project")
+        return Path(_BOUND_WORKER["project_dir"])
     agents_root = os.environ.get("DANUS_AGENTS_ROOT", "")
     project_dir = os.environ.get("DANUS_PROJECT_DIR", "")
     if project:
@@ -217,7 +231,7 @@ def fact_submit(
     ``evidence_refs`` and routes to ``/verify/empirical``; do not fabricate a
     prose proof for numerical evidence.
 
-    Once a verdict exists, the outcome is **always** recorded to global memory
+    While authority remains valid, a verdict is recorded to global memory
     (kind ``verification``). If ``source_id`` names the shared finding being
     promoted, a successful fact write also marks that finding ``verified`` and
     back-links the returned ``fact_id``. A rejection does not mark the source
@@ -225,8 +239,10 @@ def fact_submit(
 
     ``external_refs`` remains mutable bibliographic metadata and does not affect
     either analytical or empirical fact identity."""
-    fg = _fg()
-    gm = _gm()
+    binding = _BOUND_WORKER
+    with capability.scope(binding) if binding is not None else nullcontext():
+        fg = _fg()
+        gm = _gm()
     problem_id = os.environ.get("DANUS_PROBLEM_ID", Path(_project()).name)
     kind = (fact_type or "analytical").strip().lower()
     preds = predecessors or []
@@ -294,85 +310,86 @@ def fact_submit(
             out["undefined_symbols"] = undefined
         return out
 
-    verdict = result.get("verdict")
-    accepted = verdict == "correct"
+    with capability.scope(binding) if binding is not None else nullcontext():
+        verdict = result.get("verdict")
+        accepted = verdict == "correct"
 
-    # 2) Write the verified fact. The two types share the same DAG but retain
-    # type-specific identity/body semantics.
-    fact_id = None
-    write_error = None
-    if accepted:
-        try:
+        # 2) Write the verified fact. The two types share the same DAG but retain
+        # type-specific identity/body semantics.
+        fact_id = None
+        write_error = None
+        if accepted:
+            try:
+                if kind == "analytical":
+                    fact_id = fg.add(
+                        problem_id=problem_id, author=_author(), statement=statement, proof=proof,
+                        predecessors=predecessors, glossary_introduces=glossary_introduces,
+                        intuition=intuition, external_refs=external_refs,
+                    )
+                else:
+                    fact_id = fg.add_empirical(
+                        problem_id=problem_id, author=_author(), statement=statement,
+                        scope=empirical_scope, evidence_refs=empirical_refs,
+                        evidence_summary=evidence_summary, predecessors=predecessors,
+                        intuition=intuition, external_refs=external_refs,
+                    )
+            except Exception as e:
+                write_error = str(e)
+
+        # 3) Close the source finding only after the fact really exists. Keep this
+        # separate from the verifier verdict: accepted-but-write-failed is not promoted.
+        promotion_error = None
+        if fact_id and source_id:
+            try:
+                gm.set_status(source_id, "verified", fact_id=fact_id)
+            except Exception as e:
+                promotion_error = str(e)
+
+        # 4) ALWAYS trace once a verifier verdict exists, including write/promotion
+        # failures. Empirical deterministic checks are already embedded in the report.
+        report = result.get("verification_report")
+        gm.append(
+            "verification",
+            claim=statement,
+            evidence="verdict: correct" if accepted else (result.get("repair_hints") or "verdict: wrong"),
+            author=_author(),
+            verifiable=False,
+            links={
+                "source_id": source_id,
+                "predecessors": preds,
+                "evidence_refs": empirical_refs if kind == "empirical" else [],
+            },
+            verification_type=kind,
+            scope=empirical_scope if kind == "empirical" else {},
+            verdict=verdict,
+            fact_id=fact_id,
+            write_error=write_error,
+            promotion_error=promotion_error,
+            verification_report=report,
+        )
+
+        # 5) Return.
+        if not accepted:
+            out = {
+                "accepted": False,
+                "verdict": verdict,
+                "repair_hints": result.get("repair_hints"),
+                "verification_report": report,
+            }
             if kind == "analytical":
-                fact_id = fg.add(
-                    problem_id=problem_id, author=_author(), statement=statement, proof=proof,
-                    predecessors=predecessors, glossary_introduces=glossary_introduces,
-                    intuition=intuition, external_refs=external_refs,
-                )
-            else:
-                fact_id = fg.add_empirical(
-                    problem_id=problem_id, author=_author(), statement=statement,
-                    scope=empirical_scope, evidence_refs=empirical_refs,
-                    evidence_summary=evidence_summary, predecessors=predecessors,
-                    intuition=intuition, external_refs=external_refs,
-                )
-        except Exception as e:
-            write_error = str(e)
-
-    # 3) Close the source finding only after the fact really exists. Keep this
-    # separate from the verifier verdict: accepted-but-write-failed is not promoted.
-    promotion_error = None
-    if fact_id and source_id:
-        try:
-            gm.set_status(source_id, "verified", fact_id=fact_id)
-        except Exception as e:
-            promotion_error = str(e)
-
-    # 4) ALWAYS trace once a verifier verdict exists, including write/promotion
-    # failures. Empirical deterministic checks are already embedded in the report.
-    report = result.get("verification_report")
-    gm.append(
-        "verification",
-        claim=statement,
-        evidence="verdict: correct" if accepted else (result.get("repair_hints") or "verdict: wrong"),
-        author=_author(),
-        verifiable=False,
-        links={
-            "source_id": source_id,
-            "predecessors": preds,
-            "evidence_refs": empirical_refs if kind == "empirical" else [],
-        },
-        verification_type=kind,
-        scope=empirical_scope if kind == "empirical" else {},
-        verdict=verdict,
-        fact_id=fact_id,
-        write_error=write_error,
-        promotion_error=promotion_error,
-        verification_report=report,
-    )
-
-    # 5) Return.
-    if not accepted:
-        out = {
-            "accepted": False,
-            "verdict": verdict,
-            "repair_hints": result.get("repair_hints"),
-            "verification_report": report,
-        }
+                out["undefined_symbols"] = undefined
+            return out
+        if write_error:
+            out = {"accepted": True, "fact_id": None, "write_error": write_error}
+            if kind == "analytical":
+                out["undefined_symbols"] = undefined
+            return out
+        out = {"accepted": True, "fact_id": fact_id}
+        if promotion_error:
+            out["promotion_error"] = promotion_error
         if kind == "analytical":
             out["undefined_symbols"] = undefined
         return out
-    if write_error:
-        out = {"accepted": True, "fact_id": None, "write_error": write_error}
-        if kind == "analytical":
-            out["undefined_symbols"] = undefined
-        return out
-    out = {"accepted": True, "fact_id": fact_id}
-    if promotion_error:
-        out["promotion_error"] = promotion_error
-    if kind == "analytical":
-        out["undefined_symbols"] = undefined
-    return out
 
 
 def fact_search(query: str, limit: int = 10, project: Optional[str] = None) -> Dict[str, Any]:
@@ -408,6 +425,40 @@ def fact_revoke(
 # durable upward handoff                                                      #
 # --------------------------------------------------------------------------- #
 
+@contextmanager
+def _worker_write_scope(*, researcher_only: bool = False):
+    from danus.orchestration.cli import project_control_lock
+    from danus.execution import layout as L
+
+    ledger = _pl()
+    with project_control_lock(_project()), ledger.assignment_lock():
+        if _BOUND_WORKER is not None:
+            capability.validate(_BOUND_WORKER)
+        assignment = ledger.current(_author(), refresh_stale=True)
+        expected = (_BOUND_WORKER["assignment_id"] if _BOUND_WORKER is not None
+                    else os.environ.get("DANUS_ASSIGNMENT_ID", ""))
+        role = str((assignment or {}).get("role") or "").lower()
+        if (
+            not assignment or not expected
+            or assignment["assignment_id"] != expected
+            or assignment["state"] not in {"ASSIGNED", "RUNNING"}
+            or role not in ({"researcher"} if researcher_only else {"researcher", "reviewer", "experimenter"})
+            or _role().lower() not in {role, "all"}
+            or ledger._is_plan_stale(assignment)
+        ):
+            raise ValueError("write requires the gateway's current active assignment")
+        if ((_project() / L.PAUSE_FILE).exists()
+            or (_project() / "workers" / _author() / L.PAUSE_FILE).exists()):
+            raise ValueError("assignment is paused")
+        if assignment.get("handoff_id"):
+            handoff = HandoffRequests(ledger).get(assignment["handoff_id"])
+            if (not handoff or handoff["status"] != "ASSIGNED"
+                or handoff.get("assigned_assignment_id") != expected):
+                raise ValueError("assignment handoff is no longer authoritative")
+        yield assignment
+
+
+@_worker_write_scope()
 def handoff_request(
     kind: str,
     reason: str,
@@ -553,6 +604,7 @@ def implementation_pending_contracts(project: Optional[str] = None) -> Dict[str,
     return {"contracts": contracts, "count": len(contracts)}
 
 
+@_worker_write_scope(researcher_only=True)
 def implementation_submit_contract(
     node_id: str,
     plan_version: int,
@@ -568,6 +620,8 @@ def implementation_submit_contract(
     architecture. The returned ``task`` is the exact task the Supervisor must bind
     after Reviewer APPROVE; changing it invalidates the approval.
     """
+    if _pl().current(_author())["node_id"] != str(node_id).strip():
+        raise ValueError("contract node does not match current assignment")
     record = _pl().submit_implementation_contract(
         proposer=_author(),
         node_id=node_id,
@@ -584,38 +638,82 @@ def implementation_submit_contract(
     }
 
 
+@contextmanager
+def _review_scope(subject_type: str, subject_id: str):
+    from danus.orchestration.cli import project_control_lock
+    from danus.execution import layout as L
+
+    ledger = _pl()
+    with project_control_lock(_project()), ledger.assignment_lock():
+        if _BOUND_WORKER is not None:
+            capability.validate(_BOUND_WORKER)
+        if ((_project() / L.PAUSE_FILE).exists()
+            or (_project() / "workers" / _author() / L.PAUSE_FILE).exists()):
+            raise ValueError("assignment is paused")
+        assignment = ledger.current(_author(), refresh_stale=True)
+        expected = (_BOUND_WORKER["assignment_id"] if _BOUND_WORKER is not None
+                    else os.environ.get("DANUS_ASSIGNMENT_ID", ""))
+        if (
+            _role().lower() not in {"reviewer", "all"}
+            or not assignment
+            or not expected
+            or assignment.get("assignment_id") != expected
+            or assignment.get("role", "").lower() != "reviewer"
+            or assignment.get("state") not in {"ASSIGNED", "RUNNING", "DONE"}
+            or ledger._is_plan_stale(assignment)
+        ):
+            raise ValueError("review requires the gateway's current Reviewer assignment")
+        handoff = HandoffRequests(ledger).get(str(assignment.get("handoff_id") or ""))
+        if (
+            not handoff
+            or handoff.get("kind") != "REVIEW"
+            or handoff.get("subject_type") != subject_type
+            or handoff.get("subject_id") != subject_id
+            or handoff.get("node_id") != assignment.get("node_id")
+            or handoff.get("assigned_assignment_id") != expected
+            or handoff.get("status") not in {"ASSIGNED", "RESOLVED"}
+        ):
+            raise ValueError("review subject does not match the assigned REVIEW handoff")
+        yield assignment, handoff
+
+
 def implementation_review_contract(
     contract_id: str,
     verdict: str,
     rationale: str,
 ) -> Dict[str, Any]:
     """Reviewer-only semantic verdict; exact retries return the durable verdict."""
-    ledger = _pl()
-    reviewer = _author()
-    normalized = str(verdict or "").strip().upper()
-    if normalized not in ProgressLedger.IMPLEMENTATION_VERDICTS:
-        raise ValueError(f"verdict must be one of {ProgressLedger.IMPLEMENTATION_VERDICTS}")
-    rationale_text = str(rationale or "").strip()
-    if not rationale_text:
-        raise ValueError("rationale is required")
-    current = ledger.implementation_contract(contract_id)
-    if current is not None:
-        existing_verdict = str(current.get("verdict") or "").upper()
-        if existing_verdict in ProgressLedger.IMPLEMENTATION_VERDICTS:
-            if (
-                existing_verdict == normalized
-                and str(current.get("reviewer") or "") == reviewer
-                and str(current.get("rationale") or "") == rationale_text
-            ):
-                return {"contract_id": contract_id, "status": current["status"]}
-            raise ValueError(f"conflicting replay for reviewed implementation contract {contract_id}")
-    record = ledger.review_implementation_contract(
-        contract_id,
-        reviewer=reviewer,
-        verdict=normalized,
-        rationale=rationale_text,
-    )
-    return {"contract_id": contract_id, "status": record["status"]}
+    with _review_scope("IMPLEMENTATION_CONTRACT", contract_id) as (review_assignment, review_handoff):
+        ledger = _pl()
+        reviewer = _author()
+        normalized = str(verdict or "").strip().upper()
+        if normalized not in ProgressLedger.IMPLEMENTATION_VERDICTS:
+            raise ValueError(f"verdict must be one of {ProgressLedger.IMPLEMENTATION_VERDICTS}")
+        rationale_text = str(rationale or "").strip()
+        if not rationale_text:
+            raise ValueError("rationale is required")
+        current = ledger.implementation_contract(contract_id)
+        if current is not None:
+            existing_verdict = str(current.get("verdict") or "").upper()
+            if existing_verdict in ProgressLedger.IMPLEMENTATION_VERDICTS:
+                if (
+                    existing_verdict == normalized
+                    and current.get("review_assignment_id") == review_assignment["assignment_id"]
+                    and str(current.get("reviewer") or "") == reviewer
+                    and str(current.get("rationale") or "") == rationale_text
+                ):
+                    return {"contract_id": contract_id, "status": current["status"]}
+                raise ValueError(f"conflicting replay for reviewed implementation contract {contract_id}")
+        if review_assignment.get("state") not in {"ASSIGNED", "RUNNING"} or review_handoff.get("status") != "ASSIGNED":
+            raise ValueError("new verdict requires an active review assignment")
+        record = ledger.review_implementation_contract(
+            contract_id,
+            reviewer=reviewer,
+            verdict=normalized,
+            rationale=rationale_text,
+            review_assignment_id=review_assignment["assignment_id"],
+        )
+        return {"contract_id": contract_id, "status": record["status"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -628,6 +726,7 @@ def plan_pending_changes(project: Optional[str] = None) -> Dict[str, Any]:
     return {"changes": changes, "count": len(changes)}
 
 
+@_worker_write_scope(researcher_only=True)
 def plan_propose_change(
     base_plan_version: int,
     reason: str,
@@ -654,47 +753,52 @@ def plan_review_change(
     approve: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Reviewer-only verdict; exact retries return the already durable review."""
-    graph = _pg()
-    reviewer = _author()
-    if verdict and str(verdict).strip():
-        normalized = str(verdict).strip().upper()
-        if normalized not in ResearchPlanGraph.REVIEW_VERDICTS:
-            raise ValueError(f"verdict must be one of {ResearchPlanGraph.REVIEW_VERDICTS}")
-        if approve is not None and bool(approve) != (normalized == "APPROVE"):
-            raise ValueError("approve compatibility flag conflicts with explicit verdict")
-    else:
-        if approve is None:
-            raise ValueError("plan review requires verdict APPROVE, REVISE, or REJECT")
-        normalized = "APPROVE" if bool(approve) else "REVISE"
-    rationale_text = str(rationale or "").strip()
-    if not rationale_text:
-        raise ValueError("rationale is required")
-    current = graph.get_change(change_id)
-    existing_verdict = str(current.get("review_verdict") or "").upper()
-    if existing_verdict in ResearchPlanGraph.REVIEW_VERDICTS:
-        if (
-            existing_verdict == normalized
-            and str(current.get("reviewer") or "") == reviewer
-            and str(current.get("review_rationale") or "") == rationale_text
-        ):
-            return {
-                "change_id": change_id,
-                "status": current["status"],
-                "verdict": existing_verdict,
-            }
-        raise ValueError(f"conflicting replay for reviewed plan change {change_id}")
-    record = graph.review_change(
-        change_id,
-        reviewer=reviewer,
-        rationale=rationale_text,
-        verdict=normalized,
-        approve=None,
-    )
-    return {
-        "change_id": change_id,
-        "status": record["status"],
-        "verdict": record.get("review_verdict"),
-    }
+    with _review_scope("PLAN_CHANGE", change_id) as (review_assignment, review_handoff):
+        graph = _pg()
+        reviewer = _author()
+        if verdict and str(verdict).strip():
+            normalized = str(verdict).strip().upper()
+            if normalized not in ResearchPlanGraph.REVIEW_VERDICTS:
+                raise ValueError(f"verdict must be one of {ResearchPlanGraph.REVIEW_VERDICTS}")
+            if approve is not None and bool(approve) != (normalized == "APPROVE"):
+                raise ValueError("approve compatibility flag conflicts with explicit verdict")
+        else:
+            if approve is None:
+                raise ValueError("plan review requires verdict APPROVE, REVISE, or REJECT")
+            normalized = "APPROVE" if bool(approve) else "REVISE"
+        rationale_text = str(rationale or "").strip()
+        if not rationale_text:
+            raise ValueError("rationale is required")
+        current = graph.get_change(change_id)
+        existing_verdict = str(current.get("review_verdict") or "").upper()
+        if existing_verdict in ResearchPlanGraph.REVIEW_VERDICTS:
+            if (
+                existing_verdict == normalized
+                and current.get("review_assignment_id") == review_assignment["assignment_id"]
+                and str(current.get("reviewer") or "") == reviewer
+                and str(current.get("review_rationale") or "") == rationale_text
+            ):
+                return {
+                    "change_id": change_id,
+                    "status": current["status"],
+                    "verdict": existing_verdict,
+                }
+            raise ValueError(f"conflicting replay for reviewed plan change {change_id}")
+        if review_assignment.get("state") not in {"ASSIGNED", "RUNNING"} or review_handoff.get("status") != "ASSIGNED":
+            raise ValueError("new verdict requires an active review assignment")
+        record = graph.review_change(
+            change_id,
+            reviewer=reviewer,
+            rationale=rationale_text,
+            verdict=normalized,
+            approve=None,
+            review_assignment_id=review_assignment["assignment_id"],
+        )
+        return {
+            "change_id": change_id,
+            "status": record["status"],
+            "verdict": record.get("review_verdict"),
+        }
 
 
 def plan_commit_change(change_id: str, project: Optional[str] = None) -> Dict[str, Any]:
@@ -718,6 +822,25 @@ def search_arxiv_theorems(query: str, num_results: int = 10) -> Dict[str, Any]:
     return _arxiv_search(query, num_results=num_results)
 
 
+def experiment_run(protocol_id: str) -> Dict[str, Any]:
+    """Execute the frozen protocol named in this Experimenter's assigned task."""
+    from danus.execution.experiment import run_experiment
+
+    @contextmanager
+    def authorized():
+        if _BOUND_WORKER is None or _BOUND_WORKER["role"] != "experimenter":
+            raise PermissionError("experiment execution requires a bound Experimenter Gateway")
+        with capability.scope(_BOUND_WORKER):
+            task = (_project() / "workers" / _author() / "TASK.md").read_text()
+            if re.findall(r"^EXPERIMENT_PROTOCOL_ID=([0-9a-f]{16})$", task, re.MULTILINE) != [protocol_id]:
+                raise PermissionError("protocol is not named in the current assigned task")
+            yield
+
+    with authorized():
+        root, author = _project(), _author()
+    return run_experiment(root, protocol_id, author=author, authorize=authorized)
+
+
 # --------------------------------------------------------------------------- #
 # role-based registration                                                     #
 # --------------------------------------------------------------------------- #
@@ -729,6 +852,7 @@ _TOOLS = {
     "fact_search": fact_search,
     "fact_revoke": fact_revoke,
     "handoff_request": handoff_request,
+    "experiment_run": experiment_run,
     "implementation_pending_contracts": implementation_pending_contracts,
     "implementation_submit_contract": implementation_submit_contract,
     "implementation_review_contract": implementation_review_contract,
@@ -740,11 +864,44 @@ _TOOLS = {
 }
 
 
-def build_app(role: Optional[str] = None) -> FastMCP:
+def _bound_tool(fn):
+    @wraps(fn)
+    def call(*args, **kwargs):
+        if fn.__name__ in {
+            "fact_submit", "experiment_run", "handoff_request", "implementation_submit_contract", "plan_propose_change",
+            "implementation_review_contract", "plan_review_change",
+        }:
+            # These functions validate the capability inside their existing locks.
+            return fn(*args, **kwargs)
+        if fn.__name__ == "search_arxiv_theorems":
+            binding = _BOUND_WORKER
+            with capability.scope(binding):
+                pass
+            result = fn(*args, **kwargs)
+            with capability.scope(binding):
+                return result
+        with capability.scope(_BOUND_WORKER):
+            return fn(*args, **kwargs)
+    return call
+
+
+def build_app(role: Optional[str] = None, *, worker_binding=None) -> FastMCP:
     """Build the stdio MCP app exposing exactly the tools ``role`` may use.
     ``role`` defaults to ``DANUS_ROLE`` (env); unset falls back to the read-only
     verifier set (fail-closed)."""
+    global _BOUND_WORKER
+    if worker_binding is not None:
+        with capability.scope(worker_binding):
+            _BOUND_WORKER = dict(worker_binding)
+        role = _BOUND_WORKER["role"]
     app = FastMCP("danus-core")
     for name in tools_for(role if role is not None else _role()):
-        app.tool(name=name)(_TOOLS[name])
+        fn = _TOOLS[name]
+        app.tool(name=name)(_bound_tool(fn) if _BOUND_WORKER is not None else fn)
+        if _BOUND_WORKER is not None:
+            tool = app._tool_manager.get_tool(name)
+            model = tool.fn_metadata.arg_model
+            model.model_config["extra"] = "forbid"
+            model.model_rebuild(force=True)
+            tool.parameters = model.model_json_schema(by_alias=True)
     return app

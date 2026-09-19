@@ -15,7 +15,7 @@ from danus.orchestration import autonomy as A
 from danus.orchestration import cli, planning
 
 
-RUNNER = """from pathlib import Path\nimport json\nPath('raw').mkdir(exist_ok=True)\nPath('raw/result.json').write_text(json.dumps({'score': 2.0}))\n"""
+RUNNER = """from pathlib import Path\nimport json, sys\np=Path(sys.argv[1])\np.parent.mkdir(parents=True,exist_ok=True)\np.write_text(json.dumps({'score': 2.0}))\n"""
 
 REDUCER = """import json\n\ndef reduce_metrics(protocol, artifacts):\n    return {'score': json.loads(artifacts[0].read_text())['score']}\n"""
 
@@ -39,6 +39,7 @@ def _gateway(pdir: Path, worker: str, role: str):
         "DANUS_PROJECT_DIR": str(pdir),
         "DANUS_AUTHOR": worker,
         "DANUS_ROLE": role,
+        "DANUS_ASSIGNMENT_ID": str((ProgressLedger(pdir).current(worker) or {}).get("assignment_id") or ""),
     }
     old = {key: os.environ.get(key) for key in values}
     os.environ.update(values)
@@ -87,7 +88,7 @@ def _runnable_protocol(pdir: Path) -> str:
             "units": [
                 {
                     "id": "u1",
-                    "argv": [sys.executable, "runner.py"],
+                    "argv": [sys.executable, "runner.py", "raw/result.json"],
                     "artifacts": ["raw/result.json"],
                 }
             ]
@@ -96,6 +97,7 @@ def _runnable_protocol(pdir: Path) -> str:
         decision_rule="record the frozen score without adapting the run",
         author="low2",
         metric_reducer=reducer_ref,
+        execution_files=["runner.py"],
     )
 
 
@@ -115,8 +117,6 @@ def _contract_to_interpret(tmp_path: Path, monkeypatch):
     pdir = L.project_dir("P")
     ledger = ProgressLedger(pdir)
     handoffs = HandoffRequests(ledger)
-    _finish("P", "low")
-
     protocol_id = _runnable_protocol(pdir)
     with _gateway(pdir, "low", "researcher"):
         contract = server.implementation_submit_contract(
@@ -127,6 +127,7 @@ def _contract_to_interpret(tmp_path: Path, monkeypatch):
             forbidden_behaviors=["result-dependent adaptation or extra experiment cells"],
             acceptance_conditions=["one immutable Evidence Record is produced by the Experiment Runtime"],
         )
+    _finish("P", "low")
 
     _apply("P")
     contract_review = _handoff(
@@ -237,6 +238,7 @@ def test_scientific_workflow_commits_evidence_bound_post_hoc_revision(tmp_path: 
         }
         path = planning._proposal_path(pdir)
         path.parent.mkdir(parents=True, exist_ok=True)
+        proposal["assignment_id"] = ledger.current("low")["assignment_id"]
         path.write_text(json.dumps(proposal), encoding="utf-8")
         _finish("P", "low")
 

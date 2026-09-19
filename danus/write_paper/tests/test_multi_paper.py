@@ -153,7 +153,7 @@ def test_multitheorem_factset_equals_union_closure_of_headline_seeds():
     with temp_project() as pdir:
         second = _add_second_theorem(pdir)
         fg = FactGraph(pdir)
-        seeds = ["fact_odd_sum_main", second]
+        seeds = ["5e28191721b35dbb", second]
         # register a multi-theorem paper's target, then resolve it the way the
         # writer does (via resolve_headline -> the SAME toposort).
         assemble.write_target_fact_ids(pdir, seeds, paper_id="combined")
@@ -164,7 +164,7 @@ def test_multitheorem_factset_equals_union_closure_of_headline_seeds():
         assert via_pipeline == via_direct, "the paper's fact set must be the union closure"
         # the union closure contains BOTH theorems' predecessors.
         assert set(seeds).issubset(set(via_pipeline))
-        assert "fact_odd_recurrence" in via_pipeline  # a predecessor of the first
+        assert "a7944e5cffe7b38f" in via_pipeline  # a predecessor of the first
         assert set(fg.predecessors(second)).issubset(set(via_pipeline))
 
 
@@ -192,7 +192,7 @@ def test_workflow_n_papers_one_theorem_each_no_collision():
         second = _add_second_theorem(pdir)
         # paper A (default/legacy) targets the first theorem; paper B (non-default)
         # targets the second. Each gets its own target + workspace.
-        assemble.write_target_fact_ids(pdir, ["fact_odd_sum_main"])           # default
+        assemble.write_target_fact_ids(pdir, ["5e28191721b35dbb"])           # default
         _scaffold_paper_workspace(pdir, "thmB", [second])                    # non-default
 
         with _fake_codex(stdout="%%%A%%%\n" + _CLEAN_TEX) as ca:
@@ -209,7 +209,7 @@ def test_workflow_n_papers_one_theorem_each_no_collision():
         assert "%%%A%%%" in texA.read_text()
         assert "%%%B%%%" in texB.read_text()
         # each writer prompt embedded its OWN theorem's closure (different seeds).
-        assert outA["headline"] == ["fact_odd_sum_main"]
+        assert outA["headline"] == ["5e28191721b35dbb"]
         assert outB["headline"] == [second]
 
 
@@ -221,7 +221,7 @@ def test_workflow_n_papers_multi_theorem_paper():
     with temp_project() as pdir, env(DANUS_PROJECT_DIR=str(pdir), DANUS_AGENTS_ROOT=None):
         second = _add_second_theorem(pdir)
         # a single "combined" paper whose headline set is BOTH theorems.
-        seeds = ["fact_odd_sum_main", second]
+        seeds = ["5e28191721b35dbb", second]
         _scaffold_paper_workspace(pdir, "combined", seeds)
         with _fake_codex(stdout=_CLEAN_TEX) as calls:
             out = server.paper_write(paper_id="combined")
@@ -251,7 +251,7 @@ def test_finalize_paper_records_per_paper_targets():
         project = pdir.name
         second = _add_second_theorem(pdir)
         # default paper -> legacy <project>/TARGET.md
-        rA = cli.do_finalize(project, ["fact_odd_sum_main"])
+        rA = cli.do_finalize(project, ["5e28191721b35dbb"])
         assert rA["target_file"] == str(pdir / "TARGET.md")
         assert (pdir / "TARGET.md").is_file()
         # non-default paper -> <project>/papers/thmB/TARGET.md
@@ -259,7 +259,7 @@ def test_finalize_paper_records_per_paper_targets():
         assert rB["target_file"] == str(pdir / "papers" / "thmB" / "TARGET.md")
         assert (pdir / "papers" / "thmB" / "TARGET.md").is_file()
         # the two targets are independent.
-        assert assemble.target_fact_ids(pdir) == ["fact_odd_sum_main"]
+        assert assemble.target_fact_ids(pdir) == ["5e28191721b35dbb"]
         assert assemble.target_fact_ids(pdir, "thmB") == [second]
 
 
@@ -269,7 +269,7 @@ def test_finalize_rejects_bad_paper_id():
                                      DANUS_PROJECT_DIR=None):
         project = pdir.name
         try:
-            cli.do_finalize(project, ["fact_odd_sum_main"], paper_id="../escape")
+            cli.do_finalize(project, ["5e28191721b35dbb"], paper_id="../escape")
         except SystemExit:
             return
         raise AssertionError("finalize should reject an unsafe paper_id")
@@ -283,14 +283,14 @@ def test_writer_and_ledger_share_one_closure_per_paper():
     mod = _seed_ledger_mod()
     with temp_project(with_ledger=False) as pdir:
         second = _add_second_theorem(pdir)
-        assemble.write_target_fact_ids(pdir, ["fact_odd_sum_main"], paper_id="thmA")
+        assemble.write_target_fact_ids(pdir, ["5e28191721b35dbb"], paper_id="thmA")
         assemble.write_target_fact_ids(pdir, [second], paper_id="thmB")
 
         # each paper's ledger closure == that paper's writer closure (SAME primitive).
         closureA = set(mod.closure_fact_ids(pdir, paper_id="thmA"))
         closureB = set(mod.closure_fact_ids(pdir, paper_id="thmB"))
         assert closureA != closureB
-        assert "fact_odd_sum_main" in closureA and "fact_odd_sum_main" not in closureB
+        assert "5e28191721b35dbb" in closureA and "5e28191721b35dbb" not in closureB
         assert second in closureB and second not in closureA
 
         # seed each paper's ledger into its OWN workspace (no --out).

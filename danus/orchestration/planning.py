@@ -121,6 +121,7 @@ def _proposal_instructions(path: Path, plan_version: Optional[int]) -> str:
     return f"""{version_note}Write exactly one JSON object to `{path}` only if a structural Plan change is needed.
 Schema:
 {{
+  "assignment_id": "<the current Assignment ID injected by the runtime>",
   "base_plan_version": {version},
   "reason": "why the route must change",
   "post_hoc": false,
@@ -195,6 +196,9 @@ def initialize_research(project: str, *, brief: Optional[str] = None, model: Opt
         _set_role(L.WorkerLayout(L.worker_dir(project, workers[2])), "experimenter")
         created = True
 
+    if (pdir / "plan" / "current.json").is_file():
+        with cli.project_control_lock(pdir):
+            cli._recover_project(pdir)
     roles = _validate_roster(project)
     brief_path = pdir / BRIEF_FILE
     if brief is not None:
@@ -324,7 +328,7 @@ def _active_leaves(plan: Dict[str, Any]) -> set[str]:
 def _normalize_proposal(graph: ResearchPlanGraph, raw: Dict[str, Any], proposal_path: Path) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("proposal root must be an object")
-    allowed = {"base_plan_version", "reason", "post_hoc", "evidence_refs", "operations", "tasks"}
+    allowed = {"assignment_id", "base_plan_version", "reason", "post_hoc", "evidence_refs", "operations", "tasks"}
     extra = set(raw) - allowed
     if extra:
         raise ValueError(f"unsupported proposal fields: {sorted(extra)}")
@@ -358,7 +362,7 @@ def _normalize_proposal(graph: ResearchPlanGraph, raw: Dict[str, Any], proposal_
     required = {
         node_id
         for node_id in candidate_leaves
-        if node_id not in current_leaves or current["nodes"].get(node_id) != candidate["nodes"].get(node_id)
+        if node_id not in current_leaves or not graph.node_compatible(node_id, base, candidate)
     }
     required.discard(candidate["root_id"])
 
@@ -393,6 +397,7 @@ def _normalize_proposal(graph: ResearchPlanGraph, raw: Dict[str, Any], proposal_
         )
     tasks.sort(key=lambda item: item["node_id"])
     return {
+        "assignment_id": str(raw.get("assignment_id") or ""),
         "base_plan_version": base,
         "reason": reason,
         "post_hoc": bool(raw.get("post_hoc", False)),
@@ -509,6 +514,8 @@ def _capture_proposal(project: str) -> Optional[Dict[str, Any]]:
         }
 
     try:
+        if not isinstance(raw, dict) or raw.get("assignment_id") != (source_assignment or {}).get("assignment_id"):
+            raise ValueError("proposal assignment_id does not match the current Researcher assignment")
         proposal = _normalize_proposal(graph, raw, path)
         if required_refs:
             if not proposal["post_hoc"]:
@@ -711,6 +718,7 @@ def _plan_handoff(pdir: Path, kind: str, change_id: str) -> Optional[Dict[str, A
         if item.get("kind") == kind
         and item.get("subject_type") == "PLAN_CHANGE"
         and item.get("subject_id") == change_id
+        and item.get("status") not in {"STALE", "CANCELLED"}
     ]
     matches.sort(key=lambda item: (str(item.get("created_at") or ""), item["handoff_id"]))
     return matches[-1] if matches else None
@@ -896,8 +904,7 @@ def _recover_materialized_tasks(pdir: Path) -> List[Dict[str, Any]]:
             change = graph.get_change(record["change_id"])
             if (
                 change.get("status") != "COMMITTED"
-                and current.get("committed_change_id") == change.get("change_id")
-                and int(current["plan_version"]) == int(change.get("base_plan_version") or 0) + 1
+                and graph.committed_version(change, current) is not None
             ):
                 graph.commit_change(change["change_id"], committer="supervisor")
                 change = graph.get_change(change["change_id"])
@@ -967,7 +974,7 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
     pdir = L.project_dir(project)
     if (pdir / L.PAUSE_FILE).is_file():
         return []
-    actions = _recover_materialized_tasks(pdir)
+    actions = []
     captured = _capture_proposal(project)
     if captured:
         actions.append(captured)
@@ -1022,7 +1029,7 @@ def _planning_step_unlocked(project: str) -> List[Dict[str, Any]]:
 
             change_id = str(change["change_id"])
             review_handoff = _plan_handoff(pdir, "REVIEW", change_id)
-            legacy_review = None if review_handoff else _review_assignment(pdir, change, proposal_id)
+            legacy_review = None if review_handoff or change.get("review_epoch") else _review_assignment(pdir, change, proposal_id)
             if change["status"] == "PROPOSED":
                 open_action = _route_action(
                     route_actions,
@@ -1221,8 +1228,8 @@ def planning_step(project: str, *, token_budget: int = 0) -> List[Dict[str, Any]
             trigger="planning_stop_check",
         )
         if control.get("budget_stop"):
-            return []
-        return _planning_step_unlocked(project)
+            return control.get("recovery_applied", [])
+        return control.get("recovery_applied", []) + _planning_step_unlocked(project)
 
 
 def watch_research(project: str, *, heartbeat: float = 1800.0, poll: float = 1.0, token_budget: int = 0) -> Iterator[Dict[str, Any]]:

@@ -524,6 +524,7 @@ def _materialize_decision(
         if item.get("kind") in _ROUTES
         and item.get("subject_type") == "ASSIGNMENT"
         and item.get("subject_id") == subject_id
+        and item.get("parent_handoff_id") == decision["review_handoff_id"]
     ]
     if lineage:
         if len(lineage) != 1:
@@ -591,7 +592,22 @@ def _decision_report(
     }
 
 
-def resolve_scientific_routes(root: Path, actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _route_stop_reason(root: Path, token_budget: int) -> str:
+    from . import cli as CLI
+
+    rows = [CLI.worker_status(L.WorkerLayout(path)) for path in sorted((root / "workers").glob("*")) if path.is_dir()]
+    report = CLI.reconcile(root, rows)
+    if report.get("project_state") != "RUNNING":
+        return f"project_state:{report.get('project_state')}"
+    CLI._apply_resource_budget(report, rows, CLI._resource_snapshot(root, rows, token_budget))
+    if report.get("budget_stop"):
+        return str(report["budget_stop"])
+    if CLI.quota_policy(CLI.Q.load_quota(root)).get("block_new_codex_rounds"):
+        return "quota_block_new_codex_rounds"
+    return ""
+
+
+def resolve_scientific_routes(root: Path, actions: List[Dict[str, Any]], token_budget: int = 0) -> List[Dict[str, Any]]:
     """Persist/replay bounded decisions, then idempotently open their existing Handoffs."""
     from . import cli as CLI
 
@@ -601,6 +617,10 @@ def resolve_scientific_routes(root: Path, actions: List[Dict[str, Any]]) -> List
         ledger = ProgressLedger(root)
         for action in actions:
             if action.get("kind") != "SCIENTIFIC_ROUTE_REQUIRED":
+                continue
+            stop = _route_stop_reason(root, token_budget)
+            if stop:
+                out.append({"subject_id": action.get("subject_id"), "status": "blocked", "reason": stop})
                 continue
             subject_id = str(action.get("subject_id") or "")
             try:
@@ -683,6 +703,10 @@ def resolve_scientific_routes(root: Path, actions: List[Dict[str, Any]]) -> List
                     })
                     continue
 
+            stop = _route_stop_reason(root, token_budget)
+            if stop:
+                out.append({"subject_id": subject_id, "status": "persisted_unmaterialized", "reason": stop})
+                continue
             try:
                 context = _route_context(root, action)
             except ValueError as exc:
@@ -861,6 +885,8 @@ def apply_scientific_route_dispositions(
             ):
                 continue
 
+            if ledger._reopened_after(source) or ledger._reopened_after(route_assignment):
+                continue
             source_stale = ledger._is_plan_stale(source)
             route_stale = ledger._is_plan_stale(route_assignment)
             if source_stale or route_stale:
@@ -1014,9 +1040,9 @@ def _route_report(project: str, report: Dict[str, Any], token_budget: int) -> Di
     report = dict(report)
     decisions: List[Dict[str, Any]] = []
     if _eligible(report):
-        decisions = resolve_scientific_routes(L.project_dir(project), report.get("actions", []))
+        decisions = resolve_scientific_routes(L.project_dir(project), report.get("actions", []), token_budget=token_budget)
     report["scientific_route_decisions"] = decisions
-    if any(item.get("handoff_id") for item in decisions):
+    if any(item.get("handoff_id") or item.get("reason") for item in decisions):
         report = CLI.do_supervise(
             project,
             apply=True,

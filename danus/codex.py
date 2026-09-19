@@ -186,7 +186,8 @@ def _safe_exec_tail(
     ]
 
 
-def exec_cmd(codex_bin: str, model: str, effort: str, *tail: str) -> List[str]:
+def exec_cmd(codex_bin: str, model: str, effort: str, *tail: str,
+             permission_profile: str | None = None) -> List[str]:
     """The uniform ``codex exec`` command prefix + a fail-closed safe tail.
 
     The caller may request ``read-only`` or ``workspace-write``. Historical
@@ -194,6 +195,14 @@ def exec_cmd(codex_bin: str, model: str, effort: str, *tail: str) -> List[str]:
     forced to ``never`` via Codex's current config-override surface. Any other
     sandbox mode is rejected before process launch.
     """
+    if permission_profile is not None:
+        if backend() == "dsh":
+            raise RuntimeError("DSH has no native Codex permission-profile integration")
+        return get_adapter().exec_argv(
+            codex_bin, model, effort,
+            "--config", f'default_permissions="{permission_profile}"',
+            "--config", 'approval_policy="never"', *tail,
+        )
     use_approve_for_me = backend() != "dsh"
     return get_adapter().exec_argv(
         codex_bin, model, effort,

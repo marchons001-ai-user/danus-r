@@ -35,6 +35,9 @@ def test_controller_crash_before_parent_pid_write_keeps_single_worker(tmp_path):
     ):
         cli.do_new("P", roles="high:1")
         wl = L.WorkerLayout(L.worker_dir("P", "high"))
+        from danus.core import ProgressLedger, ResearchPlanGraph
+        ResearchPlanGraph.create(wl.project_dir, node_id="root", title="Root")
+        ProgressLedger(wl.project_dir).assign(worker=wl.name, role="worker", node_id="root", plan_version=1, task="bounded task", write_task=True)
         controller = subprocess.run(
             [
                 sys.executable,

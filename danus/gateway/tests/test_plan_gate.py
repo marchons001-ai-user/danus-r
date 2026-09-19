@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 
-from danus.core import ResearchPlanGraph
+from danus.core import ProgressLedger, ResearchPlanGraph
+from danus.core.handoff import HandoffRequests
 from danus.gateway import server
 from danus.gateway.roles import tools_for
 
@@ -29,7 +30,8 @@ def _env(**values):
 def test_plan_change_gate_round_trip_is_offline(tmp_path):
     ResearchPlanGraph.create(tmp_path, node_id="root", title="Root")
 
-    with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="researcher"):
+    source = ProgressLedger(tmp_path).assign(worker="researcher", role="researcher", node_id="root", plan_version=1, task="propose plan")
+    with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="researcher", DANUS_ROLE="researcher", DANUS_ASSIGNMENT_ID=source["assignment_id"]):
         proposed = server.plan_propose_change(
             base_plan_version=1,
             reason="A material branch is now needed.",
@@ -43,7 +45,14 @@ def test_plan_change_gate_round_trip_is_offline(tmp_path):
     assert pending["changes"][0]["change_id"] == proposed["change_id"]
     assert pending["changes"][0]["status"] == "PROPOSED"
 
-    with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="reviewer"):
+    ledger = ProgressLedger(tmp_path)
+    handoffs = HandoffRequests(ledger)
+    review = handoffs.open(kind="REVIEW", plan_version=1, node_id="root",
+        subject_type="PLAN_CHANGE", subject_id=proposed["change_id"],
+        requested_by="supervisor", source_role="researcher", request="review exact subject", reason="review required")
+    assignment = ledger.assign(worker="reviewer", role="reviewer", node_id="root",
+        plan_version=1, task=review["request"], handoff_id=review["handoff_id"])
+    with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="reviewer", DANUS_ROLE="reviewer", DANUS_ASSIGNMENT_ID=assignment["assignment_id"]):
         reviewed = server.plan_review_change(
             proposed["change_id"],
             approve=True,
@@ -52,6 +61,9 @@ def test_plan_change_gate_round_trip_is_offline(tmp_path):
         approved = server.plan_pending_changes()
 
     assert approved["changes"][0]["status"] == "APPROVED"
+
+    ledger.update(worker="reviewer", state="DONE", actor="runtime", outcome="COMPLETE")
+    handoffs.resolve(review["handoff_id"], assignment_id=assignment["assignment_id"], actor="supervisor", summary="review completed")
 
     with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="supervisor"):
         committed = server.plan_commit_change(proposed["change_id"])

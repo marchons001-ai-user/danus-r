@@ -95,9 +95,6 @@ def test_crash_revision_replay_assignment_and_reopen_is_single_use(tmp_path: Pat
 
 
 def test_conflicting_long_reviewer_output_fails_closed_in_reducer(tmp_path: Path):
-    ledger, source, _ = _ambiguity(tmp_path, source_role="experimenter")
-    reviewer = ledger.current("reviewer", refresh_stale=False)
-    assert reviewer is not None
     log = tmp_path / "review.log"
     log.write_text(
         json.dumps({
@@ -116,14 +113,7 @@ def test_conflicting_long_reviewer_output_fails_closed_in_reducer(tmp_path: Path
         encoding="utf-8",
     )
     bounded = C.inspect_log(log)["last_agent_message"]
-    ledger.update(
-        worker="reviewer",
-        state="DONE",
-        actor="runtime",
-        outcome="COMPLETE",
-        result=bounded,
-        expected_assignment_id=reviewer["assignment_id"],
-    )
+    ledger, source, _ = _ambiguity(tmp_path, source_role="experimenter", review_result=bounded)
 
     report = reduce_supervisor_snapshot(build_supervisor_snapshot(tmp_path, []))
     source_actions = [
@@ -182,7 +172,7 @@ def test_budget_stop_preserves_repair_evidence_obligation(tmp_path: Path, monkey
     )
     proposal_path = planning._proposal_path(tmp_path)
     proposal_path.parent.mkdir(parents=True, exist_ok=True)
-    proposal_path.write_text(json.dumps(_proposal([], post_hoc=False)), encoding="utf-8")
+    proposal_path.write_text(json.dumps({**_proposal([], post_hoc=False), "assignment_id": ledger.current("researcher")["assignment_id"]}), encoding="utf-8")
 
     first = planning._planning_step_unlocked("P")
     assert first[0]["result"] == "blocked"
@@ -203,7 +193,7 @@ def test_budget_stop_preserves_repair_evidence_obligation(tmp_path: Path, monkey
         outcome="COMPLETE",
         expected_assignment_id=repair_assignment["assignment_id"],
     )
-    proposal_path.write_text(json.dumps(_proposal([], post_hoc=False)), encoding="utf-8")
+    proposal_path.write_text(json.dumps({**_proposal([], post_hoc=False), "assignment_id": ledger.current("researcher")["assignment_id"]}), encoding="utf-8")
     monkeypatch.setattr(
         planning.cli,
         "_do_supervise_unlocked",

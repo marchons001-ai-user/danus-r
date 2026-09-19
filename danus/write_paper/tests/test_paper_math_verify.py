@@ -30,7 +30,7 @@ from ._fixtures import env, temp_project
 
 # A two-result paper: a main theorem that \ref's a lemma, the lemma, plus a
 # reduction glue claim. The example fact graph carries the matching facts
-# (fact_odd_sum_main / fact_odd_recurrence), mapped by _PROV below.
+# (5e28191721b35dbb / a7944e5cffe7b38f), mapped by _PROV below.
 _MULTI_TEX = (
     "\\documentclass{amsart}\n"
     "\\newcommand{\\Sn}{S(n)}\n"
@@ -47,7 +47,7 @@ _MULTI_TEX = (
 )
 
 # label -> source fact id (the writer's %%%PROVENANCE%%% map for _MULTI_TEX).
-_PROV = {"thm:main": "fact_odd_sum_main", "lem:rec": "fact_odd_recurrence"}
+_PROV = {"thm:main": "5e28191721b35dbb", "lem:rec": "a7944e5cffe7b38f"}
 
 # A paper whose only proof is an ORPHAN (attached to no labeled result).
 _ORPHAN_TEX = (
