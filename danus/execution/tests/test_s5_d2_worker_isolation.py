@@ -197,6 +197,59 @@ def test_dsh_cannot_fall_back_to_unisolated_worker(tmp_path, monkeypatch):
             pytest.fail("unisolated DSH worker was launched")
 
 
+def test_codex_mcp_proxy_uses_one_shot_socket_without_inherited_gateway_fd(tmp_path):
+    """Codex 0.160 may close the extra FD while spawning MCP subprocesses."""
+    wl, _, _, role = _worker(tmp_path)
+    with W.worker_session(wl, role) as session:
+        assert session["gateway_socket"].is_socket()
+        script = session["cwd"] / "socket_bridge_test.py"
+        script.write_text(
+            "import json, subprocess, sys\n"
+            f"p=subprocess.Popen([{sys.executable!r}, '-I', "
+            f"{str(session['cwd'] / 'gateway_proxy.py')!r}, '--socket', "
+            f"{str(session['gateway_socket'])!r}], "
+            "stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, close_fds=True)\n"
+            "def rpc(method, params, ident):\n"
+            "    p.stdin.write(json.dumps({'jsonrpc':'2.0','id':ident,"
+            "'method':method,'params':params})+'\\n')\n"
+            "    p.stdin.flush()\n"
+            "    while True:\n"
+            "        line=p.stdout.readline()\n"
+            "        assert line, 'MCP proxy closed before its response'\n"
+            "        message=json.loads(line)\n"
+            "        if message.get('id') == ident:\n"
+            "            return message\n"
+            "r=rpc('initialize', {'protocolVersion':'2024-11-05',"
+            "'capabilities':{},'clientInfo':{'name':'socket-smoke','version':'1'}}, 1)\n"
+            "assert 'result' in r, r\n"
+            "p.stdin.write(json.dumps({'jsonrpc':'2.0',"
+            "'method':'notifications/initialized'})+'\\n')\n"
+            "p.stdin.flush()\n"
+            "r=rpc('tools/call',{'name':'gm_search',"
+            "'arguments':{'query':'__socket_bridge_smoke_no_match__'}},2)\n"
+            "assert 'result' in r and not r['result'].get('isError'), r\n"
+            "r=rpc('tools/call',{'name':'fact_revoke',"
+            "'arguments':{'fact_id':'forged','reason':'attack'}},3)\n"
+            "assert 'error' in r or r.get('result',{}).get('isError'), r\n"
+            "print('SOCKET_BRIDGE_PASS',flush=True)\n"
+            "p.stdin.close()\n"
+            "p.wait(timeout=5)\n"
+        )
+        cmd = [
+            str(session["engine"]), "sandbox", "-P", "danus-worker",
+            "-C", str(session["cwd"]), sys.executable, "-I", str(script),
+        ]
+        result = subprocess.run(
+            cmd, cwd=session["cwd"],
+            env=sandbox._sandbox_env(session["home"], session["engine"], {}),
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "SOCKET_BRIDGE_PASS" in result.stdout
+    assert GlobalMemory(wl.project_dir).read("plan") == []
+
+
 @pytest.mark.parametrize("lifetime", ["complete", "crash", "migration"])
 def test_native_codex_worker_uses_policy_and_external_gateway(tmp_path, monkeypatch, lifetime):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
