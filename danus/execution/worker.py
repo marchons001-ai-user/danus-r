@@ -3,6 +3,9 @@
 from contextlib import contextmanager
 import json
 import os
+import selectors
+import struct
+import threading
 from pathlib import Path
 import shutil
 import socket
@@ -25,6 +28,50 @@ def _outside_control(path: Path, control: Path) -> Path:
     if _overlaps(path, control):
         raise ValueError("worker input/runtime must be outside the control project")
     return path
+
+
+def _relay_gateway_socket(listener: socket.socket, gateway_fd: socket.socket,
+                          stop: threading.Event, path: Path) -> None:
+    """One-shot Unix socket bridge for MCP children that close inherited FDs.
+
+    The bound Gateway keeps its own verified assignment; the socket only
+    transports MCP bytes. A disconnect shuts down the original capability
+    channel, so this route cannot revive an old Gateway.
+    """
+    peer = None
+    try:
+        listener.settimeout(0.25)
+        while not stop.is_set():
+            try:
+                peer, _ = listener.accept()
+                break
+            except socket.timeout:
+                continue
+        if peer is None:
+            return
+        _, uid, _ = struct.unpack("3i", peer.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        if uid != os.getuid():
+            return
+        path.unlink(missing_ok=True)  # one connection only; no reconnect
+        with selectors.DefaultSelector() as selector:
+            selector.register(peer, selectors.EVENT_READ, gateway_fd)
+            selector.register(gateway_fd, selectors.EVENT_READ, peer)
+            while not stop.is_set():
+                for key, _ in selector.select(timeout=0.25):
+                    data = key.fileobj.recv(65536)
+                    if not data:
+                        return
+                    key.data.sendall(data)
+    except OSError:
+        pass  # Gateway or MCP peer disconnected; fail closed below
+    finally:
+        if peer is not None:
+            peer.close()
+            try:
+                gateway_fd.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
 
 @contextmanager
@@ -98,8 +145,26 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             server_end, client_end = socket.socketpair()
             server_end.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
             fd = client_end.fileno()
+            # Codex 0.160 can close extra FDs while spawning its MCP child.
+            # The direct inherited FD remains available to the existing D2/D3
+            # attacker probes. Codex's MCP child uses this one-shot Unix socket
+            # instead, through exactly the same bound Gateway.
+            socket_path = view / "gateway.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(socket_path))
+                socket_path.chmod(0o600)
+                listener.listen(1)
+            except BaseException:
+                listener.close()
+                raise
+            bridge_stop = threading.Event()
+            bridge_thread = threading.Thread(
+                target=_relay_gateway_socket,
+                args=(listener, client_end, bridge_stop, socket_path), daemon=True)
+            bridge_thread.start()
             proxy_cmd = [str(engine), "sandbox", "-P", "danus-worker", "-C", str(view),
-                         sys.executable, "-I", str(proxy), str(fd)]
+                         sys.executable, "-I", str(proxy), "--socket", str(socket_path)]
             config = home / "config.toml"
             with config.open("a") as stream:
                 stream.write('\n[shell_environment_policy]\ninherit = "none"\n')
@@ -116,7 +181,8 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             env = codex.subprocess_env(agent_bin)
             env["CODEX_HOME"] = str(home)
             gateway_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
-                           "PYTHONPATH": str(Path(__file__).resolve().parents[2])}
+                           "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+                           "DANUS_SANDBOX_CODEX_BIN": str(engine)}
             for key in ("DANUS_VERIFY_URL", "DANUS_VERIFY_TIMEOUT"):
                 if key in os.environ:
                     gateway_env[key] = os.environ[key]
@@ -129,9 +195,15 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             )
             server_end.close()
             server_end = None
-            yield {"cwd": view, "env": env, "fd": fd, "gateway": gateway,
-                   "binding": binding, "codex_bin": agent_bin, "engine": engine,
-                   "proxy_command": proxy_cmd, "home": home}
+            try:
+                yield {"cwd": view, "env": env, "fd": fd, "gateway": gateway,
+                       "binding": binding, "codex_bin": agent_bin, "engine": engine,
+                       "proxy_command": proxy_cmd, "home": home,
+                       "gateway_socket": socket_path}
+            finally:
+                bridge_stop.set()
+                listener.close()
+                bridge_thread.join(timeout=1)
     finally:
         if client_end is not None:
             try:
