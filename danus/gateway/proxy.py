@@ -1,4 +1,4 @@
-"""Forward MCP stdio over an inherited capability FD; no store access."""
+"""Forward MCP stdio over a bound FD or one-shot Unix socket; no store access."""
 
 import os
 import selectors
