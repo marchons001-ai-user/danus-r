@@ -457,7 +457,10 @@ def test_blocked_reviewer_retry_reuses_frozen_task(tmp_path, monkeypatch):
             task=task, write_task=True,
         )
         ledger.update(worker="low2", state="BLOCKED", actor="runtime", outcome="BLOCKED")
+        wl = L.WorkerLayout(L.worker_dir("P", "low2"))
+        wl.pause.write_text("review:assignment_blocked\n", encoding="utf-8")
         resumed = retry_blocked_review("P")
+        assert not wl.pause.exists()
         assert resumed["action"] == "RETRY_BLOCKED_REVIEW"
         assert resumed["result"] == "assigned"
         assert resumed["worker"] == "low2"
