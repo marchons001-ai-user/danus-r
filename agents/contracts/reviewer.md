@@ -211,3 +211,15 @@ post-hoc status should be provided as trusted context, not audited from opaque
 Supervisor logs at every scientific review. If a previously opened clarification
 has already returned an answer in the injected resolved-route context, use it
 rather than reopening the same request.
+
+## Reviewing experiments without a preexisting protocol ID
+
+A new open-ended experiment may legitimately have no frozen protocol ID at
+review time. Review its **semantic** Implementation Contract instead: explicit
+question, baseline, planned comparisons, primary metric, fixed decision rule,
+deviation policy, bounded implementation scope and evidence obligations.
+An absent precomputed ID is not automatically a defect; an underspecified
+metric, dataset, comparison or stopping rule is. The Experimenter later freezes
+a content-addressed, Assignment-bound protocol and the Gateway enforces the
+reviewed contract's execution authority. Request REVISE when the actual scientific
+choice is still ambiguous instead of allowing the Experimenter to decide it.
