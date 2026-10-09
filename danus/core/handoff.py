@@ -88,7 +88,7 @@ class HandoffRequests:
                 or target_role not in {"researcher", "experimenter"}
                 or not subject or subject.get("role") != "reviewer"
                 or subject.get("assignment_id") != source_assignment_id
-                or subject.get("state") not in {"ASSIGNED", "RUNNING"}):
+                or subject.get("state") not in {"ASSIGNED", "RUNNING", "BLOCKED"}):
                 raise ValueError("CLARIFY requires an active Reviewer source and a scientific target role")
         else:
             if target_role:
