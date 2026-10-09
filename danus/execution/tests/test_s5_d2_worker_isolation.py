@@ -198,10 +198,28 @@ def test_dsh_cannot_fall_back_to_unisolated_worker(tmp_path, monkeypatch):
 
 
 def test_codex_mcp_proxy_uses_one_shot_socket_without_inherited_gateway_fd(tmp_path):
-    """Codex 0.160 may close the extra FD while spawning MCP subprocesses."""
+    """Host-only MCP byte proxy works when Codex drops inherited descriptors."""
     wl, _, _, role = _worker(tmp_path)
     with W.worker_session(wl, role) as session:
         assert session["gateway_socket"].is_socket()
+        # The model-side sandbox must not be able to reach the private
+        # host-side capability channel, even when it knows the path.
+        denied = subprocess.run(
+            [str(session["engine"]), "sandbox", "-P", "danus-worker",
+             "-C", str(session["cwd"]), sys.executable, "-I", "-c",
+             "import errno,socket; "
+             f"s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); "
+             f"p={str(session['gateway_socket'])!r}; "
+             "\ntry: s.connect(p)\n"
+             "except OSError as e: assert e.errno in "
+             "(errno.EPERM, errno.EACCES, errno.ENOENT), e\n"
+             "else: raise AssertionError('worker connected to private Gateway')\n"
+             "print('PRIVATE_SOCKET_DENIED')"],
+            env=sandbox._sandbox_env(session["home"], session["engine"], {}),
+            cwd=session["cwd"], capture_output=True, text=True, timeout=15,
+        )
+        assert denied.returncode == 0, (denied.stdout, denied.stderr)
+        assert "PRIVATE_SOCKET_DENIED" in denied.stdout
         script = session["cwd"] / "socket_bridge_test.py"
         script.write_text(
             "import json, subprocess, sys\n"
@@ -235,13 +253,11 @@ def test_codex_mcp_proxy_uses_one_shot_socket_without_inherited_gateway_fd(tmp_p
             "p.stdin.close()\n"
             "p.wait(timeout=5)\n"
         )
-        cmd = [
-            str(session["engine"]), "sandbox", "-P", "danus-worker",
-            "-C", str(session["cwd"]), sys.executable, "-I", str(script),
-        ]
+        # Only the fixed, trusted MCP transport may connect to this socket.
+        # Unlike the model's tools, Codex launches this proxy host-side.
         result = subprocess.run(
-            cmd, cwd=session["cwd"],
-            env=sandbox._sandbox_env(session["home"], session["engine"], {}),
+            [sys.executable, "-I", str(script)], cwd=session["cwd"],
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
             timeout=30,
         )
