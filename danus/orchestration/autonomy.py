@@ -1073,7 +1073,7 @@ def recover_premature_proposal_review(project: str, *, token_budget: int = 0) ->
     wl = L.WorkerLayout(L.worker_dir(project, source["worker"]))
     rows = CLI._project_rows(project)
     row = next((r for r in rows if r.get("worker") == source["worker"]), None)
-    if (root / L.PAUSE_FILE).exists() or not row or row.get("alive")):
+    if (root / L.PAUSE_FILE).exists() or not row or row.get("alive"):
         raise ValueError("project or Researcher runtime is still running/paused")
     pause_reason = CLI._pause_reason(wl)
     if pause_reason not in {None, "review:assignment_needs_review"}:
