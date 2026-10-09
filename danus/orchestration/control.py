@@ -528,6 +528,8 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             extra: Dict[str, Any] = {}
             if kind == "INTERPRET":
                 summary = "interpretation request completed; source disposition remains explicit"
+            elif kind == "CLARIFY" and subject_type == "ASSIGNMENT":
+                summary = "target role answered the clarification; original Reviewer must resume its audit"
             elif kind == "RETHINK" and subject_type == "ASSIGNMENT":
                 summary = "assignment rethink completed; source disposition remains explicit"
             elif kind == "REVIEW" and subject_type == "ASSIGNMENT":
