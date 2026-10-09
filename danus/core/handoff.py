@@ -173,7 +173,7 @@ class HandoffRequests:
         old_epoch = (record["subject_type"] in {"PLAN_CHANGE", "ASSIGNMENT"}
                      and int(record.get("review_epoch", 0)) != int(subject.get("review_epoch", 0)))
         if (record["subject_type"] == "ASSIGNMENT" and record["kind"] in {"INTERPRET", "RETHINK", "ESCALATE", "CLARIFY"}
-            and not record.get("parent_handoff_id") and subject.get("state") in {"ASSIGNED", "RUNNING", "DONE"}
+            and not record.get("parent_handoff_id") and subject.get("state") in {"ASSIGNED", "RUNNING", "BLOCKED", "DONE"}
             and int(record.get("review_epoch", 0)) == int(subject.get("review_epoch", 0)) + 1):
             old_epoch = False
         if old_epoch or (subject.get("status") == "STALE" and record["status"] in {"OPEN", "ASSIGNED"}):
