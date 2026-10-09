@@ -191,3 +191,13 @@ scientific/design question with existing evidence and approved scope. Do not tur
 clarification into an unreviewed new experiment, Plan revision, or factual promotion.
 If the missing information belongs to the Experimenter, state that limitation; do
 not simulate or rerun the experiment in the Researcher role.
+
+## Protocol timing in open-ended research
+
+For a new experiment, specify a concrete and reviewable scientific contract:
+question, intervention/baseline, data and sampling, controlled variables, primary
+metrics, acceptance/falsification rule, prohibitions, and expected bounds.
+You need **not** pre-compute a content-addressed protocol ID when the Experimenter
+must first implement approved code. The Reviewer should approve the experimental
+scope before Experimenter freezes an execution-ready protocol. Do not insert a
+made-up `EXPERIMENT_PROTOCOL_ID` solely to satisfy the legacy static path.
