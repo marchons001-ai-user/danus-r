@@ -183,3 +183,78 @@ def test_legacy_wait_for_operator_is_retriaged_once_by_new_role_policy(tmp_path,
     assert len(selected) == 1
     assert len(D._history(root)) == len(events)
 
+
+
+def test_repeat_role_node_rejected_after_one_failed_recovery_without_progress(tmp_path, monkeypatch):
+    """Do not spend another worker round rerunning the same blocked R2 task."""
+    root = tmp_path / "P"
+    root.mkdir()
+    report, rows = _report(), _rows()
+    monkeypatch.setattr(L, "project_dir", lambda p: root)
+    monkeypatch.setattr(cli, "_project_rows", lambda p: rows)
+    monkeypatch.setattr(cli, "_do_supervise_unlocked", lambda p, **kw: report)
+    D._write(root, {
+        "event": "DEADLOCK_ACTION", "deadlock_id": "1" * 16,
+        "target_role": "researcher", "node_id": "R1", "result": "assigned",
+        "assignment_id": "2" * 16, "plan_version": 2,
+        "completed_nodes": [],
+    })
+    packets = []
+    monkeypatch.setattr(D, "_model_proposal", lambda packet: (
+        packets.append(packet) or {
+            "target_role": "researcher", "node_id": "R1",
+            "rationale": "attempt the same unchanged frozen task",
+        }
+    ))
+    from danus.orchestration import idle_recovery
+
+    dispatched = []
+    monkeypatch.setattr(
+        idle_recovery, "dispatch_role_choice",
+        lambda *a, **k: dispatched.append(k) or {"result": "assigned"},
+    )
+    watch = D.DeadlockWatch("P")
+    assert watch.observe(report, rows, now=0) is None
+    assert watch.observe(report, rows, now=180)
+    assert not dispatched
+    assert packets[0]["prior_recovery_attempts"][0]["target_role"] == "researcher"
+    events = D._history(root)
+    assert events[-1]["event"] == "DEADLOCK_ACTION"
+    assert events[-1]["result"] == "rejected"
+    assert "different scientific role" in events[-1]["error"]
+
+
+def test_different_role_remains_legal_after_researcher_retry(tmp_path, monkeypatch):
+    """Guard checks role+node identity, not the entire scientific node."""
+    root = tmp_path / "P"
+    root.mkdir()
+    report, rows = _report(), _rows()
+    monkeypatch.setattr(L, "project_dir", lambda p: root)
+    monkeypatch.setattr(cli, "_project_rows", lambda p: rows)
+    monkeypatch.setattr(cli, "_do_supervise_unlocked", lambda p, **kw: report)
+    D._write(root, {
+        "event": "DEADLOCK_ACTION", "deadlock_id": "1" * 16,
+        "target_role": "researcher", "node_id": "R1", "result": "assigned",
+        "assignment_id": "2" * 16, "plan_version": 2,
+        "completed_nodes": [],
+    })
+    monkeypatch.setattr(D, "_model_proposal", lambda packet: {
+        "target_role": "reviewer", "node_id": "R1",
+        "rationale": "independently diagnose the canonical task blocker",
+    })
+    from danus.orchestration import idle_recovery
+
+    dispatched = []
+    monkeypatch.setattr(
+        idle_recovery, "dispatch_role_choice",
+        lambda p, **k: dispatched.append(k) or {
+            "result": "assigned", "assignment_id": "3" * 16,
+        },
+    )
+    watch = D.DeadlockWatch("P")
+    watch.observe(report, rows, now=0)
+    watch.observe(report, rows, now=180)
+    assert len(dispatched) == 1
+    assert dispatched[0]["target_role"] == "reviewer"
+    assert D._history(root)[-1]["result"] == "assigned"
+
