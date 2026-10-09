@@ -82,7 +82,7 @@ def _resolved_scientific_route_context(project: str, assignment_id: str) -> str:
     routes = [
         item
         for item in HandoffRequests(ledger).all()
-        if item.get("kind") in {"INTERPRET", "RETHINK"}
+        if item.get("kind") in {"INTERPRET", "RETHINK", "CLARIFY"}
         and item.get("subject_type") == "ASSIGNMENT"
         and item.get("subject_id") == assignment_id
         and item.get("status") == "RESOLVED"
