@@ -15,7 +15,9 @@ from danus.core._util import append_jsonl, read_jsonl, utc_now
 from danus.execution import layout as L
 
 _IDLE_SECONDS = 180.0
-_ALLOWED = {"RECOVER_PREMATURE_PROPOSAL", "WAIT_FOR_OPERATOR"}
+# Version the decision protocol, not just the incident. Existing incidents
+# recorded by older routers may be re-triaged once by the current policy.
+_DECISION_POLICY = "three-role-route-v1"
 
 
 def _events_path(root: Path) -> Path:
@@ -224,12 +226,15 @@ class DeadlockWatch:
             history = _history(self.root)
             existing = _latest_open(history)
             if existing is not None and existing.get("signature") == signature:
-                # A manual capture should still receive its first model triage
-                # on the next 180-second observation, but never a second one.
+                # A prior generation may have returned WAIT_FOR_OPERATOR.
+                # Deduplicate each *policy version*, not every historical
+                # suggestion across software upgrades.
                 if any(e.get("deadlock_id") == existing["deadlock_id"]
-                       and e.get("event") == "DEADLOCK_SUGGESTION" for e in history):
+                       and e.get("event") == "DEADLOCK_SUGGESTION"
+                       and e.get("policy_version") == _DECISION_POLICY
+                       for e in history):
                     return None
-                event = existing
+                event = {**existing, "snapshot": _packet(actual, actual_rows, root=self.root)}
                 ident = existing["deadlock_id"]
             else:
                 if existing is not None:
@@ -259,7 +264,8 @@ class DeadlockWatch:
                 "rationale": f"model triage failed: {type(exc).__name__}: {exc}"[:600],
             }
         _write(self.root, {"event": "DEADLOCK_SUGGESTION", "deadlock_id": ident,
-                           **suggestion, "model": "gpt-5.6-luna", "effort": "medium"})
+                           **suggestion, "model": "gpt-5.6-luna", "effort": "medium",
+                           "policy_version": _DECISION_POLICY})
         try:
             role = suggestion["target_role"]
             node = suggestion["node_id"]
