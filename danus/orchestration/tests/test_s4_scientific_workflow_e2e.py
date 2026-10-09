@@ -511,7 +511,12 @@ def test_contract_review_waits_for_r1_then_uses_exact_v1_and_unlocks_e1(tmp_path
         )
         assert gate["node_id"] == "V1"
         assert gate["status"] == "OPEN"  # must NOT start before R1 is complete
-        assert any(x.get("result") == "waiting_dependencies" for x in pending)
+        assert any(
+            x.get("result") == "waiting_dependencies"
+            and x.get("node_id") == "V1"
+            and x.get("missing_dependencies") == ["R1"]
+            for x in pending
+        )
         assert ledger.current("low2") is None or ledger.current("low2")["node_id"] != "V1"
         assert ledger.current("low3") is None
 
