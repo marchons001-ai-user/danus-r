@@ -167,8 +167,13 @@ def _bootstrap_task(pdir: Path, plan_version: int) -> str:
         "and the injected project RESEARCH_CHARTER. "
         "Inspect only the existing workspace/context needed to understand the problem. Design the "
         "smallest coarse Research Plan DAG that can answer the brief, with explicit Researcher/"
-        "Reviewer/Experimenter handoffs where scientifically needed. Do not run planned experiments "
-        "in this bootstrap task.\n\n"
+        "Reviewer/Experimenter handoffs where scientifically needed. Every nontrivial "
+        "Experimenter execution must have a Researcher-proposed Implementation Contract "
+        "and an independent Reviewer approval before it runs. The contract may define "
+        "the testable scientific scope without knowing its future protocol ID; "
+        "the Experimenter freezes an Assignment-bound protocol only after approval. "
+        "Arrange any dependencies needed to complete that review and do not "
+        "run planned experiments in this bootstrap task.\n\n"
         + _proposal_instructions(_proposal_path(pdir), plan_version)
         + "\nAfter the proposal file is fully written, end this assignment with COMPLETE.\n"
     )
