@@ -402,3 +402,39 @@ def test_frozen_protocol_get_rejects_other_task_and_revoked_assignment(tmp_path,
         capability.revoke(binding)
         with pytest.raises(PermissionError, match="revoked|epoch"):
             server.experiment_protocol_get(protocol_id)
+
+
+def _invoke_bound_protocol_mcp_child(protocol_id, response_queue):
+    """Call the same permission wrapper installed by build_app()."""
+    try:
+        result = server._bound_tool(server.experiment_protocol_get)(protocol_id)
+        response_queue.put(("ok", result["protocol"]["protocol_id"]))
+    except BaseException as exc:
+        response_queue.put(("error", type(exc).__name__ + ": " + str(exc)))
+
+
+def test_bound_protocol_mcp_wrapper_finishes_without_recursive_lock_deadlock(tmp_path, monkeypatch):
+    """A bound MCP read must return promptly; separate process catches real flock hangs."""
+    import multiprocessing
+    import pytest
+
+    with _root(tmp_path):
+        _, _, protocol_id, _ = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        context = multiprocessing.get_context("fork")  # Linux/WSL: preserve issued capability
+        responses = context.Queue()
+        child = context.Process(
+            target=_invoke_bound_protocol_mcp_child,
+            args=(protocol_id, responses),
+        )
+        child.start()
+        try:
+            child.join(timeout=6)
+            if child.is_alive():
+                pytest.fail("Bound MCP protocol read deadlocked acquiring capability locks")
+            assert child.exitcode == 0
+            assert responses.get(timeout=2) == ("ok", protocol_id)
+        finally:
+            if child.is_alive():
+                child.kill()
+            child.join(timeout=2)
+            responses.close()
