@@ -51,7 +51,7 @@ def _review_governance_context(project: str, role_name: str, worker: str) -> str
         task = task_path.read_text(encoding="utf-8").lower()
     except OSError:
         return ""
-    if not any(x in task for x in ("revision provenance", "post-hoc provenance", "plan revision", "post_hoc")):
+    if not any(x in task for x in ("revision", "post-hoc", "post_hoc")):
         return ""
     try:
         graph = ResearchPlanGraph(root)
