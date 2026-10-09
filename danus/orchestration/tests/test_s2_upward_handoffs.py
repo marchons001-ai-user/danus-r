@@ -327,6 +327,10 @@ def test_premature_researcher_review_retries_without_completing_own_node(tmp_pat
             result=("The scientific route remains ambiguous.\n"
                     "DANUS_REVIEW_CLASS_VERIFIED: SCIENTIFIC_AMBIGUITY"),
         )
+        assert A._auto_complete(root, {
+            "action": "REVIEW", "reason": "completion_not_recorded",
+            "worker": "low2", "node_id": "R1", "assignment_id": review_id,
+        }) is None
         handoffs.resolve(review["handoff_id"], assignment_id=review_id,
                          actor="low2", summary="classification complete")
         escalation = handoffs.open(
