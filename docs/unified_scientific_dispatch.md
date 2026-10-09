@@ -53,6 +53,10 @@ not a separate reviewer allocation path.
 
 Scientific workers can call `workflow_submit_result(outcome, next_intent,
 subject_id, artifact_refs)` **only through their scoped gateway identity**.
+After the assignment's authoritative terminal Progress state is recorded, the
+trusted Runtime checks for this event and, if absent, writes one JSON Result
+with `next_intent=WAIT`. It never fabricates a role choice. A previously
+submitted structured Result wins if its outcome matches the terminal state.
 Assignment identity, role, project and Plan version are injected by the
 Gateway, not supplied by the model. Events are append-only and idempotent per
 Assignment. Conflicting replay is rejected; unknown/malformed kinds and paths
