@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from danus.orchestration import quota as Q
@@ -14,32 +13,6 @@ def _window(used: int, minutes: int, reset: int) -> dict:
         "windowDurationMins": minutes,
         "resetsAt": reset,
     }
-
-
-def _structured_round(path: Path, *, inp: int, cached: int, output: int, mtime: float) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "type": "turn.completed",
-        "usage": {
-            "input_tokens": inp,
-            "cached_input_tokens": cached,
-            "cache_write_input_tokens": 0,
-            "output_tokens": output,
-            "reasoning_output_tokens": 0,
-        },
-    }) + "\n", encoding="utf-8")
-    os.utime(path, (mtime, mtime))
-
-
-def _weekly(used: int, reset: int) -> dict:
-    return Q.normalize_rate_limits({
-        "rateLimits": {
-            "limitId": "codex",
-            "primary": _window(used, 10080, reset),
-            "secondary": None,
-            "planType": "plus",
-        }
-    })
 
 
 def test_normalize_prefers_codex_bucket_and_matches_window_duration():
@@ -128,180 +101,6 @@ def test_legacy_bucket_is_supported_without_guessing_unknown_window():
     assert got["windows"]["weekly"] is None
 
 
-def test_five_hour_proxy_first_observation_has_no_fake_percent(tmp_path: Path, monkeypatch):
-    root = tmp_path / "projects"
-    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
-    now = 100_000.0
-    proxy = Q._local_five_hour_proxy(_weekly(0, 200_000), None, now=now)
-
-    assert proxy["status"] == "warming_up"
-    assert proxy["window_complete"] is False
-    assert proxy["coverage_seconds"] == 0
-    assert proxy["uncached_tokens"] == 0
-    assert proxy["rounds"] == 0
-    assert proxy["weekly_equivalent_percent"] is None
-    assert proxy["pace_pressure_percent"] is None
-    assert proxy["calibration"]["status"] == "waiting_for_weekly_delta"
-    assert proxy["calibration"]["anchor_weekly_used_percent"] == 0.0
-    assert proxy["calibration"]["tokens_per_weekly_percent"] is None
-
-
-def test_five_hour_proxy_backfills_existing_logs_but_stays_uncalibrated(tmp_path: Path, monkeypatch):
-    root = tmp_path / "projects"
-    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
-    now = 100_000.0
-    project = root / "P"
-    old = project / "workers" / "w" / "logs" / "round_1.log"
-    old.parent.mkdir(parents=True, exist_ok=True)
-    old.write_text("legacy or DSH log\n", encoding="utf-8")
-    os.utime(old, (now - 20_000, now - 20_000))
-    _structured_round(
-        project / "workers" / "w" / "logs" / "round_2.log",
-        inp=1_000, cached=200, output=200, mtime=now - 60,
-    )
-
-    proxy = Q._local_five_hour_proxy(_weekly(0, 200_000), None, now=now)
-
-    assert proxy["window_complete"] is True
-    assert proxy["status"] == "uncalibrated"
-    assert proxy["uncached_tokens"] == 1_000
-    assert proxy["rounds"] == 1
-    assert proxy["pace_pressure_percent"] is None
-
-
-def test_five_hour_proxy_calibrates_from_real_weekly_delta(tmp_path: Path, monkeypatch):
-    root = tmp_path / "projects"
-    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
-    now = 100_000.0
-    project = root / "P"
-    old = project / "workers" / "w" / "logs" / "round_0.log"
-    old.parent.mkdir(parents=True, exist_ok=True)
-    old.write_text("older runtime history\n", encoding="utf-8")
-    os.utime(old, (now - 20_000, now - 20_000))
-
-    first = Q._local_five_hour_proxy(_weekly(10, 200_000), None, now=now)
-    _structured_round(
-        project / "workers" / "w" / "logs" / "round_1.log",
-        inp=1_000, cached=200, output=200, mtime=now + 100,
-    )
-    second = Q._local_five_hour_proxy(
-        _weekly(12, 200_000), {"five_hour_proxy": first}, now=now + 200,
-    )
-
-    assert second["status"] == "ready"
-    assert second["uncached_tokens"] == 1_000
-    assert second["calibration"]["status"] == "ready"
-    assert second["calibration"]["tokens_per_weekly_percent"] == 500.0
-    assert second["calibration"]["recalibration_reason"] == "online_update"
-    assert second["weekly_equivalent_percent"] == 2.0
-    assert second["pace_pressure_percent"] == 67.2
-
-
-def test_five_hour_proxy_recalibrates_from_latest_interval(tmp_path: Path, monkeypatch):
-    root = tmp_path / "projects"
-    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
-    now = 100_000.0
-    project = root / "P"
-    old = project / "workers" / "w" / "logs" / "round_0.log"
-    old.parent.mkdir(parents=True, exist_ok=True)
-    old.write_text("history\n", encoding="utf-8")
-    os.utime(old, (now - 20_000, now - 20_000))
-
-    first = Q._local_five_hour_proxy(_weekly(10, 200_000), None, now=now)
-    _structured_round(project / "workers" / "w" / "logs" / "round_1.log",
-                      inp=1_000, cached=200, output=200, mtime=now + 100)
-    second = Q._local_five_hour_proxy(_weekly(12, 200_000), {"five_hour_proxy": first}, now=now + 200)
-    assert second["calibration"]["tokens_per_weekly_percent"] == 500.0
-
-    _structured_round(project / "workers" / "w" / "logs" / "round_2.log",
-                      inp=2_000, cached=500, output=500, mtime=now + 300)
-    third = Q._local_five_hour_proxy(_weekly(13, 200_000), {"five_hour_proxy": second}, now=now + 400)
-
-    assert third["calibration"]["tokens_per_weekly_percent"] == 2_000.0
-    assert third["calibration"]["recalibration_reason"] == "online_update"
-
-
-def test_five_hour_proxy_expires_old_calibration(tmp_path: Path, monkeypatch):
-    root = tmp_path / "projects"
-    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
-    now = 100_000.0
-    previous = {
-        "five_hour_proxy": {
-            "observed_since": Q._iso(now - 20_000),
-            "calibration": {
-                "status": "ready",
-                "weekly_reset_at": 200_000,
-                "plan_type": "plus",
-                "limit_id": "codex",
-                "anchor_observed_at": Q._iso(now - 20_000),
-                "anchor_weekly_used_percent": 10.0,
-                "calibrated_at": Q._iso(now - Q._CALIBRATION_MAX_AGE_SECONDS - 1),
-                "tokens_per_weekly_percent": 500.0,
-            },
-        },
-    }
-    proxy = Q._local_five_hour_proxy(_weekly(10, 200_000), previous, now=now)
-
-    assert proxy["status"] == "uncalibrated"
-    assert proxy["calibration"]["tokens_per_weekly_percent"] is None
-    assert proxy["calibration"]["recalibration_reason"] == "calibration_expired"
-
-
-def test_five_hour_proxy_reanchors_if_weekly_usage_drops(tmp_path: Path, monkeypatch):
-    root = tmp_path / "projects"
-    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
-    now = 100_000.0
-    previous = {
-        "five_hour_proxy": {
-            "observed_since": Q._iso(now - 20_000),
-            "calibration": {
-                "status": "ready",
-                "weekly_reset_at": 200_000,
-                "plan_type": "plus",
-                "limit_id": "codex",
-                "anchor_observed_at": Q._iso(now - 100),
-                "anchor_weekly_used_percent": 20.0,
-                "calibrated_at": Q._iso(now - 100),
-                "tokens_per_weekly_percent": 500.0,
-            },
-        },
-    }
-    proxy = Q._local_five_hour_proxy(_weekly(5, 200_000), previous, now=now)
-
-    assert proxy["calibration"]["status"] == "waiting_for_weekly_delta"
-    assert proxy["calibration"]["anchor_weekly_used_percent"] == 5.0
-    assert proxy["calibration"]["tokens_per_weekly_percent"] is None
-    assert proxy["calibration"]["recalibration_reason"] == "weekly_decreased"
-    assert proxy["pace_pressure_percent"] is None
-
-
-def test_five_hour_proxy_keeps_fresh_calibration_stale_on_sensor_failure(tmp_path: Path, monkeypatch):
-    root = tmp_path / "projects"
-    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
-    now = 100_000.0
-    previous = {
-        "five_hour_proxy": {
-            "observed_since": Q._iso(now - 20_000),
-            "calibration": {
-                "status": "ready",
-                "weekly_reset_at": 200_000,
-                "plan_type": "plus",
-                "limit_id": "codex",
-                "anchor_observed_at": Q._iso(now - 100),
-                "anchor_weekly_used_percent": 10.0,
-                "calibrated_at": Q._iso(now - 100),
-                "tokens_per_weekly_percent": 500.0,
-            },
-        },
-    }
-    proxy = Q._local_five_hour_proxy(Q._failure("temporary"), previous, now=now)
-
-    assert proxy["status"] == "stale"
-    assert proxy["calibration"]["status"] == "waiting_for_official"
-    assert proxy["calibration"]["tokens_per_weekly_percent"] == 500.0
-    assert proxy["weekly_equivalent_percent"] is None
-
-
 def test_read_and_persist_official_app_server_shape(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DANUS_AGENTS_ROOT", str(tmp_path / "projects"))
     fake = tmp_path / "fake-codex"
@@ -338,8 +137,7 @@ for line in sys.stdin:
     assert got["reset_credits_available"] == 3
     assert got["windows"]["5h"]["remaining_percent"] == 65
     assert got["windows"]["weekly"]["remaining_percent"] == 30
-    assert got["five_hour_proxy"]["source"] == "danus_structured_round_logs"
-    assert got["five_hour_proxy"]["approximate"] is True
+    assert "five_hour_proxy" not in got
     saved = Q.load_quota(project)
     assert saved == got
     assert Q.quota_path(project) == project / "supervisor" / "quota.json"
@@ -354,7 +152,7 @@ def test_sensor_failure_is_persisted_and_never_raises(tmp_path: Path, monkeypatc
     assert got["reported_window_durations_mins"] == []
     assert got["reset_credits_available"] is None
     assert got["windows"] == {"5h": None, "weekly": None}
-    assert got["five_hour_proxy"]["calibration"]["status"] == "unavailable"
+    assert "five_hour_proxy" not in got
     assert Q.load_quota(project) == got
 
 
