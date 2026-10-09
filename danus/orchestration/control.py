@@ -153,6 +153,32 @@ def _all_plan_changes(graph: ResearchPlanGraph) -> List[Dict[str, Any]]:
     return [graph.get_change(path.stem) for path in sorted(graph.changes_dir.glob("*.json"))]
 
 
+def _contract_review_node(project_dir: Path, plan: Dict[str, Any],
+                          contract: Dict[str, Any]) -> str:
+    """Find an unambiguous frozen Reviewer predecessor of an experiment.
+
+    The bound V1 task is the independent contract approval. Never infer an
+    arbitrary Reviewer from worker availability or create a new Plan node.
+    """
+    from .autonomy import _task_spec
+
+    nodes = plan["nodes"]
+    target = nodes.get(str(contract.get("node_id") or "")) or {}
+    candidates = []
+    for predecessor in target.get("depends_on") or []:
+        node = nodes.get(predecessor)
+        if not node or node.get("state") != "ACTIVE":
+            continue
+        spec = _task_spec(project_dir, predecessor)
+        if (
+            spec.get("status") == "ready"
+            and spec.get("role") == "reviewer"
+            and "contract" in spec["task"].lower()
+        ):
+            candidates.append(predecessor)
+    return candidates[0] if len(candidates) == 1 else ""
+
+
 def build_supervisor_snapshot(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Read the state needed by the deterministic Supervisor reducer once."""
     root = Path(project_dir)
@@ -160,8 +186,15 @@ def build_supervisor_snapshot(project_dir: Path, worker_rows: List[Dict[str, Any
     ledger = ProgressLedger(root)
     current_assignments = ledger.snapshot(refresh_stale=True)
     pending_plan_changes = graph.pending_changes()
+    plan = graph.snapshot()
+    contracts = ledger.implementation_contracts()
     return {
-        "plan": graph.snapshot(),
+        "plan": plan,
+        "contract_review_nodes": {
+            c["contract_id"]: node
+            for c in contracts
+            if (node := _contract_review_node(root, plan, c))
+        },
         "plan_changes": pending_plan_changes,
         "all_plan_changes": _all_plan_changes(graph),
         "current_assignments": current_assignments,
@@ -170,7 +203,7 @@ def build_supervisor_snapshot(project_dir: Path, worker_rows: List[Dict[str, Any
             for item in ledger.assignments()
         ],
         "completed_nodes": ledger.completed_nodes(),
-        "implementation_contracts": ledger.implementation_contracts(),
+        "implementation_contracts": contracts,
         "pending_implementation_contracts": ledger.pending_implementation_contracts(),
         "handoffs": HandoffRequests(ledger).all(),
         "workers": [dict(row) for row in worker_rows],
@@ -746,7 +779,8 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                         source_id = str(source.get("assignment_id") or "")
                     route(
                         "OPEN_HANDOFF",
-                        node_id=contract.get("node_id"),
+                        node_id=snapshot.get("contract_review_nodes", {}).get(contract_id)
+                                or contract.get("node_id"),
                         reason="implementation_contract_requires_review",
                         handoff_kind="REVIEW",
                         subject_type="IMPLEMENTATION_CONTRACT",
