@@ -172,6 +172,12 @@ def _bootstrap_task(pdir: Path, plan_version: int) -> str:
         "and an independent Reviewer approval before it runs. The contract may define "
         "the testable scientific scope without knowing its future protocol ID; "
         "the Experimenter freezes an Assignment-bound protocol only after approval. "
+        "For an Experimenter Plan node that will receive a downstream Implementation "
+        "Contract, its exact Plan task must be the canonical text from "
+        "ProgressLedger.implementation_task(goal=..., must_preserve_invariants=..., "
+        "forbidden_behaviors=..., acceptance_conditions=...). The Researcher must "
+        "submit those identical contract fields, so the approved contract matches "
+        "the versioned Plan task byte for byte. Do not guess a protocol ID. "
         "Arrange any dependencies needed to complete that review and do not "
         "run planned experiments in this bootstrap task.\n\n"
         + _proposal_instructions(_proposal_path(pdir), plan_version)
