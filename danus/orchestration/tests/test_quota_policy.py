@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+
+from danus.core import ResearchPlanGraph
 
 from danus.execution import layout as L
 from danus.orchestration import cli, quota as Q
@@ -55,3 +58,33 @@ def test_observational_quota_has_no_local_five_hour_prediction(tmp_path):
     assert "five_hour_proxy" not in data
     assert "block_new_codex_rounds" not in data
     assert not hasattr(cli, "_apply_quota_gate")
+
+
+def test_supervisor_ignores_stale_pressure_snapshot_during_apply(tmp_path, monkeypatch):
+    root = _project(tmp_path, monkeypatch)
+    project = root / "P"
+    ResearchPlanGraph.create(project, node_id="P0", title="Research")
+    old_snapshot = {
+        "schema_version": 1,
+        "available": True,
+        "five_hour_proxy": {
+            "status": "ready",
+            "weekly_equivalent_percent": 50,
+            "pace_pressure_percent": 900,
+        },
+        "windows": {
+            "5h": None,
+            "weekly": {"remaining_percent": 89, "resets_at": 2000000000},
+        },
+    }
+    path = Q.quota_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(old_snapshot), encoding="utf-8")
+    report = cli.do_supervise("P", apply=True, token_budget=0)
+    assert report["project_state"] == "RUNNING"
+    assert "quota_policy" not in report
+    assert "quota_applied" not in report
+    assert all(
+        not L.WorkerLayout(root / "P" / "workers" / name).pause.exists()
+        for name in ("high", "high2", "high3")
+    )
