@@ -293,3 +293,112 @@ def test_scientific_workflow_commits_evidence_bound_post_hoc_revision(tmp_path: 
         assert len(ledger.assignments()) == assignment_count
         assert len(handoffs.all()) == handoff_count
         assert len(list(EvidenceStore(pdir).records_dir.glob("*.json"))) == evidence_count
+
+
+def _crossnode_contract_fixture(tmp_path, monkeypatch):
+    """Researcher R1 may propose only the exact preapproved DAG-dependent E1."""
+    from danus.gateway import capability
+
+    monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+    planning.initialize_research("P", brief="Use the frozen protocol, no extra cells.")
+    pdir = L.project_dir("P")
+    ledger = ProgressLedger(pdir)
+    protocol_id = EvidenceStore(pdir).freeze_protocol(
+        question="Frozen comparison?", hypothesis="Experimental intervention helps.",
+        matrix={"units": [{"id": "a", "argv": [sys.executable, "run_case.py"]}]},
+        primary_metrics=["loss"], decision_rule="Never change protocol after reviewing.",
+        author="fixture",
+    )
+    goal = f"Run only frozen protocol {protocol_id}\nEXPERIMENT_PROTOCOL_ID={protocol_id}"
+    fields = {
+        "goal": goal,
+        "must_preserve_invariants": ["Do not alter frozen input"],
+        "forbidden_behaviors": ["No additional experiment cells"],
+        "acceptance_conditions": ["Return immutable evidence"],
+    }
+    exact = ProgressLedger.implementation_task(**fields)
+    brief = pdir / "RESEARCH_BRIEF.md"
+    brief.write_text("Frozen protocol ID: " + protocol_id)
+    graph = ResearchPlanGraph(pdir)
+    ops = [
+        {"op": "add_node", "node_id": "R1", "title": "Frame",
+         "summary": "", "parent": "P0", "depends_on": []},
+        {"op": "add_node", "node_id": "V1", "title": "Review",
+         "summary": "", "parent": "P0", "depends_on": ["R1"]},
+        {"op": "add_node", "node_id": "E1", "title": "Experiment",
+         "summary": "", "parent": "P0", "depends_on": ["V1"]},
+        {"op": "add_node", "node_id": "E2", "title": "Unrelated experiment",
+         "summary": "", "parent": "P0", "depends_on": []},
+    ]
+    change_id = graph.propose_change(
+        base_plan_version=1, proposer="low", reason="fixed route", operations=ops,
+    )
+    graph.review_change(change_id, reviewer="low2", verdict="APPROVE", rationale="fixed")
+    assert graph.commit_change(change_id, committer="supervisor") == 2
+    for node_id in ("E1", "E2"):
+        spec = pdir / "tasks" / "v2" / "experimenter" / f"{node_id}.md"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text(exact, encoding="utf-8")
+    ledger.assign(
+        worker="low", role="researcher", node_id="R1", plan_version=2,
+        task="Inspect frozen protocol " + protocol_id + " and submit exact E1 contract.",
+        write_task=True,
+    )
+    binding = capability.issue(pdir, "low", "researcher")
+    monkeypatch.setattr(server, "_BOUND_WORKER", binding)
+    return pdir, ledger, protocol_id, fields
+
+
+def test_researcher_r1_submits_exact_downstream_e1_and_reads_bound_protocol(tmp_path, monkeypatch):
+    from danus.gateway.roles import tools_for
+    with _root(tmp_path):
+        pdir, ledger, protocol_id, fields = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        assert "experiment_protocol_get" in tools_for("researcher")
+        assert "experiment_protocol_get" in tools_for("reviewer")
+        assert "experiment_protocol_get" not in tools_for("worker")
+        loaded = server.experiment_protocol_get(protocol_id)["protocol"]
+        assert loaded["protocol_id"] == protocol_id and loaded["status"] == "frozen"
+        assert loaded["decision_rule"] == "Never change protocol after reviewing."
+        contract = server.implementation_submit_contract(
+            node_id="E1", plan_version=2, **fields
+        )
+        record = ledger.implementation_contract(contract["contract_id"])
+        assert record["node_id"] == "E1"
+        assert record["task"] == (pdir / "tasks" / "v2" / "experimenter" / "E1.md").read_text()
+        assert record["status"] == "PROPOSED"
+        assert len(ledger.implementation_contracts()) == 1
+
+
+def test_crossnode_contract_rejects_unrelated_node_or_altered_task(tmp_path, monkeypatch):
+    import pytest
+    with _root(tmp_path):
+        pdir, ledger, protocol_id, fields = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        with pytest.raises(PermissionError, match="not downstream"):
+            server.implementation_submit_contract(node_id="E2", plan_version=2, **fields)
+        with pytest.raises(PermissionError, match="exact frozen Experimenter task"):
+            server.implementation_submit_contract(
+                node_id="E1", plan_version=2, **{**fields, "goal": "altered target"}
+            )
+        with pytest.raises(PermissionError, match="exact frozen Experimenter task"):
+            server.implementation_submit_contract(node_id="V1", plan_version=2, **fields)
+        assert ledger.implementation_contracts() == []
+
+
+def test_frozen_protocol_get_rejects_other_task_and_revoked_assignment(tmp_path, monkeypatch):
+    import pytest
+    from danus.gateway import capability
+    with _root(tmp_path):
+        pdir, ledger, protocol_id, fields = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        second = EvidenceStore(pdir).freeze_protocol(
+            question="Different protocol?", hypothesis="Different result",
+            matrix={"units": [{"id": "b"}]}, primary_metrics=["loss"],
+            decision_rule="Unrelated", author="fixture",
+        )
+        with pytest.raises(PermissionError, match="assigned task"):
+            server.experiment_protocol_get(second)
+        with pytest.raises(ValueError, match="invalid protocol identity"):
+            server.experiment_protocol_get("../secret")
+        binding = server._BOUND_WORKER
+        capability.revoke(binding)
+        with pytest.raises(PermissionError, match="revoked|epoch"):
+            server.experiment_protocol_get(protocol_id)
