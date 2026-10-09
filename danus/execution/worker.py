@@ -32,11 +32,12 @@ def _outside_control(path: Path, control: Path) -> Path:
 
 def _relay_gateway_socket(listener: socket.socket, gateway_fd: socket.socket,
                           stop: threading.Event, path: Path) -> None:
-    """One-shot Unix socket bridge for MCP children that close inherited FDs.
+    """One-shot host-side bridge for a fixed, non-model-controlled MCP proxy.
 
-    The bound Gateway keeps its own verified assignment; the socket only
-    transports MCP bytes. A disconnect shuts down the original capability
-    channel, so this route cannot revive an old Gateway.
+    The private socket is outside the scientific sandbox; restricted Codex
+    forbids socket connect and sendto, so an in-sandbox proxy cannot use it.
+    The host proxy only forwards MCP bytes to the role-bound Gateway.
+    Closing either endpoint terminates the round channel.
     """
     peer = None
     try:
@@ -145,11 +146,13 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             server_end, client_end = socket.socketpair()
             server_end.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
             fd = client_end.fileno()
-            # Codex 0.160 can close extra FDs while spawning its MCP child.
-            # The direct inherited FD remains available to the existing D2/D3
-            # attacker probes. Codex's MCP child uses this one-shot Unix socket
-            # instead, through exactly the same bound Gateway.
-            socket_path = view / "gateway.sock"
+            # Codex 0.160 closes extra FDs when spawning MCP children.
+            # Its restricted sandbox also denies connect()/sendto(), so only
+            # the fixed transport-only MCP proxy executes outside the sandbox.
+            # The private socket cannot be accessed by model-side subprocesses;
+            # actual model tools and experiment code stay in Codex's sandbox.
+            # Keep the original direct FD for D2/D3 sandbox attack probes.
+            socket_path = root / "gateway.sock"
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 listener.bind(str(socket_path))
@@ -163,8 +166,7 @@ def worker_session(wl: L.WorkerLayout, role: dict):
                 target=_relay_gateway_socket,
                 args=(listener, client_end, bridge_stop, socket_path), daemon=True)
             bridge_thread.start()
-            proxy_cmd = [str(engine), "sandbox", "-P", "danus-worker", "-C", str(view),
-                         sys.executable, "-I", str(proxy), "--socket", str(socket_path)]
+            proxy_cmd = [sys.executable, "-I", str(proxy), "--socket", str(socket_path)]
             config = home / "config.toml"
             with config.open("a") as stream:
                 stream.write('\n[shell_environment_policy]\ninherit = "none"\n')
