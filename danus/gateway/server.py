@@ -598,6 +598,96 @@ def handoff_request(
 # pre-code semantic alignment gate                                            #
 # --------------------------------------------------------------------------- #
 
+def experiment_protocol_get(protocol_id: str) -> Dict[str, Any]:
+    """Read only the frozen protocol explicitly named in this active task.
+
+    Source tasks are control-plane assigned; protocol IDs are never paths.
+    No arbitrary project selection, directory read, or experiment execution.
+    """
+    from danus.core.evidence import protocol_identity, _content_id
+
+    if not re.fullmatch(r"[0-9a-f]{16}", str(protocol_id)):
+        raise ValueError("invalid protocol identity")
+    if _BOUND_WORKER is None or _BOUND_WORKER["role"] not in {
+        "researcher", "reviewer", "experimenter",
+    }:
+        raise PermissionError("protocol lookup requires a bound scientific worker")
+    with capability.scope(_BOUND_WORKER):
+        capability.validate(_BOUND_WORKER)
+        ledger = _pl()
+        assignment = ledger.current(_author(), refresh_stale=True)
+        if (
+            not assignment
+            or assignment.get("assignment_id") != _BOUND_WORKER["assignment_id"]
+            or assignment.get("state") not in {"ASSIGNED", "RUNNING"}
+            or ledger._is_plan_stale(assignment)
+        ):
+            raise PermissionError("protocol lookup requires an active assigned task")
+        task = (_project() / "workers" / _author() / "TASK.md").read_text(encoding="utf-8")
+        if protocol_id not in task:
+            raise PermissionError("protocol is not referenced by the assigned task")
+        brief = (_project() / "RESEARCH_BRIEF.md")
+        if not brief.is_file() or protocol_id not in brief.read_text(encoding="utf-8"):
+            raise PermissionError("protocol is not referenced by the binding research brief")
+        record = EvidenceStore(_project()).get_protocol(protocol_id)
+        if (
+            not record
+            or record.get("protocol_id") != protocol_id
+            or record.get("status") != "frozen"
+            or _content_id(protocol_identity(record)) != protocol_id
+        ):
+            raise ValueError("missing or invalid frozen protocol")
+        return {"protocol": record}
+
+
+def _contract_target_authorized(assignment: Dict[str, Any], target: str,
+                                task: str) -> None:
+    """Allow R1 to request E1 only when the committed DAG and exact task permit it."""
+    if target == assignment["node_id"]:
+        return  # Retain existing same-node implementation governance.
+    from danus.orchestration.autonomy import _task_spec
+
+    root = _project()
+    plan = ResearchPlanGraph(root).snapshot()
+    nodes = plan["nodes"]
+    source = assignment["node_id"]
+    if (
+        plan["plan_version"] != int(assignment["plan_version"])
+        or target not in nodes or source not in nodes
+        or nodes[target].get("state") != "ACTIVE"
+        or nodes[source].get("state") != "ACTIVE"
+    ):
+        raise PermissionError("contract target not active in the assigned Plan")
+    spec = _task_spec(root, target)
+    if (
+        spec.get("status") != "ready"
+        or spec.get("role") != "experimenter"
+        or ProgressLedger.task_sha256(spec["task"]) != ProgressLedger.task_sha256(task)
+    ):
+        raise PermissionError("contract target must match an exact frozen Experimenter task")
+    # Follow dependency edges backwards: the authorizing Researcher node must
+    # causally precede E1, not merely share the same project or parent.
+    frontier = list(nodes[target].get("depends_on") or [])
+    visited = set()
+    while frontier:
+        node_id = frontier.pop()
+        if node_id == source:
+            break
+        if node_id in visited or node_id not in nodes:
+            continue
+        visited.add(node_id)
+        frontier.extend(nodes[node_id].get("depends_on") or [])
+    else:
+        raise PermissionError("contract target is not downstream of the Researcher")
+    ledger = ProgressLedger(root)
+    if target in ledger.completed_nodes() or any(
+        a.get("node_id") == target and a.get("state") in {"ASSIGNED", "RUNNING", "DONE"}
+        and not ledger._is_plan_stale(a)
+        for a in ledger.assignments()
+    ):
+        raise PermissionError("cannot rewrite a dispatched or completed experiment")
+
+
 def implementation_pending_contracts(project: Optional[str] = None) -> Dict[str, Any]:
     """Return the latest unconsumed implementation contract for each gated node."""
     contracts = _pl(project).pending_implementation_contracts()
@@ -620,8 +710,15 @@ def implementation_submit_contract(
     architecture. The returned ``task`` is the exact task the Supervisor must bind
     after Reviewer APPROVE; changing it invalidates the approval.
     """
-    if _pl().current(_author())["node_id"] != str(node_id).strip():
-        raise ValueError("contract node does not match current assignment")
+    assignment = _pl().current(_author(), refresh_stale=True)
+    target = str(node_id).strip()
+    contract_task = ProgressLedger.implementation_task(
+        goal=goal,
+        must_preserve_invariants=must_preserve_invariants,
+        forbidden_behaviors=forbidden_behaviors,
+        acceptance_conditions=acceptance_conditions,
+    )
+    _contract_target_authorized(assignment, target, contract_task)
     record = _pl().submit_implementation_contract(
         proposer=_author(),
         node_id=node_id,
@@ -854,6 +951,7 @@ _TOOLS = {
     "handoff_request": handoff_request,
     "experiment_run": experiment_run,
     "implementation_pending_contracts": implementation_pending_contracts,
+    "experiment_protocol_get": experiment_protocol_get,
     "implementation_submit_contract": implementation_submit_contract,
     "implementation_review_contract": implementation_review_contract,
     "plan_pending_changes": plan_pending_changes,
