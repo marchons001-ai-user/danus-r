@@ -212,3 +212,21 @@ arguments are mapped into the unit's writable scratch directory. Code and config
 resolve from the frozen working directory; writes must use those artifact paths.
 Do not invoke the host Experiment Runtime through shell tools or write control
 state. Protocol freezing is a trusted host operation before the assignment.
+
+## Reusable report-first handoff
+
+After `experiment_run` succeeds, read the returned `report` and `report_path`.
+The trusted runtime creates a per-unit Evidence Packet at
+`workspace/.danus/experiment_reports/<evidence_id>.md`, derived from the frozen
+artifacts and immutable Evidence Record. Report all decision-relevant per-unit
+numbers, including adverse or null outcomes; do not manufacture missing metrics or
+claim verification based on your own narrative. Summarize the report in ordinary
+language for the next role, cite the exact evidence ID and shared report path, and
+preserve missing provenance fields explicitly.
+
+A later Reviewer may request a targeted clarification using the existing
+`handoff_request(kind="CLARIFY", target_role="experimenter", reason=...)` route.
+Answer only the stated question using existing results; never rerun an experiment
+or change a frozen protocol under a clarification assignment. If the answer does not
+exist in the saved report/evidence, state exactly what is absent instead of inventing
+an answer or expanding the experiment.
