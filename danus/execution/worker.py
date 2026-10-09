@@ -75,6 +75,83 @@ def _relay_gateway_socket(listener: socket.socket, gateway_fd: socket.socket,
                 pass
 
 
+
+def _inject_plan_read_inputs(view: Path, wl: L.WorkerLayout, role_name: str) -> None:
+    """Mirror exact, validated, assignment-scoped planning inputs into read-only view.
+
+    The authoritative control directory itself stays hidden from Codex tools.
+    """
+    if role_name not in L.SCIENTIFIC_ROLES:
+        return
+    from danus.core import ProgressLedger, ResearchPlanGraph
+    from danus.core.handoff import HandoffRequests
+    from danus.orchestration import planning
+
+    control = wl.project_dir.resolve()
+    graph = ResearchPlanGraph(control)
+    if graph.path.is_symlink():
+        raise ValueError("research plan current file must not be a symlink")
+    if not graph.path.is_file():
+        return
+
+    snapshot = graph.snapshot()
+    (view / "RESEARCH_PLAN.json").write_text(
+        json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    ledger = ProgressLedger(control)
+    assignment = ledger.current(wl.name, refresh_stale=False)
+    if not assignment or str(assignment.get("role") or "").lower() != role_name:
+        return
+    if int(assignment.get("plan_version") or 0) != snapshot["plan_version"]:
+        return
+
+    task = wl.task.read_text(encoding="utf-8")
+    if role_name == "researcher" and task.startswith("# Repair Autonomous Plan Proposal\n"):
+        path = planning._repair_error_path(control)
+        if path.is_symlink():
+            raise ValueError("planning repair error must not be a symlink")
+        if not path.is_file():
+            raise ValueError("planning repair error is missing")
+        report = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            raise ValueError("planning repair error must be an object")
+        (view / "PLAN_REPAIR_ERROR.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    handoff_id = str(assignment.get("handoff_id") or "")
+    if not handoff_id:
+        return
+    handoff = HandoffRequests(ledger).get(handoff_id)
+    if (
+        not handoff
+        or handoff.get("status") != "ASSIGNED"
+        or handoff.get("assigned_assignment_id") != assignment.get("assignment_id")
+        or handoff.get("subject_type") != "PLAN_CHANGE"
+        or handoff.get("kind") not in {"REVIEW", "REVISION", "RETHINK"}
+    ):
+        return
+
+    change_id = str(handoff.get("subject_id") or "")
+    change = graph.get_change(change_id)
+    proposal_id = planning._proposal_id_from_change(change)
+    if not proposal_id:
+        raise ValueError("assigned Plan Change lacks immutable proposal identity")
+    record_path = planning._proposal_record_path(control, proposal_id)
+    if record_path.is_symlink():
+        raise ValueError("immutable Plan proposal must not be a symlink")
+    record = planning._load_proposal_record(control, proposal_id)
+    if record.get("change_id") != change_id:
+        raise ValueError("assigned Plan Change and immutable proposal differ")
+    (view / "PLAN_PROPOSAL.json").write_text(
+        json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 @contextmanager
 def worker_session(wl: L.WorkerLayout, role: dict):
     """The agent harness is trusted; tools and its MCP proxy share one deny policy."""
@@ -135,6 +212,7 @@ def worker_session(wl: L.WorkerLayout, role: dict):
                     raise ValueError("research brief must not be a symlink")
                 if brief.is_file():
                     (view / "RESEARCH_BRIEF.md").write_bytes(brief.read_bytes())
+                _inject_plan_read_inputs(view, wl, role_name)
                 checkpoint = C.checkpoint_for_prompt(wl.dir, role_name)
                 if checkpoint:
                     (memory / C.CHECKPOINT_NAME).write_text(json.dumps(checkpoint))
