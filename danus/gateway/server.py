@@ -966,6 +966,10 @@ def experiment_run(protocol_id: str) -> Dict[str, Any]:
         if _BOUND_WORKER is None or _BOUND_WORKER["role"] != "experimenter":
             raise PermissionError("experiment execution requires a bound Experimenter Gateway")
         with capability.scope(_BOUND_WORKER):
+            assignment = _pl().current(_author(), refresh_stale=True)
+            handoff = HandoffRequests(_pl()).get(str((assignment or {}).get("handoff_id") or ""))
+            if handoff and handoff.get("kind") == "CLARIFY":
+                raise PermissionError("clarification assignments cannot run experiments")
             task = (_project() / "workers" / _author() / "TASK.md").read_text()
             if re.findall(r"^EXPERIMENT_PROTOCOL_ID=([0-9a-f]{16})$", task, re.MULTILINE) != [protocol_id]:
                 raise PermissionError("protocol is not named in the current assigned task")
