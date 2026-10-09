@@ -27,35 +27,22 @@ def _worker(
     return wl
 
 
-def _quota(state: str = "NORMAL", block: bool = False) -> dict:
-    return {"state": state, "reason": state.lower(), "block_new_codex_rounds": block}
-
-
-def test_auto_reviewer_uses_isolated_codex_across_quota_states():
-    for state, block in [
-        ("NORMAL", False),
-        ("UNKNOWN", False),
-        ("PRESSURE", False),
-        ("PRESSURE", True),
-        ("EXHAUSTED", True),
-    ]:
-        decision = reviewer_cost_policy(
-            _quota(state, block),
-            dsh_available=True,
-            dsh_quota_exhausted=False,
-        )
-        assert decision["selected_backend"] == "chatgpt"
-        assert decision["policy"] == "isolated_codex"
+def test_auto_reviewer_uses_isolated_codex_without_quota_policy():
+    decision = reviewer_cost_policy(
+        dsh_available=True, dsh_quota_exhausted=False,
+    )
+    assert decision["selected_backend"] == "chatgpt"
+    assert decision["policy"] == "isolated_codex"
+    assert "quota_state" not in decision
+    assert "codex_blocked" not in decision
 
 
 def test_auto_reviewer_never_selects_unisolated_dsh():
     normal = reviewer_cost_policy(
-        _quota("NORMAL", False),
         dsh_available=True,
         dsh_quota_exhausted=False,
     )
     exhausted = reviewer_cost_policy(
-        _quota("NORMAL", False),
         dsh_available=True,
         dsh_quota_exhausted=True,
     )
@@ -66,7 +53,6 @@ def test_auto_reviewer_never_selects_unisolated_dsh():
 
 def test_missing_dsh_still_selects_isolated_codex():
     decision = reviewer_cost_policy(
-        _quota("NORMAL", False),
         dsh_available=False,
         dsh_quota_exhausted=False,
     )
@@ -110,12 +96,12 @@ def test_current_and_new_assignments_use_isolated_codex(
         "progress_state": "RUNNING",
         "assignment_id": "assignment-1",
     }]
-    current = cli._reviewer_cost_rows("P", rows, _quota(), apply=True)
+    current = cli._reviewer_cost_rows("P", rows, apply=True)
     assert current[0]["selected_backend"] == "chatgpt"
     assert current[0]["selected_model"] == "gpt-5.6-terra"
 
     rows[0]["assignment_id"] = "assignment-2"
-    new = cli._reviewer_cost_rows("P", rows, _quota(), apply=True)
+    new = cli._reviewer_cost_rows("P", rows, apply=True)
     assert new[0]["selected_backend"] == "chatgpt"
     assert new[0]["selected_model"] == "gpt-5.6-terra"
     status = json.loads(wl.status.read_text(encoding="utf-8"))
@@ -123,31 +109,14 @@ def test_current_and_new_assignments_use_isolated_codex(
     assert "reviewer_dsh_quota_assignment_id" not in status
 
 
-def test_terra_fallback_still_obeys_codex_quota_gate(tmp_path: Path, monkeypatch):
+def test_auto_reviewer_is_not_paused_by_quota_prediction(tmp_path: Path, monkeypatch):
     wl = _worker(tmp_path, monkeypatch)
-    dsh = tmp_path / "dsh"
-    dsh.write_text("stub\n", encoding="utf-8")
-    monkeypatch.setenv("DANUS_DSH_BIN", str(dsh))
-    wl.status.write_text(json.dumps({
-        "reviewer_backend_selected": "dsh",
-        "reviewer_model_selected": "deepseek-v4-flash",
-        "reviewer_dsh_quota_exhausted": True,
-        "reviewer_dsh_quota_assignment_id": "assignment-1",
-    }), encoding="utf-8")
-    rows = [{
-        "worker": "high",
-        "alive": False,
-        "progress_state": "RUNNING",
-        "assignment_id": "assignment-1",
-    }]
-    quota = _quota("PRESSURE", True)
-
-    selected = cli._reviewer_cost_rows("P", rows, quota, apply=True)
-    assert selected[0]["selected_backend"] == "chatgpt"
-    assert selected[0]["selected_model"] == "gpt-5.6-terra"
-    applied = cli._apply_quota_gate("P", rows, quota)
-    assert applied == [{"worker": "high", "result": "pause-at-round-boundary"}]
-    assert wl.pause.read_text(encoding="utf-8").startswith("quota:pressure:")
+    rows = [{"worker": "high", "alive": False,
+             "progress_state": "RUNNING", "assignment_id": "assignment-1"}]
+    picked = cli._reviewer_cost_rows("P", rows, apply=True)
+    assert picked[0]["selected_backend"] == "chatgpt"
+    assert not wl.pause.exists()
+    assert not wl.stop.exists()
 
 
 def test_pinned_reviewer_backend_is_never_managed(tmp_path: Path, monkeypatch):
@@ -158,7 +127,7 @@ def test_pinned_reviewer_backend_is_never_managed(tmp_path: Path, monkeypatch):
     )
     rows = [{"worker": "high", "alive": False, "progress_state": "RUNNING"}]
 
-    assert cli._reviewer_cost_rows("P", rows, _quota(), apply=True) == []
+    assert cli._reviewer_cost_rows("P", rows, apply=True) == []
     assert cli._selected_worker_backend(wl) == "dsh"
     assert "reviewer_backend_selected" not in json.loads(wl.status.read_text(encoding="utf-8"))
 
@@ -166,7 +135,6 @@ def test_pinned_reviewer_backend_is_never_managed(tmp_path: Path, monkeypatch):
 def test_direct_start_resolves_auto_reviewer_to_isolated_codex_before_spawn(tmp_path: Path, monkeypatch):
     wl = _worker(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "_dsh_available", lambda: True)
-    monkeypatch.setattr(cli, "quota_policy", lambda _snapshot: _quota("NORMAL", False))
     spawned = []
     monkeypatch.setattr(cli, "spawn_loop", lambda path, lock_fd=None: spawned.append(Path(path)) or 424242)
 
