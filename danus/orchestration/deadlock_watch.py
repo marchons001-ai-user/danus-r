@@ -131,45 +131,47 @@ def _write(root: Path, event: Dict[str, Any]) -> None:
 
 
 def _model_proposal(packet: Dict[str, Any]) -> Dict[str, str]:
-    """One model call; parse a tiny allowlist. No tools or autonomous code edits."""
+    """Luna Medium chooses one of the three scientific roles; no deadlock taxonomy."""
     from .supervisor_llm import _run_luna
 
     prompt = (
-        "You are a restricted Danus-R deadlock triage router (not a scientific "
-        "decision-maker). All scientific workers have been idle at least 180s, "
-        "but the project remains RUNNING. Read this bounded snapshot and choose "
-        "only one JSON object with keys action, target_role, node_id, rationale. "
-        "Allowed actions: RECOVER_PREMATURE_PROPOSAL only when a researcher "
-        "NEEDS_REVIEW was escalated to main after saving a Research Proposal "
-        "and a downstream Reviewer is already planned; WAIT_FOR_OPERATOR in "
-        "all other cases. target_role must be researcher for recovery and empty "
-        "for WAIT_FOR_OPERATOR. Do not assume you may override approvals, "
-        "Plan version, budget, manual pauses, or any escalation. An independent "
-        "deterministic validator decides whether to execute your suggestion. "
-        "Return JSON only. SNAPSHOT:\n"
+        "You are the Danus-R restricted Supervisor deadlock advisor. All "
+        "scientific workers have been idle for at least 180 seconds while "
+        "the project remains RUNNING. Choose which of the three scientific "
+        "roles should act next. Do not classify the deadlock into pre-defined "
+        "types; use this project's actual Plan, Assignments and Handoffs. "
+        "Return ONLY one JSON object with exactly three keys: target_role "
+        "(researcher, reviewer, or experimenter), node_id (one current Plan "
+        "node), rationale (a specific explanation of what the role should "
+        "resolve). You must select exactly one of the three roles. "
+        "Your selection is NOT permission to bypass existing Plan dependencies, "
+        "implementation approval, evidence integrity or role authorization. "
+        "If your selected route cannot legally execute, a deterministic "
+        "control-plane validator will record its specific rejection; do not "
+        "invent governance approvals. The workflow is not complete merely "
+        "because you selected a role. SNAPSHOT:\\n"
         + json.dumps(packet, ensure_ascii=False, sort_keys=True)
     )
     response = _run_luna(prompt, effort="medium")
     if response.get("status") != "completed" or int(response.get("tool_calls") or 0):
-        return {"action": "WAIT_FOR_OPERATOR", "target_role": "", "node_id": "",
-                "rationale": "restricted model failed or attempted a tool"}
+        raise ValueError("restricted model unavailable or attempted a tool")
     try:
         reply = json.loads(str(response.get("reply") or ""))
-    except (ValueError, TypeError):
-        reply = {}
+    except (ValueError, TypeError) as exc:
+        raise ValueError("restricted model returned invalid JSON") from exc
     if not isinstance(reply, dict):
-        reply = {}
-    action = str(reply.get("action") or "")
-    if action not in _ALLOWED:
-        action = "WAIT_FOR_OPERATOR"
-    role = str(reply.get("target_role") or "")
+        raise ValueError("restricted model returned a non-object")
+    role = str(reply.get("target_role") or "").lower()
+    if role not in {"researcher", "reviewer", "experimenter"}:
+        raise ValueError("restricted model did not select one of the three roles")
     node = str(reply.get("node_id") or "")
-    if action == "RECOVER_PREMATURE_PROPOSAL" and (role != "researcher" or not node):
-        action = "WAIT_FOR_OPERATOR"
+    if not node or node not in {
+        str(e.get("node_id") or "") for e in packet.get("current_assignments", {}).values()
+    } | set(str(n) for n in packet.get("frontier", [])):
+        raise ValueError("model node is not an active assignment or ready frontier node")
     return {
-        "action": action,
-        "target_role": role if action != "WAIT_FOR_OPERATOR" else "",
-        "node_id": node if action != "WAIT_FOR_OPERATOR" else "",
+        "target_role": role,
+        "node_id": node,
         "rationale": str(reply.get("rationale") or "")[:600],
     }
 
@@ -221,63 +223,85 @@ class DeadlockWatch:
                 return None
             history = _history(self.root)
             existing = _latest_open(history)
-            if existing is not None:
-                if existing.get("signature") == signature:
+            if existing is not None and existing.get("signature") == signature:
+                # A manual capture should still receive its first model triage
+                # on the next 180-second observation, but never a second one.
+                if any(e.get("deadlock_id") == existing["deadlock_id"]
+                       and e.get("event") == "DEADLOCK_SUGGESTION" for e in history):
                     return None
-                _write(self.root, {"event": "DEADLOCK_CLOSED",
-                                   "deadlock_id": existing["deadlock_id"],
-                                   "reason": "scientific_state_changed"})
-            ident = hashlib.sha256(
-                (self.project + ":" + signature + ":" + utc_now()).encode()
-            ).hexdigest()[:16]
-            event = {
-                "event": "DEADLOCK_OPEN",
-                "deadlock_id": ident,
-                "signature": signature,
-                "idle_seconds": round(tick - self._since, 1),
-                "capture": "automatic",
-                "snapshot": _packet(actual, actual_rows, root=self.root),
-            }
-            _write(self.root, event)
+                event = existing
+                ident = existing["deadlock_id"]
+            else:
+                if existing is not None:
+                    _write(self.root, {"event": "DEADLOCK_CLOSED",
+                                       "deadlock_id": existing["deadlock_id"],
+                                       "reason": "scientific_state_changed"})
+                ident = hashlib.sha256(
+                    (self.project + ":" + signature + ":" + utc_now()).encode()
+                ).hexdigest()[:16]
+                event = {
+                    "event": "DEADLOCK_OPEN",
+                    "deadlock_id": ident,
+                    "signature": signature,
+                    "idle_seconds": round(tick - self._since, 1),
+                    "capture": "automatic",
+                    "snapshot": _packet(actual, actual_rows, root=self.root),
+                }
+                _write(self.root, event)
 
-        # Model inference must run outside project-control locks.
+        # Inference runs outside project-control locks. The model cannot
+        # modify project state; any selected role passes deterministic gates.
         try:
             suggestion = _model_proposal(event["snapshot"])
         except Exception as exc:
             suggestion = {
-                "action": "WAIT_FOR_OPERATOR", "target_role": "", "node_id": "",
-                "rationale": f"restricted model call failed: {type(exc).__name__}: {exc}"[:600],
+                "target_role": "", "node_id": "",
+                "rationale": f"model triage failed: {type(exc).__name__}: {exc}"[:600],
             }
         _write(self.root, {"event": "DEADLOCK_SUGGESTION", "deadlock_id": ident,
                            **suggestion, "model": "gpt-5.6-luna", "effort": "medium"})
-        if suggestion["action"] == "RECOVER_PREMATURE_PROPOSAL":
-            try:
-                # A model-supplied node must identify the source of a blocked
-                # Researcher Assignment before invoking even a guarded recovery.
-                source_matches = [
-                    a for a in event["snapshot"].get("current_assignments", {}).values()
-                    if a.get("role") == "researcher"
-                    and a.get("node_id") == suggestion["node_id"]
-                    and a.get("state") == "BLOCKED"
-                    and a.get("outcome") == "NEEDS_REVIEW"
-                ]
-                if len(source_matches) != 1:
-                    raise ValueError("model-selected node has no unique blocked Researcher")
-                from .autonomy import recover_premature_proposal_review
-                result = recover_premature_proposal_review(
-                    self.project, token_budget=token_budget,
-                )
-                if (result.get("result") != "assigned"
-                    or result.get("node_id") != suggestion["node_id"]):
-                    raise ValueError("validated recovery did not dispatch the proposed node")
-                _write(self.root, {"event": "DEADLOCK_ACTION", "deadlock_id": ident,
-                                   "action": suggestion["action"], "result": "assigned",
-                                   "node_id": result["node_id"],
-                                   "assignment_id": result.get("assignment_id")})
-            except (ValueError, OSError, SystemExit) as exc:
-                _write(self.root, {"event": "DEADLOCK_ACTION", "deadlock_id": ident,
-                                   "action": suggestion["action"], "result": "rejected",
-                                   "error": str(exc)[:600]})
+        try:
+            role = suggestion["target_role"]
+            node = suggestion["node_id"]
+            if not role or not node:
+                raise ValueError("no valid three-role model decision")
+
+            # Guard against repeated retries of the same role/node without a
+            # committed Plan revision or further completed scientific nodes.
+            completed = tuple(event["snapshot"].get("completed_nodes", []))
+            plan_version = event["snapshot"].get("plan_version")
+            repeated = [
+                e for e in _history(self.root)
+                if e.get("event") == "DEADLOCK_ACTION"
+                and e.get("target_role") == role
+                and e.get("node_id") == node
+                and e.get("plan_version") == plan_version
+                and tuple(e.get("completed_nodes", [])) == completed
+                and e.get("result") in {"assigned", "queued"}
+            ]
+            if len(repeated) >= 2:
+                raise ValueError("same role/node was dispatched twice without scientific progress")
+
+            from .idle_recovery import dispatch_role_choice
+            routed = dispatch_role_choice(
+                self.project, target_role=role, node_id=node,
+                reason=suggestion["rationale"], token_budget=token_budget,
+            )
+            _write(self.root, {
+                "event": "DEADLOCK_ACTION", "deadlock_id": ident,
+                "target_role": role, "node_id": node,
+                "result": routed["result"],
+                "assignment_id": routed.get("assignment_id"),
+                "handoff_id": routed.get("handoff_id"),
+                "plan_version": plan_version, "completed_nodes": list(completed),
+            })
+        except (ValueError, OSError, SystemExit, PermissionError) as exc:
+            _write(self.root, {
+                "event": "DEADLOCK_ACTION", "deadlock_id": ident,
+                "target_role": suggestion.get("target_role", ""),
+                "node_id": suggestion.get("node_id", ""),
+                "result": "rejected", "error": str(exc)[:600],
+            })
         return event
 
     def _close_inactive(self) -> None:
