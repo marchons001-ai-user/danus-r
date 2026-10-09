@@ -486,3 +486,30 @@ def test_idle_router_retries_exact_blocked_researcher_task_at_r2_style_escalatio
         assert "R2" not in ledger.completed_nodes()
 
 
+def test_idle_router_can_request_existing_report_from_experimenter_for_blocked_reviewer(tmp_path, monkeypatch):
+    from danus.orchestration.idle_recovery import dispatch_role_choice
+
+    with _root(tmp_path):
+        root, ledger = _setup(tmp_path, monkeypatch)
+        ledger.update(worker="low3", state="DONE", actor="runtime", outcome="COMPLETE")
+        cli.do_assign("P/low2", "Review the available evidence.\n", node_id="P0")
+        ledger.update(worker="low2", state="BLOCKED", actor="runtime",
+                      outcome="NEEDS_REVIEW", result="Need the exact prior result.")
+        pause = L.WorkerLayout(L.worker_dir("P", "low2")).pause
+        pause.write_text("review:assignment_needs_review\n", encoding="utf-8")
+        routed = dispatch_role_choice(
+            "P", target_role="experimenter", node_id="P0",
+            reason="Answer the blocked Reviewer from the existing evidence only.",
+            token_budget=10000000,
+        )
+        assert routed["action"] == "WATCHDOG_ROLE_HANDOFF"
+        assert routed["result"] == "assigned"
+        handoff = HandoffRequests(ledger).get(routed["handoff_id"])
+        assert handoff["kind"] == "CLARIFY"
+        assert handoff["status"] == "ASSIGNED"
+        assert handoff["target_role"] == "experimenter"
+        assert ledger.current("low3")["handoff_id"] == routed["handoff_id"]
+        assert ledger.current("low2")["state"] == "BLOCKED"
+        assert "P0" not in ledger.completed_nodes()
+
+
