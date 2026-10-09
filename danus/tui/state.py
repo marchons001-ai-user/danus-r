@@ -13,7 +13,6 @@ from danus.core.evidence import EvidenceStore
 from danus.execution import layout as L
 from danus.orchestration import cli as C
 from danus.orchestration import quota as Q
-from danus.orchestration.control import quota_policy
 
 _ACTIVITY_LIMIT = 80
 _LOG_TAIL_BYTES = 256 * 1024
@@ -514,7 +513,15 @@ def load_project_snapshot(project: str) -> Dict[str, Any]:
         _worker_row(project, worker, ledger)
         for worker in L.list_workers(project)
     ]
-    quota = quota_policy(Q.load_quota(project_dir))
+    # Official usage is display-only and never an execution gate.
+    observed = Q.load_quota(project_dir) or {}
+    weekly = (observed.get("windows") or {}).get("weekly") or {}
+    quota = {
+        "state": "OBSERVE_ONLY" if observed.get("available") else "UNAVAILABLE",
+        "reason": "official_telemetry_only" if observed.get("available") else "telemetry_unavailable",
+        "weekly_remaining_percent": weekly.get("remaining_percent"),
+        "observed_at": observed.get("observed_at"),
+    }
     return {
         "project": project,
         "project_state": project_state,
