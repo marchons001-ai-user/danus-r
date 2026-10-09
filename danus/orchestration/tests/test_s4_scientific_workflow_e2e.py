@@ -685,3 +685,95 @@ def test_workflow_result_gateway_is_role_bound_and_cannot_bypass_review(tmp_path
                 outcome="COMPLETE", next_intent="RUN_EXPERIMENT",
                 subject_id="unapproved-contract",
             )
+
+
+
+def test_dynamic_protocol_can_run_only_under_exact_reviewed_assignment(tmp_path, monkeypatch):
+    """Open-ended E1 freezes after approval; the first protocol is irreversibly pinned."""
+    import pytest
+    from danus.gateway import capability
+
+    with _root(tmp_path):
+        monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+        monkeypatch.setattr(server, "_BOUND_WORKER", None)
+        planning.initialize_research("P", brief="Open-ended scientific question, no frozen protocol.")
+        pdir = L.project_dir("P")
+        ledger = ProgressLedger(pdir)
+        contract_fields = {
+            "goal": ("Measure one pre-approved baseline with the frozen deterministic "
+                     "runner, record the score and do not expand the matrix."),
+            "must_preserve_invariants": ["One matrix cell, score metric, frozen runner"],
+            "forbidden_behaviors": ["Do not tune or substitute the method after observing results"],
+            "acceptance_conditions": ["One hash-checked Evidence Record and full report"],
+        }
+        with _gateway(pdir, "low", "researcher"):
+            contract = server.implementation_submit_contract(
+                node_id="P0", plan_version=1, **contract_fields
+            )
+        assert "EXPERIMENT_PROTOCOL_ID" not in contract["task"]
+        _finish("P", "low")
+        _apply("P")
+        review = _handoff(
+            HandoffRequests(ledger), kind="REVIEW",
+            subject_type="IMPLEMENTATION_CONTRACT", subject_id=contract["contract_id"],
+        )
+        assert review["status"] == "ASSIGNED"
+        with _gateway(pdir, "low2", "reviewer"):
+            server.implementation_review_contract(
+                contract["contract_id"], verdict="APPROVE",
+                rationale="Single frozen cell, metric, baseline and decision rule are reviewable.",
+            )
+        _finish("P", "low2")
+        _apply("P")
+        assignment = ledger.current("low3")
+        assert assignment is not None
+        assert assignment["role"] == "experimenter"
+        assert assignment["implementation_contract_id"] == contract["contract_id"]
+        assert assignment["task_sha256"] == ProgressLedger.task_sha256(contract["task"])
+
+        (pdir / "runner.py").write_text(RUNNER, encoding="utf-8")
+        (pdir / "reducer.py").write_text(REDUCER, encoding="utf-8")
+        store = EvidenceStore(pdir)
+        reducer = store.artifact_ref(pdir / "reducer.py")
+        reducer["function"] = "reduce_metrics"
+        kwargs = {
+            "hypothesis": "One declared deterministic run records its score.",
+            "matrix": {"units": [{"id": "u1",
+                        "argv": [sys.executable, "runner.py", "raw/result.json"],
+                        "artifacts": ["raw/result.json"]}]},
+            "primary_metrics": ["score"],
+            "decision_rule": "Report the exact measured score without tuning.",
+            "author": "low3",
+            "metric_reducer": reducer,
+            "execution_files": ["runner.py"],
+            "implementation_contract_id": contract["contract_id"],
+            "execution_assignment_id": assignment["assignment_id"],
+        }
+        protocol_id = store.freeze_protocol(
+            question="What is the approved deterministic score?", **kwargs
+        )
+        alternate = store.freeze_protocol(
+            question="What is an alternate experimental question?", **kwargs
+        )
+        foreign = store.freeze_protocol(
+            question="What is a foreign assignment score?",
+            **{**kwargs, "execution_assignment_id": "0" * 16},
+        )
+        binding = capability.issue(pdir, "low3", "experimenter")
+        monkeypatch.setattr(server, "_BOUND_WORKER", binding)
+        with _gateway(pdir, "low3", "experimenter"):
+            assert server.experiment_protocol_get(protocol_id)["protocol"]["protocol_id"] == protocol_id
+            with pytest.raises(PermissionError, match="contract and assignment"):
+                server.experiment_run(foreign)
+            first = server.experiment_run(protocol_id)
+            assert first["completed_units"] == 1
+            assert Path(first["report_path"]).is_file()
+            pinned = (pdir / "experiment_runtime" / "assignment_protocols"
+                      / (assignment["assignment_id"] + ".json"))
+            assert json.loads(pinned.read_text())["protocol_id"] == protocol_id
+            with pytest.raises(PermissionError, match="already pinned"):
+                server.experiment_run(alternate)
+            replay = server.experiment_run(protocol_id)
+            assert replay["evidence_id"] == first["evidence_id"]
+        assert len(list(store.records_dir.glob("*.json"))) == 1
+
