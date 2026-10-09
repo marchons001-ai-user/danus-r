@@ -215,3 +215,54 @@ def test_escalate_persists_for_main_and_blocks_false_complete(tmp_path: Path, mo
         assert escalation["handoff_id"] == opened["handoff_id"]
         assert escalation["result"] == "pending_main"
         assert not any(a.get("handoff_id") == opened["handoff_id"] for a in ProgressLedger(pdir).assignments())
+
+
+
+def test_reviewer_clarify_routes_to_experimenter_then_resumes_reviewer(tmp_path: Path, monkeypatch):
+    """One existing Handoff tool drives role routing; no manual node mutation."""
+    from danus.orchestration.supervisor_llm import apply_scientific_route_dispositions
+
+    with _root(tmp_path):
+        pdir, ledger = _setup(tmp_path, monkeypatch)
+        ledger.update(worker="low3", state="DONE", actor="runtime", outcome="COMPLETE")
+        cli.do_assign("P/low2", "Review the completed experiment packet.\n", node_id="P0")
+        ledger.update(worker="low2", state="RUNNING", actor="runtime")
+        with _gateway(pdir, "low2", "reviewer"):
+            opened = server.handoff_request(
+                "CLARIFY",
+                "State the missing sigma-0.10 result from the existing report; do not rerun E1.",
+                target_role="experimenter",
+            )
+            repeated = server.handoff_request(
+                "CLARIFY", "Repeat request", target_role="experimenter",
+            )
+        assert repeated["handoff_id"] == opened["handoff_id"]
+        with _gateway(pdir, "low2", "reviewer"):
+            with pytest.raises(ValueError, match="evidence_refs or target_role"):
+                server.handoff_request("CLARIFY", "Wrong target", target_role="researcher")
+
+        source_id = ledger.current("low2")["assignment_id"]
+        ledger.update(worker="low2", state="BLOCKED", actor="runtime", outcome="NEEDS_REVIEW")
+        pause = L.WorkerLayout(L.worker_dir("P", "low2")).pause
+        pause.write_text("review:assignment_needs_review\n", encoding="utf-8")
+        dispatched = _apply("P")
+        claimed = next(x for x in dispatched if x.get("action") == "CLARIFY"
+                       and x.get("result") == "assigned")
+        assert claimed["worker"] == "low3"
+        assert claimed["handoff_id"] == opened["handoff_id"]
+        assert ProgressLedger(pdir).current("low3")["handoff_id"] == opened["handoff_id"]
+
+        ledger.update(
+            worker="low3", state="DONE", actor="runtime", outcome="COMPLETE",
+            result="Existing report says sigma 0.10 worsens RMSE; no rerun was performed.",
+        )
+        _apply("P")
+        assert HandoffRequests(ProgressLedger(pdir)).get(opened["handoff_id"])["status"] == "RESOLVED"
+        resumed = apply_scientific_route_dispositions("P")
+        assert any(x.get("source_assignment_id") == source_id and x.get("result") == "resumed"
+                   for x in resumed)
+        assert not pause.exists()
+        current = ProgressLedger(pdir).current("low2")
+        assert current["assignment_id"] == source_id
+        assert current["state"] == "RUNNING"
+        assert "P0" not in ProgressLedger(pdir).completed_nodes()
