@@ -66,8 +66,14 @@ def _review_governance_context(project: str, role_name: str, worker: str) -> str
             raise ValueError("committed Plan revision is not independently consistent")
         summary = {
             "plan_version": current["plan_version"],
+            "base_plan_version": record.get("base_plan_version"),
             "change_id": change_id,
+            "change_reason": str(record.get("reason") or "")[:1800],
             "status": record["status"],
+            "committed_version": record.get("committed_version"),
+            "committed_at": record.get("committed_at"),
+            "review_assignment_id": record.get("review_assignment_id"),
+            "review_rationale_excerpt": str(record.get("review_rationale") or "")[:400],
             "review_verdict": record["review_verdict"],
             "proposer": record.get("proposer"),
             "reviewer": record.get("reviewer"),
