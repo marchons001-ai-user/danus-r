@@ -696,6 +696,9 @@ def test_dynamic_protocol_can_run_only_under_exact_reviewed_assignment(tmp_path,
     with _root(tmp_path):
         monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
         monkeypatch.setattr(server, "_BOUND_WORKER", None)
+        workspace = tmp_path / "scientific-workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("DANUS_SCIENTIFIC_WORKSPACE", str(workspace))
         planning.initialize_research("P", brief="Open-ended scientific question, no frozen protocol.")
         pdir = L.project_dir("P")
         ledger = ProgressLedger(pdir)
@@ -731,10 +734,11 @@ def test_dynamic_protocol_can_run_only_under_exact_reviewed_assignment(tmp_path,
         assert assignment["implementation_contract_id"] == contract["contract_id"]
         assert assignment["task_sha256"] == ProgressLedger.task_sha256(contract["task"])
 
-        (pdir / "runner.py").write_text(RUNNER, encoding="utf-8")
-        (pdir / "reducer.py").write_text(REDUCER, encoding="utf-8")
+        (workspace / "runner.py").write_text(RUNNER, encoding="utf-8")
+        (workspace / "reducer.py").write_text(REDUCER, encoding="utf-8")
         store = EvidenceStore(pdir)
-        reducer = store.artifact_ref(pdir / "reducer.py")
+        reducer = store.artifact_ref(workspace / "reducer.py", relative_to=workspace)
+        assert reducer["path"] == "reducer.py"
         reducer["function"] = "reduce_metrics"
         kwargs = {
             "hypothesis": "One declared deterministic run records its score.",
@@ -746,6 +750,7 @@ def test_dynamic_protocol_can_run_only_under_exact_reviewed_assignment(tmp_path,
             "author": "low3",
             "metric_reducer": reducer,
             "execution_files": ["runner.py"],
+            "source_root": workspace,
             "implementation_contract_id": contract["contract_id"],
             "execution_assignment_id": assignment["assignment_id"],
         }
@@ -768,6 +773,7 @@ def test_dynamic_protocol_can_run_only_under_exact_reviewed_assignment(tmp_path,
             first = server.experiment_run(protocol_id)
             assert first["completed_units"] == 1
             assert Path(first["report_path"]).is_file()
+            assert Path(first["report_path"]).is_relative_to(workspace)
             pinned = (pdir / "experiment_runtime" / "assignment_protocols"
                       / (assignment["assignment_id"] + ".json"))
             assert json.loads(pinned.read_text())["protocol_id"] == protocol_id
