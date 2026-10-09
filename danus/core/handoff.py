@@ -12,7 +12,7 @@ from .progress import ProgressLedger
 class HandoffRequests:
     """Append-only HandoffRequest state stored in ``ProgressLedger.path``."""
 
-    KINDS = ("REVIEW", "REVISION", "RETHINK", "INTERPRET", "ESCALATE")
+    KINDS = ("REVIEW", "REVISION", "RETHINK", "INTERPRET", "ESCALATE", "CLARIFY")
     SUBJECT_TYPES = ("PLAN_CHANGE", "IMPLEMENTATION_CONTRACT", "ASSIGNMENT", "PLAN_NODE")
     STATUSES = ("OPEN", "ASSIGNED", "RESOLVED", "STALE", "CANCELLED")
     TARGET_BY_KIND = {
@@ -44,6 +44,7 @@ class HandoffRequests:
         source_assignment_id: str = "",
         parent_handoff_id: str = "",
         evidence_refs: Optional[List[str]] = None,
+        target_role: str = "",
     ) -> Dict[str, Any]:
         kind = str(kind).strip().upper()
         if kind not in self.KINDS:
@@ -78,7 +79,19 @@ class HandoffRequests:
         if parent_handoff_id and self.get(parent_handoff_id) is None:
             raise ValueError(f"unknown parent handoff: {parent_handoff_id}")
 
-        target_role = self.TARGET_BY_KIND[kind]
+        if kind == "CLARIFY":
+            target_role = str(target_role or "").strip().lower()
+            if (source_role != "reviewer"
+                or subject_type != "ASSIGNMENT"
+                or target_role not in {"researcher", "experimenter"}
+                or not subject or subject.get("role") != "reviewer"
+                or subject.get("assignment_id") != source_assignment_id
+                or subject.get("state") not in {"ASSIGNED", "RUNNING"}):
+                raise ValueError("CLARIFY requires an active Reviewer source and a scientific target role")
+        else:
+            if target_role:
+                raise ValueError("target_role is permitted only for CLARIFY")
+            target_role = self.TARGET_BY_KIND[kind]
         request_sha256 = self.progress.task_sha256(request)
         identity = {
             "kind": kind,
@@ -102,7 +115,7 @@ class HandoffRequests:
             identity["node_epoch"] = self.progress.reopen_epoch(node_id)
         if subject_type in {"PLAN_CHANGE", "ASSIGNMENT"} and subject and subject.get("review_epoch"):
             identity["review_epoch"] = subject["review_epoch"]
-        if (subject_type == "ASSIGNMENT" and subject and kind in {"INTERPRET", "RETHINK", "ESCALATE"}
+        if (subject_type == "ASSIGNMENT" and subject and kind in {"INTERPRET", "RETHINK", "ESCALATE", "CLARIFY"}
             and not parent_handoff_id and subject.get("state") in {"ASSIGNED", "RUNNING"}):
             identity["review_epoch"] = int(subject.get("review_epoch", 0)) + 1
         handoff_id = self.progress._content_id(identity)
@@ -157,7 +170,7 @@ class HandoffRequests:
             return record
         old_epoch = (record["subject_type"] in {"PLAN_CHANGE", "ASSIGNMENT"}
                      and int(record.get("review_epoch", 0)) != int(subject.get("review_epoch", 0)))
-        if (record["subject_type"] == "ASSIGNMENT" and record["kind"] in {"INTERPRET", "RETHINK", "ESCALATE"}
+        if (record["subject_type"] == "ASSIGNMENT" and record["kind"] in {"INTERPRET", "RETHINK", "ESCALATE", "CLARIFY"}
             and not record.get("parent_handoff_id") and subject.get("state") in {"ASSIGNED", "RUNNING", "DONE"}
             and int(record.get("review_epoch", 0)) == int(subject.get("review_epoch", 0)) + 1):
             old_epoch = False
