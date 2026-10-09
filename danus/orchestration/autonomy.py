@@ -455,26 +455,22 @@ def _open_nonplan_handoff(
     )
 
 
-def _apply_routing_actions(
+def _apply_routing_events(
     project: str,
     actions: List[Dict[str, Any]],
-    *,
-    rows: List[Dict[str, Any]],
-    reserved: set[str],
-    assign: Callable[..., Dict[str, Any]],
-    start: Callable[[L.WorkerLayout], str],
-    role_of: Callable[[L.WorkerLayout], str],
 ) -> List[Dict[str, Any]]:
-    """Execute reducer-owned Contract/Handoff actions; Plan actions stay in planning.py."""
+    """Advance control-plane Handoffs. Never allocate workers here.
+
+    The authoritative dispatch queue is built *after* Handoff mutations, from
+    a fresh reducer snapshot. Plan and Contract do not own separate schedulers.
+    """
     ledger = ProgressLedger(L.project_dir(project))
     handoffs = HandoffRequests(ledger)
     applied: List[Dict[str, Any]] = []
-
     for action in actions:
         kind = str(action.get("kind") or "")
         if action.get("subject_type") == "PLAN_CHANGE" or kind == "COMMIT_PLAN_CHANGE":
             continue
-
         if kind == "WAIT" and action.get("reason") == "escalation_pending_main":
             applied.append({
                 "action": "ESCALATE",
@@ -483,16 +479,13 @@ def _apply_routing_actions(
                 "result": "pending_main",
             })
             continue
-
         if kind == "REOPEN_HANDOFF":
             current = handoffs.get(str(action.get("handoff_id") or ""))
             assignment_id = str(action.get("assignment_id") or "")
             if current and current.get("status") == "ASSIGNED" and assignment_id:
                 current = handoffs.reopen(
-                    current["handoff_id"],
-                    assignment_id=assignment_id,
-                    actor="supervisor",
-                    reason="handoff assignment became stale",
+                    current["handoff_id"], assignment_id=assignment_id,
+                    actor="supervisor", reason="handoff assignment became stale",
                 )
                 applied.append({
                     "action": _routing_label(action),
@@ -500,15 +493,13 @@ def _apply_routing_actions(
                     "result": "reopened",
                 })
             continue
-
         if kind == "RESOLVE_HANDOFF":
             current = handoffs.get(str(action.get("handoff_id") or ""))
             assignment_id = str(action.get("assignment_id") or "")
             assignment = _assignment_by_id(ledger, assignment_id)
             if current and current.get("status") == "ASSIGNED" and assignment:
                 current = handoffs.resolve(
-                    current["handoff_id"],
-                    assignment_id=assignment_id,
+                    current["handoff_id"], assignment_id=assignment_id,
                     actor=str(assignment.get("worker") or "supervisor"),
                     summary=str(action.get("summary") or "handoff work completed"),
                 )
@@ -521,78 +512,162 @@ def _apply_routing_actions(
                     item["replacement_contract_id"] = action["replacement_contract_id"]
                 applied.append(item)
             continue
-
         if kind == "OPEN_HANDOFF":
             current = _open_nonplan_handoff(ledger, handoffs, action)
-            if current is None:
-                continue
-            routed = _dispatch_handoff(
-                project,
-                current,
-                rows=rows,
-                reserved=reserved,
-                assign=assign,
-                start=start,
-                role_of=role_of,
-            )
-            applied.append({"action": _routing_label(action), **routed})
-            continue
+            if current is not None:
+                applied.append({
+                    "action": _routing_label(action),
+                    "handoff_id": current["handoff_id"],
+                    "result": "opened" if current["status"] == "OPEN" else "existing",
+                })
+    return applied
 
+
+def _dispatch_candidates(
+    project: str,
+    *,
+    rows: List[Dict[str, Any]],
+    assign: Callable[..., Dict[str, Any]],
+    start: Callable[[L.WorkerLayout], str],
+    role_of: Callable[[L.WorkerLayout], str],
+) -> List[Dict[str, Any]]:
+    """One arbitration point for every worker assignment.
+
+    Read the *current* Plan, Contract and Handoff states and translate their
+    authorized ready work into one queue. The queue is advisory: the existing
+    ledger.assign() enforces Plan/Contract/Handoff identity atomically.
+    """
+    from .control import build_supervisor_snapshot, reduce_supervisor_snapshot, _contract_review_node
+
+    root = L.project_dir(project)
+    graph = ResearchPlanGraph(root).snapshot()
+    ledger = ProgressLedger(root)
+    contracts = ledger.pending_implementation_contracts()
+    review_reserved = {
+        predecessor
+        for contract in contracts
+        if str(contract.get("gate_status") or contract.get("status") or "") == "PROPOSED"
+        if (predecessor := _contract_review_node(root, graph, contract))
+    }
+    contract_targets = {str(c.get("node_id") or "") for c in contracts}
+    reduction = reduce_supervisor_snapshot(build_supervisor_snapshot(root, rows))
+    complete = set(ledger.completed_nodes())
+
+    # A common JSON envelope; no item is executable until the reducer
+    # authorized it and the ledger accepts the exact durable binding.
+    queue: List[Dict[str, Any]] = []
+    for action in reduction["actions"]:
+        kind = action.get("kind")
         if kind == "ASSIGN_HANDOFF":
-            current = handoffs.get(str(action.get("handoff_id") or ""))
-            if current is None:
+            handoff = HandoffRequests(ledger).get(str(action.get("handoff_id") or ""))
+            if not handoff or handoff.get("status") != "OPEN":
                 continue
-            routed = _dispatch_handoff(
-                project,
-                current,
-                rows=rows,
-                reserved=reserved,
-                assign=assign,
-                start=start,
-                role_of=role_of,
-            )
-            applied.append({"action": _routing_label({**action, "handoff_kind": current.get("kind")}), **routed})
-            continue
-
-        if kind != "ASSIGN_CONTRACT":
-            continue
-        contract = ledger.implementation_contract(str(action.get("contract_id") or ""))
-        if contract is None:
-            continue
-        wl = _idle_worker(project, "experimenter", rows, reserved, role_of)
-        if wl is None:
-            applied.append({
-                "action": "IMPLEMENTATION_ASSIGN",
-                "contract_id": contract["contract_id"],
-                "role": "experimenter",
-                "result": "no_idle_worker",
+            node_id = str(handoff["node_id"])
+            node = graph["nodes"].get(node_id)
+            if node is None or node.get("state") != "ACTIVE":
+                continue
+            if node_id != graph["root_id"] and any(
+                dep not in complete for dep in node.get("depends_on") or []
+            ):
+                continue
+            queue.append({
+                "version": 1, "kind": "HANDOFF", "node_id": node_id,
+                "role": handoff["target_role"], "task": handoff["request"],
+                "handoff_id": handoff["handoff_id"], "priority": 0,
             })
+        elif kind == "ASSIGN_CONTRACT":
+            contract = ledger.implementation_contract(str(action.get("contract_id") or ""))
+            if not contract or str(contract.get("gate_status") or contract.get("status")) != "APPROVE":
+                continue
+            node_id = str(contract["node_id"])
+            node = graph["nodes"].get(node_id)
+            if node is None or node.get("state") != "ACTIVE" or any(
+                dep not in complete for dep in node.get("depends_on") or []
+            ):
+                continue
+            queue.append({
+                "version": 1, "kind": "CONTRACT", "node_id": node_id,
+                "role": "experimenter", "task": contract["task"],
+                "contract_id": contract["contract_id"], "priority": 1,
+            })
+    for decision in reduction["decisions"]:
+        if (
+            decision.get("action") != "RETASK"
+            or decision.get("worker") is not None
+            or decision.get("reason") != "ready_node_unassigned"
+        ):
+            continue
+        node_id = str(decision.get("node_id") or "")
+        if node_id in review_reserved or node_id in contract_targets:
+            continue
+        spec = _task_spec(root, node_id)
+        if spec.get("status") == "ready":
+            queue.append({
+                "version": 1, "kind": "PLAN_NODE", "node_id": node_id,
+                "role": spec["role"], "task": spec["task"],
+                "task_spec": spec["path"], "priority": 2,
+            })
+        elif spec.get("status") == "invalid":
+            queue.append({
+                "version": 1, "kind": "INVALID", "node_id": node_id,
+                "reason": spec.get("reason"), "priority": 3,
+            })
+
+    queue.sort(key=lambda item: (
+        item["priority"], str(item.get("node_id") or ""),
+        str(item.get("handoff_id") or item.get("contract_id") or ""),
+    ))
+    reserved_workers: set[str] = set()
+    dispatched_nodes: set[str] = set()
+    applied: List[Dict[str, Any]] = []
+
+    for item in queue:
+        kind = item["kind"]
+        node_id = item["node_id"]
+        action_name = {
+            "HANDOFF": "IMPLEMENTATION_REVIEW" if item["role"] == "reviewer"
+                       and item.get("handoff_id") in {
+                           h["handoff_id"] for h in HandoffRequests(ledger).all()
+                           if h.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                       } else "HANDOFF",
+            "CONTRACT": "IMPLEMENTATION_ASSIGN",
+            "PLAN_NODE": "AUTO_DISPATCH",
+            "INVALID": "AUTO_DISPATCH",
+        }[kind]
+        if kind == "INVALID":
+            applied.append({"action": action_name, "node_id": node_id,
+                            "result": "blocked", "reason": item.get("reason")})
+            continue
+        if node_id in dispatched_nodes:
+            applied.append({"action": action_name, "node_id": node_id,
+                            "result": "already_scheduled"})
+            continue
+        wl = _idle_worker(project, item["role"], rows, reserved_workers, role_of)
+        if wl is None:
+            applied.append({"action": action_name, "node_id": node_id,
+                            "role": item["role"], "result": "no_idle_worker"})
             continue
         try:
             assignment = assign(
-                f"{project}/{wl.name}",
-                contract["task"],
-                node_id=contract["node_id"],
+                f"{project}/{wl.name}", item["task"], node_id=node_id,
+                **({"handoff_id": item["handoff_id"]}
+                   if kind == "HANDOFF" else {}),
             )
-        except SystemExit as exc:
+        except (SystemExit, ValueError) as exc:
             applied.append({
-                "action": "IMPLEMENTATION_ASSIGN",
-                "contract_id": contract["contract_id"],
-                "role": "experimenter",
-                "worker": wl.name,
-                "result": "blocked",
-                "reason": str(exc),
+                "action": action_name, "node_id": node_id, "worker": wl.name,
+                "result": "blocked", "reason": str(exc),
             })
             continue
-        reserved.add(wl.name)
+        reserved_workers.add(wl.name)
+        dispatched_nodes.add(node_id)
         applied.append({
-            "action": "IMPLEMENTATION_ASSIGN",
-            "contract_id": contract["contract_id"],
-            "role": "experimenter",
-            "worker": wl.name,
-            "assignment_id": assignment.get("assignment_id"),
-            "result": "assigned",
-            "start_result": start(wl),
+            "action": action_name, "node_id": node_id, "role": item["role"],
+            "worker": wl.name, "assignment_id": assignment.get("assignment_id"),
+            **({"handoff_id": item["handoff_id"]} if kind == "HANDOFF" else {}),
+            **({"contract_id": item["contract_id"]} if kind == "CONTRACT" else {}),
+            **({"task_spec": item["task_spec"]} if kind == "PLAN_NODE" else {}),
+            "result": "assigned", "start_result": start(wl),
         })
     return applied
 
@@ -618,89 +693,18 @@ def apply_autonomy(
             applied.append(result)
     applied.extend(_close_completed_containers(project_dir))
 
-    # Keep one reviewer assignment for each frozen contract-gate node. A
-    # contract-bound V1 is dispatched through its REVIEW Handoff, not again
-    # through ordinary ready-node dispatch. E1 uses ASSIGN_CONTRACT only.
-    from .control import _contract_review_node
-
-    graph = ResearchPlanGraph(project_dir).snapshot()
-    ledger = ProgressLedger(project_dir)
-    contracts = ledger.pending_implementation_contracts()
-    review_reserved = {
-        candidate for c in contracts
-        if str(c.get("gate_status") or c.get("status") or "") == "PROPOSED"
-        if (candidate := _contract_review_node(project_dir, graph, c))
-    }
-    contract_targets = {str(c["node_id"]) for c in contracts}
-    reserved: set[str] = set()
-    for decision in decisions:
-        if (
-            decision.get("action") != "RETASK"
-            or decision.get("worker") is not None
-            or decision.get("reason") != "ready_node_unassigned"
-        ):
-            continue
-        node_id = str(decision.get("node_id") or "")
-        if node_id in review_reserved or node_id in contract_targets:
-            continue
-        spec = _task_spec(project_dir, node_id)
-        if spec.get("status") != "ready":
-            if spec.get("status") == "invalid":
-                applied.append({
-                    "action": "AUTO_DISPATCH",
-                    "node_id": node_id,
-                    "result": "blocked",
-                    "reason": spec.get("reason"),
-                })
-            continue
-        wl = _idle_worker(project, spec["role"], rows, reserved, role_of)
-        if wl is None:
-            applied.append({
-                "action": "AUTO_DISPATCH",
-                "node_id": node_id,
-                "role": spec["role"],
-                "result": "no_idle_worker",
-            })
-            continue
-        try:
-            assignment = assign(f"{project}/{wl.name}", spec["task"], node_id=node_id)
-        except SystemExit as exc:
-            applied.append({
-                "action": "AUTO_DISPATCH",
-                "node_id": node_id,
-                "role": spec["role"],
-                "worker": wl.name,
-                "result": "blocked",
-                "reason": str(exc),
-            })
-            continue
-        reserved.add(wl.name)
-        applied.append({
-            "action": "AUTO_DISPATCH",
-            "node_id": node_id,
-            "role": spec["role"],
-            "worker": wl.name,
-            "assignment_id": assignment.get("assignment_id"),
-            "task_spec": spec["path"],
-            "task_plan_version": spec["spec_plan_version"],
-            "result": "assigned",
-            "start_result": start(wl),
-        })
-
     from .control import build_supervisor_snapshot, reduce_supervisor_snapshot
 
-    routing_actions = reduce_supervisor_snapshot(
+    # Mutate governance events first; do not assign workers while the
+    # reducer is still using a stale event snapshot.
+    route = reduce_supervisor_snapshot(
         build_supervisor_snapshot(project_dir, rows)
-    )["actions"]
-    applied.extend(
-        _apply_routing_actions(
-            project,
-            routing_actions,
-            rows=rows,
-            reserved=reserved,
-            assign=assign,
-            start=start,
-            role_of=role_of,
-        )
     )
+    applied.extend(_apply_routing_events(project, route["actions"]))
+
+    # Every Plan/Handoff/Contract Assignment now passes one arbiter. Its
+    # fresh state read sees just-opened Handoffs and completed dependencies.
+    applied.extend(_dispatch_candidates(
+        project, rows=rows, assign=assign, start=start, role_of=role_of,
+    ))
     return applied
