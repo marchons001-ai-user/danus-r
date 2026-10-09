@@ -139,7 +139,7 @@ def test_invalid_proposal_routes_deterministic_repair_to_researcher(tmp_path: Pa
         task = L.WorkerLayout(L.worker_dir("P", "low")).task.read_text()
         repair_error = json.loads(planning._repair_error_path(pdir).read_text(encoding="utf-8"))
         assert "summary exceeds 100 characters" in repair_error["reason"]
-        assert str(planning._repair_error_path(pdir)) in task
+        assert "`PLAN_REPAIR_ERROR.json`" in task
         assert "summary` is at most 100 characters" in task
         assert ResearchPlanGraph(pdir).pending_changes() == []
 
