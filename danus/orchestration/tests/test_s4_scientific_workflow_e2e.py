@@ -438,3 +438,156 @@ def test_bound_protocol_mcp_wrapper_finishes_without_recursive_lock_deadlock(tmp
                 child.kill()
             child.join(timeout=2)
             responses.close()
+
+
+def _dedicated_v1_contract_fixture(tmp_path, monkeypatch):
+    """Freeze R1→V1→E1; keep exactly one Reviewer and one Experimenter."""
+    monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+    planning.initialize_research("P", brief="R1 frames, V1 approves contract, E1 executes.")
+    root = L.project_dir("P")
+    graph = ResearchPlanGraph(root)
+    fields = {
+        "goal": "Execute the frozen E1 protocol.",
+        "must_preserve_invariants": ["Keep frozen cells"],
+        "forbidden_behaviors": ["Do not add experimental cells"],
+        "acceptance_conditions": ["Persist exact evidence"],
+    }
+    exact = ProgressLedger.implementation_task(**fields)
+    ops = [
+        {"op": "add_node", "node_id": "R1", "title": "Prepare",
+         "summary": "", "parent": "P0", "depends_on": []},
+        {"op": "add_node", "node_id": "V1", "title": "Contract review",
+         "summary": "", "parent": "P0", "depends_on": ["R1"]},
+        {"op": "add_node", "node_id": "E1", "title": "Experiment",
+         "summary": "", "parent": "P0", "depends_on": ["V1"]},
+    ]
+    change_id = graph.propose_change(
+        base_plan_version=1, proposer="low", reason="bounded sequence",
+        operations=ops,
+    )
+    graph.review_change(change_id, reviewer="low2", verdict="APPROVE",
+                        rationale="frozen")
+    assert graph.commit_change(change_id, committer="supervisor") == 2
+    tasks = {
+        ("researcher", "R1"): "Submit one E1 contract.\n",
+        ("reviewer", "V1"): (
+            "Review the single pending E1 implementation contract using "
+            "implementation_pending_contracts and implementation_review_contract. "
+            "Approve only the exact frozen task.\n"
+        ),
+        ("experimenter", "E1"): exact,
+    }
+    for (role, node_id), task in tasks.items():
+        path = root / "tasks" / "v2" / role / f"{node_id}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(task)
+    ledger = ProgressLedger(root)
+    researcher = ledger.assign(
+        worker="low", role="researcher", node_id="R1", plan_version=2,
+        task=tasks[("researcher", "R1")], write_task=True,
+    )
+    contract = ledger.submit_implementation_contract(
+        proposer="low", node_id="E1", plan_version=2, **fields
+    )
+    assert contract["task_sha256"] == ProgressLedger.task_sha256(exact)
+    return root, ledger, researcher, contract, tasks
+
+
+def test_contract_review_waits_for_r1_then_uses_exact_v1_and_unlocks_e1(tmp_path, monkeypatch):
+    with _root(tmp_path):
+        root, ledger, researcher, contract, tasks = _dedicated_v1_contract_fixture(
+            tmp_path, monkeypatch
+        )
+        from danus.orchestration.control import _contract_review_node, build_supervisor_snapshot
+
+        assert _contract_review_node(root, ResearchPlanGraph(root).snapshot(), contract) == "V1"
+        initial = build_supervisor_snapshot(root, cli._project_rows("P"))
+        assert initial["contract_review_nodes"][contract["contract_id"]] == "V1"
+
+        pending = _apply("P")
+        gate = _handoff(
+            HandoffRequests(ledger), kind="REVIEW",
+            subject_type="IMPLEMENTATION_CONTRACT", subject_id=contract["contract_id"],
+        )
+        assert gate["node_id"] == "V1"
+        assert gate["status"] == "OPEN"  # must NOT start before R1 is complete
+        assert any(x.get("result") == "waiting_dependencies" for x in pending)
+        assert ledger.current("low2") is None or ledger.current("low2")["node_id"] != "V1"
+        assert ledger.current("low3") is None
+
+        _finish("P", "low")
+        decisions = [{
+            "action": "REVIEW", "reason": "completion_not_recorded",
+            "worker": "low", "node_id": "R1",
+            "assignment_id": researcher["assignment_id"],
+        }]
+        assigned = A.apply_autonomy(
+            "P", decisions, rows=cli._project_rows("P"),
+            assign=cli.do_assign, start=cli._start_one,
+            role_of=cli._read_worker_role,
+        )
+        reviewer = ledger.current("low2")
+        assert "R1" in ledger.completed_nodes()
+        assert reviewer and reviewer["node_id"] == "V1"
+        assert reviewer["handoff_id"] == gate["handoff_id"]
+        assert reviewer["task_sha256"] == ProgressLedger.task_sha256(
+            tasks[("reviewer", "V1")]
+        )
+        assert HandoffRequests(ledger).get(gate["handoff_id"])["status"] == "ASSIGNED"
+        assert ledger.current("low3") is None
+        assert not any(x.get("action") == "AUTO_DISPATCH"
+                       and x.get("node_id") == "V1" for x in assigned)
+
+        with _gateway(root, "low2", "reviewer"):
+            verdict = server.implementation_review_contract(
+                contract["contract_id"], verdict="APPROVE",
+                rationale="Task exactly preserves E1 invariants.",
+            )
+        assert verdict["status"] == "APPROVE"
+        assert ledger.current("low3") is None
+        _finish("P", "low2")
+        decisions = [{
+            "action": "REVIEW", "reason": "completion_not_recorded",
+            "worker": "low2", "node_id": "V1",
+            "assignment_id": reviewer["assignment_id"],
+        }]
+        A.apply_autonomy(
+            "P", decisions, rows=cli._project_rows("P"),
+            assign=cli.do_assign, start=cli._start_one,
+            role_of=cli._read_worker_role,
+        )
+        assert "V1" in ledger.completed_nodes()
+        assert HandoffRequests(ledger).get(gate["handoff_id"])["status"] == "RESOLVED"
+        experiment = ledger.current("low3")
+        assert experiment and experiment["node_id"] == "E1"
+        assert experiment["implementation_contract_id"] == contract["contract_id"]
+        assert experiment["task_sha256"] == contract["task_sha256"]
+        assert len([a for a in ledger.assignments()
+                    if a["role"] == "reviewer" and a["node_id"] == "V1"]) == 1
+
+
+def test_multiple_review_predecessors_never_implicitly_choose_a_reviewer(tmp_path, monkeypatch):
+    with _root(tmp_path):
+        root, ledger, researcher, contract, tasks = _dedicated_v1_contract_fixture(
+            tmp_path, monkeypatch
+        )
+        from danus.orchestration.control import _contract_review_node
+
+        # A second direct reviewer dependency is ambiguous and must not
+        # inherit the first review node's authority.
+        graph = ResearchPlanGraph(root)
+        change_id = graph.propose_change(
+            base_plan_version=2, proposer="low", reason="ambiguous reviewer gate",
+            operations=[
+                {"op": "add_node", "node_id": "Vx", "title": "Other review",
+                 "summary": "", "parent": "P0", "depends_on": ["R1"]},
+                {"op": "update_node", "node_id": "E1", "depends_on": ["V1", "Vx"]},
+            ],
+        )
+        graph.review_change(change_id, reviewer="low2", verdict="APPROVE",
+                            rationale="test only")
+        graph.commit_change(change_id, committer="supervisor")
+        spec = root / "tasks" / "v3" / "reviewer" / "Vx.md"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("Review another implementation contract.\n")
+        assert _contract_review_node(root, graph.snapshot(), contract) == ""
