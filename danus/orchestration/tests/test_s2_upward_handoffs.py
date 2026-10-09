@@ -437,3 +437,52 @@ def test_idle_router_rejects_unapproved_experimenter_and_can_choose_researcher(t
         assert "P0" not in ledger.completed_nodes()
 
 
+def test_idle_router_retries_exact_blocked_researcher_task_at_r2_style_escalation(tmp_path, monkeypatch):
+    from danus.core import ResearchPlanGraph
+    from danus.orchestration.idle_recovery import dispatch_role_choice
+
+    with _root(tmp_path):
+        monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+        planning.initialize_research("P", brief="Open temporal connectivity problem.")
+        root = L.project_dir("P")
+        graph = ResearchPlanGraph(root)
+        change = graph.propose_change(
+            base_plan_version=1, proposer="low", reason="reviewed research plan",
+            operations=[{"op": "add_node", "node_id": "R2", "title": "Refine",
+                         "summary": "", "parent": "P0", "depends_on": []}],
+        )
+        graph.review_change(change, reviewer="low2", verdict="APPROVE", rationale="bounded")
+        assert graph.commit_change(change, committer="supervisor") == 2
+        path = root / "tasks" / "v2" / "researcher" / "R2.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        task = "Refine the bounded scientific proposal from Reviewer feedback.\n"
+        path.write_text(task, encoding="utf-8")
+        ledger = ProgressLedger(root)
+        ledger.update(worker="low", state="DONE", actor="runtime", outcome="COMPLETE")
+        cli.do_assign("P/low", task, node_id="R2")
+        ledger.update(worker="low", state="RUNNING", actor="runtime")
+        source_id = ledger.current("low")["assignment_id"]
+        with _gateway(root, "low", "researcher"):
+            escalated = server.handoff_request(
+                "ESCALATE", "The scientific design is underspecified."
+            )
+        ledger.update(worker="low", state="BLOCKED", actor="runtime",
+                      outcome="BLOCKED", result="Cannot proceed without clarifying design.")
+        pause = L.WorkerLayout(L.worker_dir("P", "low")).pause
+        pause.write_text("review:assignment_blocked\n", encoding="utf-8")
+        assert HandoffRequests(ledger).get(escalated["handoff_id"])["status"] == "OPEN"
+
+        routed = dispatch_role_choice(
+            "P", target_role="researcher", node_id="R2",
+            reason="Continue with the unchanged reviewed R2 task.", token_budget=10000000,
+        )
+        assert routed["action"] == "WATCHDOG_RETRY_FROZEN_TASK"
+        assert routed["result"] == "assigned"
+        assert routed["source_assignment_id"] == source_id
+        assert ledger.current("low")["assignment_id"] != source_id
+        assert ledger.current("low")["task_sha256"] == ProgressLedger.task_sha256(task)
+        assert not pause.exists()
+        assert HandoffRequests(ledger).get(escalated["handoff_id"])["status"] == "CANCELLED"
+        assert "R2" not in ledger.completed_nodes()
+
+
