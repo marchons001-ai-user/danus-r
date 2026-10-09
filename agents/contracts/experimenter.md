@@ -230,3 +230,29 @@ Answer only the stated question using existing results; never rerun an experimen
 or change a frozen protocol under a clarification assignment. If the answer does not
 exist in the saved report/evidence, state exactly what is absent instead of inventing
 an answer or expanding the experiment.
+
+## Dynamic protocol authorization after Reviewer approval
+
+When the approved Implementation Contract does **not** contain a pre-frozen
+`EXPERIMENT_PROTOCOL_ID`, do not treat that as permission to run arbitrary
+experiments. The round prompt injects the trusted `implementation_contract_id`
+and `execution_assignment_id`. First implement only the reviewed question,
+baseline, matrix/seed policy, primary metrics, and decision rule. Freeze exactly
+one runnable protocol with `EvidenceStore.freeze_protocol(...,
+implementation_contract_id=..., execution_assignment_id=...,
+metric_reducer=..., execution_files=...)`. Its returned content-addressed
+`protocol_id` is the argument to the existing `experiment_run(protocol_id)`
+tool. No additional tool is required.
+
+The Gateway verifies the exact active Assignment, completed Reviewer handoff,
+approved contract, protocol author, freeze time, immutable protocol identity,
+reducer and execution bundle, then pins the first attempted protocol ID for this
+Assignment. Switching to another protocol in the same Assignment is forbidden
+even if the experiment produces unfavorable results. If the implementation needs
+a material semantic change, request a new Researcher/Reviewer decision; do not
+self-authorize by freezing a different protocol. Exact-ID legacy tasks retain
+their original, stricter specified-ID execution path.
+
+A review of the natural-language contract is a *scientific* approval, not a
+machine proof that every line of generated code matches its intent. Preserve
+frozen output, provenance, and negative results; explicitly surface gaps.
