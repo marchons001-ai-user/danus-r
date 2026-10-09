@@ -727,10 +727,10 @@ def _dispatch_candidates(
             action_name = (
                 "IMPLEMENTATION_REVIEW"
                 if source.get("subject_type") == "IMPLEMENTATION_CONTRACT"
-                else str(source.get("kind") or "HANDOFF")
-                if source.get("kind") in {"INTERPRET", "RETHINK"}
                 else "HANDOFF"
             )
+            if source.get("kind") in {"INTERPRET", "RETHINK"}:
+                action_name = source["kind"]
         else:
             action_name = {
                 "CONTRACT": "IMPLEMENTATION_ASSIGN",
@@ -815,6 +815,7 @@ def retry_blocked_review(project: str) -> Dict[str, Any]:
     if result.get("result") != "assigned":
         raise ValueError("blocked Reviewer retry failed: " + str(result))
     return result
+
 
 def apply_autonomy(
     project: str,
