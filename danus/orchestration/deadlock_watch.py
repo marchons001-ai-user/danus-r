@@ -51,7 +51,7 @@ def _fingerprint(report: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
 def _eligible(root: Path, report: Dict[str, Any], rows: List[Dict[str, Any]]) -> bool:
     budget = report.get("budget", {})
     if (report.get("project_state") != "RUNNING" or report.get("budget_stop")
-        or budget.get("tokens", {}).get("exceeded") is not False
+        or budget.get("tokens", {}).get("exceeded") is True
         or budget.get("time", {}).get("exceeded")
         or (root / L.PAUSE_FILE).exists()
         or not rows or any(r.get("alive") for r in rows)):
@@ -94,7 +94,7 @@ def _latest_open(history: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             open_events[ident] = e
         elif e.get("event") == "DEADLOCK_CLOSED":
             open_events.pop(ident, None)
-    return next(reversed(open_events.values())) if open_events else None
+    return list(open_events.values())[-1] if open_events else None
 
 
 def _write(root: Path, event: Dict[str, Any]) -> None:
@@ -162,6 +162,8 @@ class DeadlockWatch:
         tick = time.monotonic() if now is None else now
         signature = _fingerprint(report, rows) if _eligible(self.root, report, rows) else None
         if signature != self._signature:
+            if self._signature is not None:
+                self._close_inactive()
             self._signature, self._since = signature, tick
         if signature is None or self._since is None:
             self._close_inactive()
