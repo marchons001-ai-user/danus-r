@@ -47,7 +47,7 @@ from danus.execution.scaffold import (
 
 from . import autonomy as A
 from . import quota as Q
-from .control import quota_policy, reconcile, reviewer_cost_policy
+from .control import reconcile, reviewer_cost_policy
 
 _QUOTA_REFRESH_SECONDS = 5 * 60
 _REVIEWER_TERRA_MODEL = "gpt-5.6-terra"
@@ -169,11 +169,6 @@ def _selected_worker_backend(wl: L.WorkerLayout) -> str:
     return "chatgpt"
 
 
-def _uses_openai_codex(wl: L.WorkerLayout) -> bool:
-    """Quota pressure never gates a worker currently bound to DSH."""
-    return _selected_worker_backend(wl) != "dsh"
-
-
 def _dsh_available() -> bool:
     path = os.environ.get("DANUS_DSH_BIN")
     return bool(path and Path(path).is_file())
@@ -222,7 +217,6 @@ def _persist_reviewer_backend(
         "reviewer_model_selected": _reviewer_model(wl, backend),
         "reviewer_backend_reason": decision["reason"],
         "reviewer_backend_policy": decision["policy"],
-        "reviewer_backend_quota_state": decision["quota_state"],
         "reviewer_backend_selected_at": utc_now(),
     })
     if status.get("reviewer_dsh_quota_assignment_id") != assignment_id:
@@ -234,7 +228,6 @@ def _persist_reviewer_backend(
 def _reviewer_cost_rows(
     project: str,
     rows: List[Dict[str, Any]],
-    quota: Dict[str, Any],
     *,
     apply: bool,
 ) -> List[Dict[str, Any]]:
@@ -251,7 +244,6 @@ def _reviewer_cost_rows(
             continue
         exhausted = _dsh_quota_for_assignment(wl, assignment_id)
         desired = reviewer_cost_policy(
-            quota,
             dsh_available=available,
             dsh_quota_exhausted=exhausted,
         )
@@ -291,7 +283,6 @@ def _prepare_reviewer_backend(wl: L.WorkerLayout) -> None:
         return
     assignment_id = _current_assignment_id(wl)
     decision = reviewer_cost_policy(
-        quota_policy(Q.load_quota(wl.project_dir)),
         dsh_available=_dsh_available(),
         dsh_quota_exhausted=_dsh_quota_for_assignment(wl, assignment_id),
     )
@@ -710,41 +701,26 @@ def _clear_recovered_budget_pauses(
             wl.pause.unlink(missing_ok=True)
 
 
-def _apply_quota_gate(project: str, rows: List[Dict[str, Any]], policy: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Persist/clear only quota-owned pauses; active rounds are never signalled."""
-    block = bool(policy.get("block_new_codex_rounds"))
-    state = str(policy.get("state") or "UNKNOWN").lower()
-    reason = str(policy.get("reason") or "quota")
-    applied: List[Dict[str, Any]] = []
+def _clear_legacy_quota_pauses(project: str) -> List[Dict[str, Any]]:
+    """One-time migration from the removed pace gate.
 
-    for row in rows:
-        wl = L.WorkerLayout(L.worker_dir(project, row["worker"]))
-        pause_reason = _pause_reason(wl)
-        quota_owned = bool(pause_reason and pause_reason.startswith("quota:"))
-
-        if block:
-            if not _uses_openai_codex(wl):
-                if quota_owned:
-                    wl.pause.unlink(missing_ok=True)
-                    applied.append({"worker": row["worker"], "result": "quota-cleared-non-codex"})
-                continue
-            if pause_reason and not quota_owned:
-                continue
-            if not quota_owned:
-                atomic_write(wl.pause, f"quota:{state}:{reason}\n")
-            if row.get("alive"):
-                wl.stop.touch()
-            applied.append({"worker": row["worker"], "result": "pause-at-round-boundary"})
+    Only clear pause files owned by the old quota feature. Preserve explicit
+    manual/budget/review pauses, other Worker state and all Plan decisions.
+    A formerly paused RUNNING assignment may resume without manual retasking.
+    """
+    out: List[Dict[str, Any]] = []
+    for wl in (L.WorkerLayout(p) for p in L.target_worker_dirs(project)):
+        reason = _pause_reason(wl)
+        if not reason or not reason.startswith("quota:"):
             continue
-
-        if quota_owned:
-            wl.pause.unlink(missing_ok=True)
-            result = "quota-cleared"
-            if not row.get("alive") and row.get("progress_state") in {"ASSIGNED", "RUNNING"}:
-                result = _start_one(wl)
-            applied.append({"worker": row["worker"], "result": result})
-
-    return applied
+        wl.pause.unlink(missing_ok=True)
+        # The old quota gate placed .stop at the round boundary. Remove it
+        # only if the original Worker is no longer alive; never interfere with
+        # a currently executing process or an unrelated pause.
+        if not _worker_alive(wl):
+            wl.stop.unlink(missing_ok=True)
+        out.append({"worker": wl.name, "result": "legacy-quota-pause-cleared"})
+    return out
 
 
 def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -839,8 +815,6 @@ def _record_supervisor_event(pdir: Path, trigger: str, report: Dict[str, Any]) -
             "applied": report.get("applied", []),
             "autonomy_applied": report.get("autonomy_applied", []),
             "budget": report.get("budget", {}),
-            "quota_policy": report.get("quota_policy", {}),
-            "quota_applied": report.get("quota_applied", []),
             "reviewer_cost_policy": report.get("reviewer_cost_policy", []),
             "reviewer_cost_applied": report.get("reviewer_cost_applied", []),
             "convergence": report.get("convergence", {}),
@@ -861,12 +835,10 @@ def _decorate_supervisor_report(
     report["budget"] = budget
     if not quiescent:
         _apply_resource_budget(report, rows, budget)
-    policy = quota_policy(Q.load_quota(pdir))
-    report["quota_policy"] = policy
     report["reviewer_cost_policy"] = (
-        [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=False)
+        [] if quiescent else _reviewer_cost_rows(project, rows, apply=False)
     )
-    return report, policy, quiescent
+    return report, quiescent
 
 
 def _recover_project(project_dir: Path) -> List[Dict[str, Any]]:
@@ -908,8 +880,9 @@ def _do_supervise_unlocked(
         elif reopen_node:
             ledger.set_node_state(reopen_node, state="OPEN", actor="supervisor")
 
+        legacy_pause_cleanup = _clear_legacy_quota_pauses(project) if apply else []
         rows = _project_rows(project)
-        report, policy, quiescent = _decorate_supervisor_report(
+        report, quiescent = _decorate_supervisor_report(
             project, pdir, rows, reconcile(pdir, rows), token_budget
         )
         report["recovery_applied"] = recovered
@@ -919,11 +892,10 @@ def _do_supervise_unlocked(
         applied: List[Dict[str, Any]] = []
         autonomy_applied: List[Dict[str, Any]] = []
         reviewer_cost_applied = (
-            [] if quiescent else _reviewer_cost_rows(project, rows, policy, apply=True)
+            [] if quiescent else _reviewer_cost_rows(project, rows, apply=True)
         )
         if not quiescent:
             _clear_recovered_budget_pauses(project, rows, report["budget"])
-        quota_applied = [] if quiescent or report.get("budget_stop") else _apply_quota_gate(project, rows, policy)
         stable = False
         passes = 0
 
@@ -944,7 +916,7 @@ def _do_supervise_unlocked(
             passes += 1
 
             rows = _project_rows(project)
-            report, policy, quiescent = _decorate_supervisor_report(
+            report, quiescent = _decorate_supervisor_report(
                 project, pdir, rows, reconcile(pdir, rows), token_budget
             )
             if _reduction_key(report) == before:
@@ -955,7 +927,7 @@ def _do_supervise_unlocked(
         report["recovery_applied"] = recovered
         report["autonomy_applied"] = autonomy_applied
         report["reviewer_cost_applied"] = reviewer_cost_applied
-        report["quota_applied"] = quota_applied
+        report["legacy_pause_cleanup"] = legacy_pause_cleanup
         report["convergence"] = {
             "passes": passes,
             "stable": stable,
@@ -1007,7 +979,7 @@ def _control_signature(project: str, rows: List[Dict[str, Any]], budget: Dict[st
 
     stamps = []
     paths = [pdir / "plan" / "current.json", pdir / "progress" / "ledger.jsonl",
-             pdir / L.PAUSE_FILE, pdir / L.DEADLINE_FILE, Q.quota_path(pdir)]
+             pdir / L.PAUSE_FILE, pdir / L.DEADLINE_FILE]
     paths.extend(sorted((pdir / "plan" / "changes").glob("*.json")))
     paths.extend(sorted((pdir / "experiment_runtime").glob("*/checkpoint.json")))
     paths.extend(sorted((pdir / "tasks").glob("v*/*/*.md")))
@@ -1058,6 +1030,7 @@ def watch_supervisor(
             or now - last_quota_refresh >= _QUOTA_REFRESH_SECONDS
         )
         if quota_due:
+            # Informational only: no quota snapshot is consulted for scheduling.
             Q.refresh_quota(pdir)
             last_quota_refresh = now
 
@@ -1067,8 +1040,6 @@ def watch_supervisor(
         trigger = None
         if signature != last_signature:
             trigger = "event"
-        elif quota_due:
-            trigger = "quota"
         elif now - last_reconcile >= heartbeat:
             trigger = "heartbeat"
 
