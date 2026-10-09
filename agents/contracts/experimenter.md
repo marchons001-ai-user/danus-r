@@ -242,7 +242,11 @@ one runnable protocol with `EvidenceStore.freeze_protocol(...,
 implementation_contract_id=..., execution_assignment_id=...,
 metric_reducer=..., execution_files=...)`. Its returned content-addressed
 `protocol_id` is the argument to the existing `experiment_run(protocol_id)`
-tool. No additional tool is required.
+tool. No additional tool is required. In a project with a separate scientific
+workspace, pass `source_root=workspace` to `freeze_protocol` and use
+`store.artifact_ref(reducer_path, relative_to=workspace)` (and the same pattern
+for input references). Frozen bundle file paths must be relative to that workspace,
+not absolute paths into the control project.
 
 The Gateway verifies the exact active Assignment, completed Reviewer handoff,
 approved contract, protocol author, freeze time, immutable protocol identity,
