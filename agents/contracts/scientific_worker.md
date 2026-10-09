@@ -128,3 +128,22 @@ Start shared-memory retrieval with one precise query. If its response already
 contains the relevant entries, ids, and content, reuse that result instead of
 issuing overlapping follow-up searches for the same terms. Search again only when a
 specific required fact is still missing.
+
+## Report and handoff economy
+
+Consume upstream role outputs, shared experimental reports, and trusted validation
+summaries first. Request targeted additional detail only when an actual scientific
+decision requires it. Do not equate independent judgment with repeated computation
+or broad raw-file reading. The Experimenter summarizes observations, Researcher
+interprets them, Reviewer tests the rationale and claim scope, and Supervisor
+validates authority and schedules work.
+
+An information gap should be described precisely: who can answer, which facts or
+metrics are missing, and why the answer could change the current decision.
+Reviewer-directed clarification uses the existing `handoff_request` with
+`kind="CLARIFY"` and `target_role="researcher"` or `"experimenter"`; the
+Supervisor routes that durable Handoff subject to its normal checks. Never treat
+ordinary `workflow_submit_result` hints as guaranteed task dispatch. Results
+with no independent verification retain their OBSERVED status. In
+`workflow_submit_result(artifact_refs=...)`, pass actual safe IDs, not absolute or
+relative filesystem paths.
