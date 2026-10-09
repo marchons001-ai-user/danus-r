@@ -112,7 +112,7 @@ def _proposal_instructions(path: Path, plan_version: Optional[int]) -> str:
     if plan_version is None:
         version = "<current plan_version from the committed Research Plan>"
         version_note = (
-            "Immediately before writing the proposal, read the current committed Research Plan "
+            "Immediately before writing the proposal, read `RESEARCH_PLAN.json`, the read-only current committed Plan snapshot, "
             "and copy its integer `plan_version` exactly into `base_plan_version`.\n"
         )
     else:
@@ -596,9 +596,10 @@ def _load_proposal_record(pdir: Path, proposal_id: str) -> Dict[str, Any]:
 def _review_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
     return (
         "# Autonomous Research Plan Review\n\n"
-        f"Review Plan change `{change['change_id']}` against the research brief, charter, current "
-        f"Plan v{change['base_plan_version']}, and the exact immutable proposal at "
-        f"`{_proposal_record_path(pdir, proposal_id)}`. Approval covers both structural operations "
+        f"Review Plan change `{change['change_id']}` using the injected Charter, "
+        f"`RESEARCH_BRIEF.md`, `RESEARCH_PLAN.json` (Plan v{change['base_plan_version']}), and "
+        f"the exact validated, read-only `PLAN_PROPOSAL.json` (proposal `{proposal_id}`). "
+        "Approval covers both structural operations "
         "and exact role/task specs. Reject if the route is scientifically weak, unnecessarily large, "
         "post-hoc without required evidence, or bypasses role/review/experiment boundaries.\n\n"
         f"Call `plan_review_change(change_id=\"{change['change_id']}\", "
@@ -613,7 +614,8 @@ def _revision_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
     return (
         "# Revise Autonomous Research Plan\n\n"
         f"Reviewer requested revision of proposal `{proposal_id}` / change `{change['change_id']}`. Read the "
-        f"immutable proposal at `{_proposal_record_path(pdir, proposal_id)}` and address only the "
+        f"assigned read-only `PLAN_PROPOSAL.json` (proposal `{proposal_id}`) and "
+        "current `RESEARCH_PLAN.json` snapshots; address only the "
         f"blocking rationale below.\n\nReviewer rationale:\n"
         f"{str(change.get('review_rationale') or 'Reviewer requested revision')}\n\n"
         "Produce the smallest corrected replacement; do not broaden the project for non-blocking suggestions.\n\n"
@@ -627,7 +629,8 @@ def _rethink_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
     return (
         "# Rethink Rejected Autonomous Research Plan\n\n"
         f"Reviewer rejected proposal `{proposal_id}` / change `{change['change_id']}` as a route, not merely "
-        "as text needing local repair. Read the immutable proposal and blocking rationale below, then decide "
+        "as text needing local repair. Read `PLAN_PROPOSAL.json` and `RESEARCH_PLAN.json` "
+        "read-only snapshots plus the blocking rationale below, then decide "
         "the smallest scientifically distinct next route. Do not resubmit the rejected route with cosmetic edits.\n\n"
         f"Reviewer rationale:\n{str(change.get('review_rationale') or 'Reviewer rejected the route')}\n\n"
         + _proposal_instructions(_proposal_path(pdir), current)
@@ -639,8 +642,9 @@ def _repair_task(pdir: Path) -> str:
     current = ResearchPlanGraph(pdir).snapshot()["plan_version"]
     return (
         "# Repair Autonomous Plan Proposal\n\n"
-        f"Read the latest deterministic validation failure at `{_repair_error_path(pdir)}` and "
-        f"the rejected proposal at `{_proposal_path(pdir)}`. Replace that proposal JSON with the "
+        f"Read the read-only `PLAN_REPAIR_ERROR.json` report and the rejected draft "
+        f"at `{_proposal_path(pdir)}` in the authorized scientific workspace. "
+        "Replace the draft JSON with the "
         "smallest correction needed to satisfy the validator. Preserve the scientific intent and "
         "task decomposition unless the error itself requires changing them; do not broaden the "
         "research.\n\n"
