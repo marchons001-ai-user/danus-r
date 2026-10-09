@@ -201,8 +201,10 @@ def _prompt(packet: Dict[str, Any]) -> str:
     )
 
 
-def _run_luna(prompt: str) -> Dict[str, Any]:
-    """Run Luna/low through the existing ChatGPT-subscription Codex launcher."""
+def _run_luna(prompt: str, *, effort: str = _EFFORT) -> Dict[str, Any]:
+    """Run restricted Luna at the caller's fixed effort through the existing launcher."""
+    if effort not in {"low", "medium"}:
+        raise ValueError("unsupported restricted Luna reasoning effort")
     if codex.backend() != "chatgpt":
         return {
             "status": "failed",
@@ -221,7 +223,7 @@ def _run_luna(prompt: str) -> Dict[str, Any]:
         cmd = codex.exec_cmd(
             codex_bin,
             _MODEL,
-            _EFFORT,
+            effort,
             "-C", str(work),
             "--skip-git-repo-check",
             "--sandbox", "read-only",
@@ -1166,6 +1168,8 @@ def research_main(argv: List[str]) -> int:
                         help="restart one Reviewer after validation of repaired committed Plan provenance")
     parser.add_argument("--recover-premature-proposal-review", action="store_true",
                         help="retry a blocked Researcher who already saved a proposal for a downstream Reviewer")
+    parser.add_argument("--capture-deadlock", action="store_true",
+                        help="journal the current fully idle nonterminal project without changing science")
     parser.add_argument("--heartbeat", type=float, default=1800.0)
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--token-budget", type=int, default=0)
@@ -1181,8 +1185,15 @@ def research_main(argv: List[str]) -> int:
         args.retry_blocked_review,
         args.recover_provenance_review,
         args.recover_premature_proposal_review,
+        args.capture_deadlock,
     )) > 1:
         parser.error("choose one review recovery mode")
+    if args.capture_deadlock:
+        from .deadlock_watch import capture_current_deadlock
+
+        captured = capture_current_deadlock(args.project, token_budget=args.token_budget)
+        print(json.dumps({"deadlock_capture": captured}, ensure_ascii=False, sort_keys=True), flush=True)
+        return 0
     if args.retry_blocked_review:
         from .autonomy import retry_blocked_review
 
