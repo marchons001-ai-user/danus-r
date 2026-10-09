@@ -80,6 +80,8 @@ class HandoffRequests:
             raise ValueError(f"unknown parent handoff: {parent_handoff_id}")
 
         if kind == "CLARIFY":
+            subject = next((a for a in self.progress.assignments()
+                            if a.get("assignment_id") == subject_id), None)
             target_role = str(target_role or "").strip().lower()
             if (source_role != "reviewer"
                 or subject_type != "ASSIGNMENT"
