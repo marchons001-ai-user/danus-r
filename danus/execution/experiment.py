@@ -225,6 +225,113 @@ def _validate_inputs(store: EvidenceStore, unit: Dict[str, Any], workspace: Path
         raise ValueError(f"frozen unit input changed: {unit['id']}")
 
 
+def _persist_evidence_report(root: Path, protocol_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Derive one reusable Evidence Packet from hash-checked frozen outputs.
+
+    Numbers are copied from the artifact JSON or trusted reducer, never invented by
+    an LLM. The report is a derived index, not independent empirical authority.
+    """
+    import hashlib
+    from danus.execution import layout as L
+    from danus.execution.scaffold import atomic_write
+
+    evidence_id = str(result["evidence_id"])
+    store = EvidenceStore(root)
+    record = store.get_record(evidence_id)
+    protocol = store.get_protocol(protocol_id)
+    if not record or not protocol or record.get("protocol_id") != protocol_id:
+        raise ValueError("report requires the matching immutable evidence and protocol")
+    checkpoint = _load_checkpoint(root, protocol_id)
+    units = _units(protocol)
+    completed = checkpoint.get("completed")
+    if (not isinstance(completed, dict)
+        or set(completed) != {u["id"] for u in units}
+        or checkpoint.get("evidence_id") != evidence_id):
+        raise ValueError("report checkpoint does not match evidence")
+    refs = [r for u in units for r in completed[u["id"]]]
+    if refs != record.get("artifacts") or not _refs_match(store, refs):
+        raise ValueError("report raw artifacts do not match immutable evidence")
+    allowed = (_runtime_dir(root, protocol_id) / "artifacts").resolve()
+    cells: List[Dict[str, Any]] = []
+    for unit in units:
+        row: Dict[str, Any] = {"unit_id": unit["id"], "artifacts": []}
+        for ref in completed[unit["id"]]:
+            path = (root / str(ref["path"])).resolve(strict=True)
+            if not path.is_relative_to(allowed):
+                raise ValueError("report artifact escapes experiment runtime")
+            scalars: Dict[str, Any] = {}
+            if path.suffix == ".json" and path.stat().st_size <= 65536:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        if isinstance(k, str) and len(k) <= 80 and (
+                            type(v) in {int, float, bool} or
+                            (isinstance(v, str) and len(v) <= 160)
+                        ):
+                            scalars[k] = v
+            row["artifacts"].append({
+                "ref": ref, "scalar_results": scalars,
+            })
+        cells.append(row)
+    report = {
+        "schema_version": 1,
+        "evidence_id": evidence_id,
+        "protocol_id": protocol_id,
+        "question": protocol.get("question", ""),
+        "hypothesis": protocol.get("hypothesis", ""),
+        "decision_rule": protocol.get("decision_rule", ""),
+        "primary_metrics": record.get("primary_metrics", {}),
+        "matrix_coverage": record.get("matrix_coverage", {}),
+        "failures": record.get("failures", []),
+        "deviations": record.get("deviations", []),
+        "cells": cells,
+        "provenance_gaps": [
+            name for name in ("code_commit", "config_ref", "data_ref")
+            if not record.get(name)
+        ],
+        "epistemic_status": "OBSERVED; independent scientific verification is separate",
+    }
+    report_path = _runtime_dir(root, protocol_id) / "evidence_report.json"
+    _write_json(report_path, report)
+    lines = [
+        "# Experiment Evidence Packet",
+        "",
+        f"Evidence ID: \`{evidence_id}\` | Frozen protocol: \`{protocol_id}\`",
+        f"Question: {report['question']}",
+        f"Pre-specified hypothesis: {report['hypothesis']}",
+        f"Decision rule: {report['decision_rule']}",
+        f"Coverage: {json.dumps(report['matrix_coverage'], ensure_ascii=False)}",
+        f"Primary metrics: {json.dumps(report['primary_metrics'], ensure_ascii=False)}",
+        f"Failures: {json.dumps(report['failures'], ensure_ascii=False)}",
+        f"Deviations: {json.dumps(report['deviations'], ensure_ascii=False)}",
+        "",
+        "## All frozen units (including negative and null outcomes)",
+    ]
+    for row in cells:
+        for item in row["artifacts"]:
+            lines.append(
+                f"- {row['unit_id']}: "
+                + json.dumps(item["scalar_results"], ensure_ascii=False, sort_keys=True)
+                + f" [sha256={item['ref']['sha256']}]"
+            )
+    if report["provenance_gaps"]:
+        lines.append("Missing provenance fields: " + ", ".join(report["provenance_gaps"]))
+    lines.append(
+        "This is a deterministic report of recorded observations, not a "
+        "scientific interpretation or an independent confirmation."
+    )
+    md = "\n".join(lines) + "\n"
+    workspace = L.scientific_workspace(root)
+    shared_path = workspace / ".danus" / "experiment_reports" / f"{evidence_id}.md"
+    shared_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(shared_path, md)
+    return {
+        "evidence_id": evidence_id,
+        "report_path": str(shared_path),
+        "report": report,
+    }
+
+
 def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experimenter", authorize=None) -> Dict[str, Any]:
     """Execute exactly one frozen protocol; one protocol has one live executor."""
     root = Path(project_dir).resolve()
@@ -238,7 +345,10 @@ def run_experiment(project_dir: Path, protocol_id: str, *, author: str = "experi
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError(f"experiment protocol already running: {protocol_id}") from exc
-        return _run_experiment(root, protocol_id, author=author, lock_fd=lock.fileno(), authorize=authorize)
+        result = _run_experiment(root, protocol_id, author=author, lock_fd=lock.fileno(), authorize=authorize)
+        with (authorize() if authorize else nullcontext()):
+            packet = _persist_evidence_report(root, protocol_id, result)
+        return {**result, **packet}
     finally:
         try:
             fcntl.flock(lock, fcntl.LOCK_UN)
