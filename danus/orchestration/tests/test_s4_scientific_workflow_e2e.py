@@ -581,7 +581,7 @@ def test_multiple_review_predecessors_never_implicitly_choose_a_reviewer(tmp_pat
             operations=[
                 {"op": "add_node", "node_id": "Vx", "title": "Other review",
                  "summary": "", "parent": "P0", "depends_on": ["R1"]},
-                {"op": "update_node", "node_id": "E1", "depends_on": ["V1", "Vx"]},
+                {"op": "set_dependencies", "node_id": "E1", "depends_on": ["V1", "Vx"]},
             ],
         )
         graph.review_change(change_id, reviewer="low2", verdict="APPROVE",
