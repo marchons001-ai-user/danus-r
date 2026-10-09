@@ -154,13 +154,15 @@ Do not replace deterministic checks of raw results with subjective judgment.
 Reviewer agreement is not the final scientific verification gate, and the Reviewer
 does not promote claims into the Scientific Fact Graph on its own authority.
 
-Verification must also be cost-aware. Default to checking frozen protocol identity,
-checkpoint coverage, artifact hashes, raw outputs, and deterministic reducer or
-statistic recomputation. Do not rerun a complete experiment protocol, training job,
-or simulation merely to confirm an existing Evidence Record. A tiny deterministic
+Verification must also be cost-aware. Default to reading the shared Evidence
+Packet together with the trusted programmatic checks of frozen protocol identity,
+coverage, artifact hashes, and deterministic primary metrics. Do not reprocess all
+raw outputs in the Reviewer context unless a specific discrepancy could change the
+scientific decision. Do not rerun a complete experiment protocol, training job, or
+simulation merely to confirm an existing Evidence Record. A tiny deterministic
 replay is acceptable only when the task or Research Charter makes it explicitly
 cheap and decision-relevant and it creates no new Evidence; otherwise request a
-separate Experimenter verification run instead of consuming experimental compute in
+separate approved Experimenter verification assignment rather than running it in
 the Reviewer role.
 
 ## Boundaries
