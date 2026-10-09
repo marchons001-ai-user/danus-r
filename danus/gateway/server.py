@@ -796,6 +796,36 @@ def implementation_pending_contracts(project: Optional[str] = None) -> Dict[str,
     return {"contracts": contracts, "count": len(contracts)}
 
 
+def implementation_render_task(
+    goal: str,
+    must_preserve_invariants: List[str],
+    forbidden_behaviors: List[str],
+    acceptance_conditions: List[str],
+) -> Dict[str, str]:
+    """Researcher-only, side-effect-free canonical Implementation Contract task.
+
+    Call this BEFORE proposing an Experimenter node in a Research Plan.
+    It uses precisely the same renderer as implementation_submit_contract,
+    but requires no committed target node, creates no Implementation Contract,
+    grants no approval, and does not bind or launch an experiment. The returned
+    text must be copied verbatim into the proposed Experimenter Plan task.
+    After Plan review and commit, a Researcher must submit identical fields
+    through implementation_submit_contract for independent Reviewer APPROVE.
+    """
+    if _role().lower() not in {"researcher", "all"}:
+        raise PermissionError("canonical implementation task preview requires Researcher role")
+    task = ProgressLedger.implementation_task(
+        goal=goal,
+        must_preserve_invariants=must_preserve_invariants,
+        forbidden_behaviors=forbidden_behaviors,
+        acceptance_conditions=acceptance_conditions,
+    )
+    return {
+        "task": task,
+        "task_sha256": ProgressLedger.task_sha256(task),
+    }
+
+
 @_worker_write_scope(researcher_only=True)
 def implementation_submit_contract(
     node_id: str,
@@ -1066,6 +1096,7 @@ _TOOLS = {
     "implementation_pending_contracts": implementation_pending_contracts,
     "experiment_protocol_get": experiment_protocol_get,
     "workflow_submit_result": workflow_submit_result,
+    "implementation_render_task": implementation_render_task,
     "implementation_submit_contract": implementation_submit_contract,
     "implementation_review_contract": implementation_review_contract,
     "plan_pending_changes": plan_pending_changes,
