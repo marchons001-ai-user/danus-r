@@ -46,8 +46,8 @@ def test_deadlock_opens_once_after_180_seconds_and_closes_on_progress(tmp_path, 
     calls = []
     monkeypatch.setattr(D, "_model_proposal", lambda packet: (
         calls.append(packet) or {
-            "action": "WAIT_FOR_OPERATOR", "target_role": "",
-            "node_id": "", "rationale": "No governed automatic remedy",
+            "target_role": "reviewer", "node_id": "R1",
+            "rationale": "Existing R1 needs a Reviewer diagnosis",
         }
     ))
     watch = D.DeadlockWatch("P")
@@ -60,9 +60,10 @@ def test_deadlock_opens_once_after_180_seconds_and_closes_on_progress(tmp_path, 
     assert watch.observe(report, rows, now=250) is None
     records = D._history(root)
     assert [r["event"] for r in records] == [
-        "DEADLOCK_OPEN", "DEADLOCK_SUGGESTION",
+        "DEADLOCK_OPEN", "DEADLOCK_SUGGESTION", "DEADLOCK_ACTION",
     ]
-    assert records[1]["action"] == "WAIT_FOR_OPERATOR"
+    assert records[1]["target_role"] == "reviewer"
+    assert records[2]["result"] == "rejected"
     assert all(r.get("deadlock_id") == detected["deadlock_id"] for r in records)
 
     changed = _report("COMPLETE")
@@ -88,8 +89,8 @@ def test_watchdog_recovery_calls_only_existing_validated_entrypoint(tmp_path, mo
     monkeypatch.setattr(cli, "_project_rows", lambda p: rows)
     monkeypatch.setattr(cli, "_do_supervise_unlocked", lambda p, **kw: report)
     monkeypatch.setattr(D, "_model_proposal", lambda packet: {
-        "action": "RECOVER_PREMATURE_PROPOSAL", "target_role": "researcher",
-        "node_id": "R1", "rationale": "Existing downstream V1 reviewer",
+        "target_role": "experimenter", "node_id": "R1",
+        "rationale": "Use approved scientific experiment evidence",
     })
     original_packet = D._packet
     monkeypatch.setattr(D, "_packet", lambda report, rows, *, root=None: {
@@ -99,22 +100,23 @@ def test_watchdog_recovery_calls_only_existing_validated_entrypoint(tmp_path, mo
                        "state": "BLOCKED", "outcome": "NEEDS_REVIEW"},
         },
     })
-    from danus.orchestration import autonomy
+    from danus.orchestration import idle_recovery
 
     invoked = []
-    monkeypatch.setattr(autonomy, "recover_premature_proposal_review",
-                        lambda p, *, token_budget: (
-                            invoked.append((p, token_budget)) or {
-                                "result": "assigned", "node_id": "R1",
+    monkeypatch.setattr(idle_recovery, "dispatch_role_choice",
+                        lambda p, *, target_role, node_id, reason, token_budget: (
+                            invoked.append((p, target_role, node_id, token_budget)) or {
+                                "result": "assigned", "node_id": node_id,
                                 "assignment_id": "e" * 16,
                             }
                         ))
     watch = D.DeadlockWatch("P")
     assert watch.observe(report, rows, now=0, token_budget=10000000) is None
     assert watch.observe(report, rows, now=181, token_budget=10000000)
-    assert invoked == [("P", 10000000)]
+    assert invoked == [("P", "experimenter", "R1", 10000000)]
     assert D._history(root)[-1]["event"] == "DEADLOCK_ACTION"
     assert D._history(root)[-1]["result"] == "assigned"
+    assert D._history(root)[-1]["target_role"] == "experimenter"
 
 
 def test_watchdog_excludes_manual_pauses_but_not_missing_token_telemetry(tmp_path, monkeypatch):
