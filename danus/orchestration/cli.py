@@ -829,7 +829,7 @@ def _decorate_supervisor_report(
     rows: List[Dict[str, Any]],
     report: Dict[str, Any],
     token_budget: int,
-) -> tuple[Dict[str, Any], Dict[str, Any], bool]:
+) -> tuple[Dict[str, Any], bool]:
     quiescent = report.get("project_state") in {"PAUSED", "COMPLETE"}
     budget = _resource_snapshot(pdir, rows, token_budget)
     report["budget"] = budget
