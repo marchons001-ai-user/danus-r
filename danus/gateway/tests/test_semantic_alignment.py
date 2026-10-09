@@ -111,6 +111,7 @@ def test_canonical_preview_precedes_node_and_creates_no_contract(tmp_path, monke
 
     monkeypatch.setattr(gateway, "_BOUND_WORKER", None)
     graph = ResearchPlanGraph.create(tmp_path, node_id="P0", title="Project")
+    (tmp_path / "workers" / "low").mkdir(parents=True)
     ledger = ProgressLedger(tmp_path)
     fields = {
         "goal": "Execute only the independently reviewed bounded pilot.",
