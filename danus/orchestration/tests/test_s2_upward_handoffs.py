@@ -303,7 +303,7 @@ def test_premature_researcher_review_retries_without_completing_own_node(tmp_pat
         ledger.update(worker="low", state="DONE", actor="runtime", outcome="COMPLETE")
         cli.do_assign("P/low", researcher_task, node_id="R1")
         source_id = ledger.current("low")["assignment_id"]
-        proposal = root / "proposals" / "R1_connectivity_proposal.md"
+        proposal = root / "proposals" / "R1_sparse_convergence.md"
         proposal.parent.mkdir(parents=True, exist_ok=True)
         proposal.write_text("An independently reviewable bounded scientific proposal.\n")
         ledger.update(
