@@ -163,7 +163,7 @@ def _append_project_policy(project: str) -> None:
 def _bootstrap_task(pdir: Path, plan_version: int) -> str:
     return (
         "# Autonomous Research Bootstrap\n\n"
-        f"Read `RESEARCH_BRIEF.md` (the read-only harness copy of the binding research brief) " 
+        "Read `RESEARCH_BRIEF.md` (the read-only harness copy of the binding research brief) "
         "and the injected project RESEARCH_CHARTER. "
         "Inspect only the existing workspace/context needed to understand the problem. Design the "
         "smallest coarse Research Plan DAG that can answer the brief, with explicit Researcher/"
