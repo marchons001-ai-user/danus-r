@@ -523,6 +523,54 @@ def _apply_routing_events(
     return applied
 
 
+def dispatch_explicit(
+    project: str, role: str, task: str, node_id: str, *,
+    handoff_id: str = "",
+    rows: Optional[List[Dict[str, Any]]] = None,
+    reserved: Optional[set[str]] = None,
+    assign: Optional[Callable[..., Dict[str, Any]]] = None,
+    start: Optional[Callable[[L.WorkerLayout], str]] = None,
+    role_of: Optional[Callable[[L.WorkerLayout], str]] = None,
+    action: str = "PLAN_ASSIGN",
+) -> Dict[str, Any]:
+    """Shared allocation/claim/launch primitive for all research tasks.
+
+    Legacy bootstrap/repair, Plan Review and reducer-authorized queued work
+    use the same atomic ProgressLedger.bind and worker ownership rules. The
+    callers must supply their *governed* task and its Plan/Handoff identity.
+    """
+    from . import cli as CLI
+
+    if rows is None:
+        rows = CLI._project_rows(project)
+    if reserved is None:
+        reserved = set()
+    if assign is None:
+        assign = CLI.do_assign
+    if start is None:
+        start = CLI._start_one
+    if role_of is None:
+        role_of = CLI._read_worker_role
+    wl = _idle_worker(project, role, rows, reserved, role_of)
+    if wl is None:
+        return {"action": action, "role": role, "node_id": node_id, "result": "no_idle_worker"}
+    try:
+        record = assign(
+            f"{project}/{wl.name}", task, node_id=node_id,
+            **({"handoff_id": handoff_id} if handoff_id else {}),
+        )
+    except (SystemExit, ValueError) as exc:
+        return {"action": action, "role": role, "node_id": node_id,
+                "worker": wl.name, "result": "blocked", "reason": str(exc)}
+    reserved.add(wl.name)
+    return {
+        "action": action, "role": role, "node_id": node_id,
+        "worker": wl.name, "assignment_id": record.get("assignment_id"),
+        **({"handoff_id": handoff_id} if handoff_id else {}),
+        "result": "assigned", "start_result": start(wl),
+    }
+
+
 def _dispatch_candidates(
     project: str,
     *,
@@ -642,33 +690,19 @@ def _dispatch_candidates(
             applied.append({"action": action_name, "node_id": node_id,
                             "result": "already_scheduled"})
             continue
-        wl = _idle_worker(project, item["role"], rows, reserved_workers, role_of)
-        if wl is None:
-            applied.append({"action": action_name, "node_id": node_id,
-                            "role": item["role"], "result": "no_idle_worker"})
-            continue
-        try:
-            assignment = assign(
-                f"{project}/{wl.name}", item["task"], node_id=node_id,
-                **({"handoff_id": item["handoff_id"]}
-                   if kind == "HANDOFF" else {}),
-            )
-        except (SystemExit, ValueError) as exc:
-            applied.append({
-                "action": action_name, "node_id": node_id, "worker": wl.name,
-                "result": "blocked", "reason": str(exc),
-            })
-            continue
-        reserved_workers.add(wl.name)
-        dispatched_nodes.add(node_id)
-        applied.append({
-            "action": action_name, "node_id": node_id, "role": item["role"],
-            "worker": wl.name, "assignment_id": assignment.get("assignment_id"),
-            **({"handoff_id": item["handoff_id"]} if kind == "HANDOFF" else {}),
+        result = dispatch_explicit(
+            project, item["role"], item["task"], node_id,
+            handoff_id=item.get("handoff_id", ""),
+            rows=rows, reserved=reserved_workers, assign=assign,
+            start=start, role_of=role_of, action=action_name,
+        )
+        if result["result"] == "assigned":
+            dispatched_nodes.add(node_id)
+        result.update({
             **({"contract_id": item["contract_id"]} if kind == "CONTRACT" else {}),
             **({"task_spec": item["task_spec"]} if kind == "PLAN_NODE" else {}),
-            "result": "assigned", "start_result": start(wl),
         })
+        applied.append(result)
     return applied
 
 
