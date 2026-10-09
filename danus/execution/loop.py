@@ -26,7 +26,7 @@ from . import scaffold
 from danus import codex
 from danus.sandbox import _arm_parent_death
 from . import worker as W
-from danus.core import ProgressLedger
+from danus.core import ProgressLedger, ResearchPlanGraph
 from danus.core._util import read_jsonl
 from danus.core.handoff import HandoffRequests
 from danus.gateway.roles import tools_for
@@ -37,7 +37,7 @@ _OUTCOME_RE = re.compile(r"(?im)^DANUS_OUTCOME:\s*(COMPLETE|BLOCKED|NEEDS_REVIEW
 
 # --- the per-round prompt -------------------------------------------------- #
 
-def _review_governance_context(project: str, role_name: str) -> str:
+def _review_governance_context(project: str, role_name: str, worker: str) -> str:
     """Inject a checked Plan-change summary only when the audit asks for it.
 
     Reviewers verify science, not Supervisor event logs. This summary is derived
@@ -46,9 +46,7 @@ def _review_governance_context(project: str, role_name: str) -> str:
     if role_name != "reviewer":
         return ""
     root = L.project_dir(project)
-    task_path = root / "workers" / "low2" / "TASK.md"
-    # The actual worker may not be named low2; obtain it from the bound context.
-    task_path = root / "workers" / str(os.environ.get("DANUS_AUTHOR") or "") / "TASK.md"
+    task_path = root / "workers" / worker / "TASK.md"
     try:
         task = task_path.read_text(encoding="utf-8").lower()
     except OSError:
@@ -87,7 +85,7 @@ def _review_governance_context(project: str, role_name: str) -> str:
                 + str(exc)[:250] + "</TRUSTED_PLAN_PROVENANCE_ERROR>")
 
 
-def _scientific_context(project: str, role_name: str) -> str:
+def _scientific_context(project: str, role_name: str, worker: str) -> str:
     role_path = L.scientific_role_md(role_name)
     if role_path is None:
         return ""
@@ -120,7 +118,7 @@ def _scientific_context(project: str, role_name: str) -> str:
         f"<SCIENTIFIC_ROLE_CONTRACT>\n{role_text}\n</SCIENTIFIC_ROLE_CONTRACT>\n\n"
         f"<PROJECT_RESEARCH_CHARTER>\n{charter_text}\n</PROJECT_RESEARCH_CHARTER>"
         f"{guidance_block}"
-        f"{_review_governance_context(project, role_name)}"
+        f"{_review_governance_context(project, role_name, worker)}"
     )
 
 
@@ -199,7 +197,7 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
             "scientific judgment/review is required. If useful work remains on this same "
             "assignment, emit no DANUS_OUTCOME line. Never edit the Research Plan or "
             "Progress Ledger yourself."
-            f"{_scientific_context(project, role_key)}"
+            f"{_scientific_context(project, role_key, worker)}"
         )
         checkpoint = C.checkpoint_for_prompt(L.worker_dir(project, worker), role_key)
         if checkpoint:
