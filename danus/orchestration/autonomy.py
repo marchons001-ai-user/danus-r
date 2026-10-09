@@ -604,6 +604,7 @@ def _dispatch_candidates(
     # A common JSON envelope; no item is executable until the reducer
     # authorized it and the ledger accepts the exact durable binding.
     queue: List[Dict[str, Any]] = []
+    deferred: List[Dict[str, Any]] = []
     for action in reduction["actions"]:
         kind = action.get("kind")
         if kind == "ASSIGN_HANDOFF":
@@ -614,9 +615,21 @@ def _dispatch_candidates(
             node = graph["nodes"].get(node_id)
             if node is None or node.get("state") != "ACTIVE":
                 continue
-            if node_id != graph["root_id"] and any(
-                dep not in complete for dep in node.get("depends_on") or []
-            ):
+            missing = sorted(
+                dep for dep in (node.get("depends_on") or [])
+                if dep not in complete
+            ) if node_id != graph["root_id"] else []
+            if missing:
+                deferred.append({
+                    "action": "IMPLEMENTATION_REVIEW"
+                              if handoff.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                              else "HANDOFF",
+                    "node_id": node_id,
+                    "handoff_id": handoff["handoff_id"],
+                    "role": handoff["target_role"],
+                    "result": "waiting_dependencies",
+                    "missing_dependencies": missing,
+                })
                 continue
             queue.append({
                 "version": 1, "kind": "HANDOFF", "node_id": node_id,
@@ -734,7 +747,7 @@ def _dispatch_candidates(
             **({"task_spec": item["task_spec"]} if kind == "PLAN_NODE" else {}),
         })
         applied.append(result)
-    return applied
+    return deferred + applied
 
 
 def apply_autonomy(
