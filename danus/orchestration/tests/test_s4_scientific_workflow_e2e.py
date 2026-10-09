@@ -650,3 +650,32 @@ def test_workflow_result_gateway_is_role_bound_and_cannot_bypass_review(tmp_path
                 outcome="COMPLETE", next_intent="RUN_EXPERIMENT",
                 subject_id="unapproved-contract",
             )
+
+
+
+def test_blocked_reviewer_retry_reuses_frozen_task(tmp_path, monkeypatch):
+    from danus.orchestration.autonomy import retry_blocked_review
+
+    with _root(tmp_path):
+        pdir, ledger, _, _ = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        ledger.update(worker="low", state="DONE", actor="runtime", outcome="COMPLETE")
+        ledger.set_node_state("R1", state="DONE", actor="supervisor")
+        task = "Audit previously completed evidence without rerunning E1.\n"
+        spec = pdir / "tasks" / "v2" / "reviewer" / "V1.md"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text(task, encoding="utf-8")
+        old = ledger.assign(
+            worker="low2", role="reviewer", node_id="V1", plan_version=2,
+            task=task, write_task=True,
+        )
+        ledger.update(worker="low2", state="BLOCKED", actor="runtime", outcome="BLOCKED")
+        resumed = retry_blocked_review("P")
+        assert resumed["action"] == "RETRY_BLOCKED_REVIEW"
+        assert resumed["result"] == "assigned"
+        assert resumed["worker"] == "low2"
+        current = ledger.current("low2")
+        assert current["assignment_id"] != old["assignment_id"]
+        assert current["node_id"] == "V1" and current["role"] == "reviewer"
+        assert current["task_sha256"] == old["task_sha256"]
+        assert next(a for a in ledger.assignments() if a["assignment_id"] == old["assignment_id"])["state"] == "STALE"
+        assert "V1" not in ledger.completed_nodes()
