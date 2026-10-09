@@ -694,22 +694,10 @@ def _assign_role(project: str, role: str, task: str, node_id: str) -> Dict[str, 
             "state": existing.get("state"),
             "outcome": existing.get("outcome"),
         }
-    wl = A._idle_worker(project, role, cli._project_rows(project), set(), cli._read_worker_role)
-    if wl is None:
-        return {"action": "PLAN_ASSIGN", "role": role, "result": "no_idle_worker"}
-    assignment = cli.do_assign(f"{project}/{wl.name}", task, node_id=node_id)
-    out = {
-        "action": "PLAN_ASSIGN",
-        "role": role,
-        "worker": wl.name,
-        "assignment_id": assignment.get("assignment_id"),
-        "result": "assigned",
-        "start_result": cli._start_one(wl),
-    }
-    if is_repair:
+    out = A.dispatch_explicit(project, role, task, node_id, action="PLAN_ASSIGN")
+    if is_repair and out.get("result") == "assigned":
         out["attempt"] = len(matches) + 1
     return out
-
 
 def _review_assignment(pdir: Path, change: Dict[str, Any], proposal_id: str) -> Optional[Dict[str, Any]]:
     """Compatibility fallback for reviews created before S2-C handoffs existed."""
@@ -771,31 +759,10 @@ def _dispatch_handoff(project: str, handoff: Dict[str, Any]) -> Dict[str, Any]:
             "handoff_id": current["handoff_id"],
             "result": current["status"].lower(),
         }
-    role = str(current["target_role"])
-    wl = A._idle_worker(project, role, cli._project_rows(project), set(), cli._read_worker_role)
-    if wl is None:
-        return {
-            "action": "PLAN_ASSIGN",
-            "role": role,
-            "handoff_id": current["handoff_id"],
-            "result": "no_idle_worker",
-        }
-    assignment = cli.do_assign(
-        f"{project}/{wl.name}",
-        current["request"],
-        node_id=current["node_id"],
-        handoff_id=current["handoff_id"],
+    return A.dispatch_explicit(
+        project, str(current["target_role"]), current["request"], current["node_id"],
+        handoff_id=current["handoff_id"], action="PLAN_ASSIGN",
     )
-    return {
-        "action": "PLAN_ASSIGN",
-        "role": role,
-        "worker": wl.name,
-        "assignment_id": assignment.get("assignment_id"),
-        "handoff_id": current["handoff_id"],
-        "result": "assigned",
-        "start_result": cli._start_one(wl),
-    }
-
 
 def _open_review_handoff(
     pdir: Path,
