@@ -114,6 +114,23 @@ necessary baseline, control, and failure case; do not add dimensions "for
 completeness". When a broad matrix may eventually be needed, propose a pilot that
 can eliminate bad branches before expensive execution.
 
+## Canonical implementation task before a Plan proposal
+
+When a proposed Plan adds an Experimenter node governed by an Implementation Contract,
+call the **Researcher-only read-only** `implementation_render_task(goal=...,
+must_preserve_invariants=..., forbidden_behaviors=...,
+acceptance_conditions=...)` Gateway tool **before** proposing the new node.
+Copy the returned `task` exactly as the proposed Experimenter task. The returned
+`task_sha256` identifies the canonical serialization. No committed Experimenter
+node is needed to render it.
+
+This tool only serializes text: it does **not** submit a contract, approve it,
+alter the Plan, or authorize an experiment. After the Plan is independently
+approved and committed, the designated Researcher submission node must call
+`implementation_submit_contract` using identical fields. Independent Reviewer
+contract APPROVE remains mandatory before Experimenter execution. Do not
+substitute a hand-authored approximation for the canonical text.
+
 ## Required handoff: Research Proposal
 
 Before asking for nontrivial code or experiments, produce a concise proposal with:
