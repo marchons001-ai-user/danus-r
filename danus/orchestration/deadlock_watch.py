@@ -157,6 +157,8 @@ def _model_proposal(packet: Dict[str, Any]) -> Dict[str, str]:
         reply = json.loads(str(response.get("reply") or ""))
     except (ValueError, TypeError):
         reply = {}
+    if not isinstance(reply, dict):
+        reply = {}
     action = str(reply.get("action") or "")
     if action not in _ALLOWED:
         action = "WAIT_FOR_OPERATOR"
@@ -181,6 +183,7 @@ class DeadlockWatch:
         self.idle_seconds = idle_seconds
         self._since: Optional[float] = None
         self._signature: Optional[str] = None
+        self._inactive_checked = False
 
     def observe(
         self, report: Dict[str, Any], rows: List[Dict[str, Any]], *,
@@ -194,8 +197,11 @@ class DeadlockWatch:
             if self._signature is not None:
                 self._close_inactive()
             self._signature, self._since = signature, tick
+            self._inactive_checked = False
         if signature is None or self._since is None:
-            self._close_inactive()
+            if not self._inactive_checked:
+                self._close_inactive()
+                self._inactive_checked = True
             return None
         if tick - self._since < self.idle_seconds:
             return None
@@ -235,11 +241,28 @@ class DeadlockWatch:
             _write(self.root, event)
 
         # Model inference must run outside project-control locks.
-        suggestion = _model_proposal(event["snapshot"])
+        try:
+            suggestion = _model_proposal(event["snapshot"])
+        except Exception as exc:
+            suggestion = {
+                "action": "WAIT_FOR_OPERATOR", "target_role": "", "node_id": "",
+                "rationale": f"restricted model call failed: {type(exc).__name__}: {exc}"[:600],
+            }
         _write(self.root, {"event": "DEADLOCK_SUGGESTION", "deadlock_id": ident,
                            **suggestion, "model": "gpt-5.6-luna", "effort": "medium"})
         if suggestion["action"] == "RECOVER_PREMATURE_PROPOSAL":
             try:
+                # A model-supplied node must identify the source of a blocked
+                # Researcher Assignment before invoking even a guarded recovery.
+                source_matches = [
+                    a for a in event["snapshot"].get("current_assignments", {}).values()
+                    if a.get("role") == "researcher"
+                    and a.get("node_id") == suggestion["node_id"]
+                    and a.get("state") == "BLOCKED"
+                    and a.get("outcome") == "NEEDS_REVIEW"
+                ]
+                if len(source_matches) != 1:
+                    raise ValueError("model-selected node has no unique blocked Researcher")
                 from .autonomy import recover_premature_proposal_review
                 result = recover_premature_proposal_review(
                     self.project, token_budget=token_budget,
