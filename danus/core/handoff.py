@@ -158,7 +158,13 @@ class HandoffRequests:
         return None
 
     def _view(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        """Subject revocation takes precedence over handoff retry state."""
+        """Keep explicit cancellation; revoke stale live handoffs as before."""
+        # CANCELLED is an explicit durable terminal event. Superseding its
+        # source Assignment cannot reclassify that historical cancellation
+        # as STALE. RESOLVED/OPEN/ASSIGNED retain their existing revocation
+        # checks, so a stale approval never gains authority.
+        if record["status"] == "CANCELLED":
+            return record
         subject = self._subject(record)
         if record.get("reauthorization"):
             if (not ResearchPlanGraph(self.root).node_compatible(record["node_id"], record["plan_version"])
