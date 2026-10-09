@@ -126,6 +126,15 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             with capability.scope(binding):
                 (view / "TASK.md").write_text(wl.task.read_text())
                 (view / "AGENTS.md").write_text(L.harness_contract(role_name).read_text())
+                # The autonomous bootstrap needs the research brief, but the
+                # project control root must remain invisible to the sandbox.
+                # Mirror only this public research input into the read-only
+                # worker view; never grant access to its source directory.
+                brief = control / "RESEARCH_BRIEF.md"
+                if brief.is_symlink():
+                    raise ValueError("research brief must not be a symlink")
+                if brief.is_file():
+                    (view / "RESEARCH_BRIEF.md").write_bytes(brief.read_bytes())
                 checkpoint = C.checkpoint_for_prompt(wl.dir, role_name)
                 if checkpoint:
                     (memory / C.CHECKPOINT_NAME).write_text(json.dumps(checkpoint))
