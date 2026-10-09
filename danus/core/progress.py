@@ -392,7 +392,7 @@ class ProgressLedger:
                         )
                     if int(handoff["plan_version"]) != version:
                         compatible_scientific_route = (
-                            handoff.get("kind") in {"INTERPRET", "RETHINK", "ESCALATE"}
+                            handoff.get("kind") in {"INTERPRET", "RETHINK", "ESCALATE", "CLARIFY"}
                             and handoff.get("subject_type") == "ASSIGNMENT"
                             and not self._is_plan_stale({
                                 "plan_version": int(handoff.get("plan_version") or 0),
