@@ -92,6 +92,13 @@ def _auto_complete(
         return {"action": "AUTO_COMPLETE", "node_id": node_id, "worker": worker, "result": "assignment_changed"}
     if current.get("state") != "DONE" or current.get("outcome") != "COMPLETE":
         return None
+    # Generic scientific-review assignments classify a blocked source; they
+    # are not Plan-node execution and must not be auto-completed as such.
+    handoff = (HandoffRequests(ledger).get(str(current.get("handoff_id") or ""))
+               if current.get("handoff_id") else None)
+    if (handoff and handoff.get("kind") == "REVIEW"
+        and handoff.get("subject_type") == "ASSIGNMENT"):
+        return None
 
     spec = _task_spec(project_dir, node_id)
     if spec.get("status") != "ready":
@@ -947,6 +954,158 @@ def recover_review_after_provenance_fix(project: str) -> Dict[str, Any]:
     return {**result, "retired_handoff_id": handoff["handoff_id"],
             "previous_assignment_id": source["assignment_id"],
             "validated_change_id": change_id}
+
+
+
+def recover_premature_proposal_review(project: str, *, token_budget: int = 0) -> Dict[str, Any]:
+    """Retry only a Researcher who prematurely requested review of a saved proposal.
+
+    The planned downstream Reviewer remains responsible for scientific approval.
+    Retire the obsolete main escalation, retain immutable history, and reassign
+    the identical Researcher task. Never mark a node or verdict complete here.
+    """
+    import re
+    from . import cli as CLI
+    from .control import generic_review_class
+
+    root = L.project_dir(project)
+    plan = ResearchPlanGraph(root).snapshot()
+    ledger = ProgressLedger(root)
+    active = [
+        a for a in ledger.snapshot(refresh_stale=True)
+        if a.get("role") == "researcher"
+        and a.get("state") == "BLOCKED"
+        and a.get("outcome") == "NEEDS_REVIEW"
+        and not ledger._is_plan_stale(a)
+    ]
+    if len(active) != 1:
+        raise ValueError("recovery requires exactly one current blocked Researcher")
+    source = active[0]
+    node_id = str(source["node_id"])
+    node = plan["nodes"].get(node_id)
+    complete = set(ledger.completed_nodes())
+    if (node is None or node.get("state") != "ACTIVE"
+        or node_id in complete
+        or any(dep not in complete for dep in node.get("depends_on") or [])
+        or any(n.get("parent") == node_id and n.get("state") == "ACTIVE"
+               for n in plan["nodes"].values())):
+        raise ValueError("blocked Researcher node is not a ready executable leaf")
+    spec = _task_spec(root, node_id)
+    if (spec.get("status") != "ready" or spec.get("role") != "researcher"
+        or ProgressLedger.task_sha256(spec["task"]) != source.get("task_sha256")):
+        raise ValueError("Researcher frozen task differs from blocked Assignment")
+
+    # A separate independent Reviewer node must already exist in the Plan.
+    # This recovery is not a substitute for its approval or a new Plan change.
+    reviews = [
+        nid for nid, item in plan["nodes"].items()
+        if item.get("state") == "ACTIVE"
+        and node_id in (item.get("depends_on") or [])
+        and nid not in complete
+        and _task_spec(root, nid).get("role") == "reviewer"
+    ]
+    if not reviews:
+        raise ValueError("no planned downstream Reviewer for the saved Research Proposal")
+
+    # Check the cited deliverable exists inside the project's bound workspace.
+    # Existence does not certify scientific validity: the downstream Reviewer does.
+    result_text = str(source.get("result") or "")
+    workspace = L.scientific_workspace(root).resolve()
+    linked = re.findall(r"\]\(([^)\n]+\.md)\)", result_text)
+    artifacts = []
+    for value in linked:
+        candidate = Path(value)
+        candidate = (candidate if candidate.is_absolute() else workspace / candidate).resolve()
+        if (candidate.is_relative_to(workspace)
+            and candidate.is_file()
+            and "proposal" in candidate.name.lower()
+            and "proposals" in candidate.parts):
+            artifacts.append(candidate)
+    if not artifacts or "proposal" not in result_text.lower():
+        raise ValueError("blocked Researcher did not persist a cited proposal artifact")
+
+    handoffs = HandoffRequests(ledger)
+    related = [
+        h for h in handoffs.all()
+        if h.get("subject_type") == "ASSIGNMENT"
+        and h.get("subject_id") == source["assignment_id"]
+        and h.get("node_id") == node_id
+    ]
+    generic = [
+        h for h in related
+        if h.get("kind") == "REVIEW" and h.get("status") == "RESOLVED"
+    ]
+    if len(generic) != 1:
+        raise ValueError("recovery requires exactly one resolved generic Reviewer handoff")
+    review = generic[0]
+    review_assignment = _assignment_by_id(
+        ledger, str(review.get("resolution_assignment_id") or "")
+    )
+    if (not review_assignment
+        or review_assignment.get("role") != "reviewer"
+        or not _assignment_complete(review_assignment)
+        or generic_review_class(review_assignment) != "SCIENTIFIC_AMBIGUITY"):
+        raise ValueError("generic Reviewer result is not a valid scientific ambiguity classification")
+
+    pending = [h for h in related if h.get("status") in {"OPEN", "ASSIGNED"}]
+    retired_reason = "premature proposal review: defer scientific approval to existing Reviewer node"
+    cancelled = [
+        h for h in related
+        if h.get("status") == "CANCELLED"
+        and h.get("terminal_reason") == retired_reason
+    ]
+    if len(pending) == 1:
+        escalation = pending[0]
+    elif not pending and len(cancelled) == 1:
+        escalation = cancelled[0]  # Interrupted attempt before dispatch.
+    else:
+        raise ValueError("requires exactly one pending main escalation or interrupted recovery")
+    if (escalation.get("kind") != "ESCALATE"
+        or escalation.get("target_role") != "main"
+        or escalation.get("source_role") != "researcher"
+        or str(escalation.get("source_assignment_id") or "") != source["assignment_id"]
+        or int(escalation.get("plan_version") or 0) != plan["plan_version"]
+        or str(escalation.get("reason") or "") != "restricted supervisor selected escalate"):
+        raise ValueError("pending handoff is not the expected premature proposal escalation")
+    if any(h.get("status") in {"OPEN", "ASSIGNED"} for h in related if h != escalation):
+        raise ValueError("other unresolved source handoffs prevent recovery")
+
+    wl = L.WorkerLayout(L.worker_dir(project, source["worker"]))
+    rows = CLI._project_rows(project)
+    row = next((r for r in rows if r.get("worker") == source["worker"]), None)
+    if (root / L.PAUSE_FILE).exists() or not row or row.get("alive")):
+        raise ValueError("project or Researcher runtime is still running/paused")
+    pause_reason = CLI._pause_reason(wl)
+    if pause_reason not in {None, "review:assignment_needs_review"}:
+        raise ValueError(f"unrelated Researcher pause cannot be cleared: {pause_reason}")
+    if token_budget:
+        budget = CLI._resource_snapshot(root, rows, token_budget)
+        if (budget["tokens"]["exceeded"] is True or budget["time"]["exceeded"]):
+            raise ValueError("project resource budget prevents recovery")
+
+    if escalation["status"] == "OPEN":
+        handoffs.cancel(escalation["handoff_id"], actor="supervisor",
+                        reason=retired_reason)
+    if pause_reason:
+        wl.pause.unlink()
+        rows = CLI._project_rows(project)
+    dispatched = dispatch_explicit(
+        project, "researcher", spec["task"], node_id,
+        rows=rows, assign=CLI.do_assign, start=CLI._start_one,
+        role_of=CLI._read_worker_role,
+        action="RETRY_PREMATURE_PROPOSAL_REVIEW",
+        retry_worker=source["worker"], retry_node=node_id,
+        retry_outcome="NEEDS_REVIEW",
+    )
+    if dispatched.get("result") != "assigned":
+        raise ValueError("Researcher proposal retry did not dispatch: " + str(dispatched))
+    return {
+        **dispatched,
+        "previous_assignment_id": source["assignment_id"],
+        "retired_handoff_id": escalation["handoff_id"],
+        "proposal_artifacts": [str(p) for p in artifacts],
+        "downstream_review_nodes": sorted(reviews),
+    }
 
 
 def apply_autonomy(
