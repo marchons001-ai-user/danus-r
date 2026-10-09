@@ -266,3 +266,92 @@ def test_reviewer_clarify_routes_to_experimenter_then_resumes_reviewer(tmp_path:
         assert current["assignment_id"] == source_id
         assert current["state"] == "RUNNING"
         assert "P0" not in ProgressLedger(pdir).completed_nodes()
+
+
+
+def test_premature_researcher_review_retries_without_completing_own_node(tmp_path, monkeypatch):
+    """An R1 proposal must be completed by R1 before the planned V1 review."""
+    from danus.core import ResearchPlanGraph
+
+    with _root(tmp_path):
+        monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+        planning.initialize_research("P", brief="Investigate one grounded connectivity hypothesis.")
+        root = L.project_dir("P")
+        graph = ResearchPlanGraph(root)
+        ledger = ProgressLedger(root)
+        change = graph.propose_change(
+            base_plan_version=1, proposer="low",
+            reason="scientific scope before Reviewer approval",
+            operations=[
+                {"op": "add_node", "node_id": "R1", "title": "Prepare",
+                 "summary": "", "parent": "P0", "depends_on": []},
+                {"op": "add_node", "node_id": "V1", "title": "Review",
+                 "summary": "", "parent": "P0", "depends_on": ["R1"]},
+            ],
+        )
+        graph.review_change(change, reviewer="low2", verdict="APPROVE", rationale="bounded")
+        assert graph.commit_change(change, committer="supervisor") == 2
+        researcher_task = "Write a scoped connectivity proposal for V1 review.\n"
+        reviewer_task = "Independently review R1's saved proposal.\n"
+        for role, node, task in (
+            ("researcher", "R1", researcher_task),
+            ("reviewer", "V1", reviewer_task),
+        ):
+            path = root / "tasks" / "v2" / role / f"{node}.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(task, encoding="utf-8")
+        ledger.update(worker="low", state="DONE", actor="runtime", outcome="COMPLETE")
+        cli.do_assign("P/low", researcher_task, node_id="R1")
+        source_id = ledger.current("low")["assignment_id"]
+        proposal = root / "proposals" / "R1_connectivity_proposal.md"
+        proposal.parent.mkdir(parents=True, exist_ok=True)
+        proposal.write_text("An independently reviewable bounded scientific proposal.\n")
+        ledger.update(
+            worker="low", state="BLOCKED", actor="runtime", outcome="NEEDS_REVIEW",
+            result=(f"Saved [Research Proposal]({proposal}) for V1 review.\n"
+                    "DANUS_OUTCOME: NEEDS_REVIEW"),
+        )
+        handoffs = HandoffRequests(ledger)
+        review = handoffs.open(
+            kind="REVIEW", plan_version=2, node_id="R1",
+            subject_type="ASSIGNMENT", subject_id=source_id,
+            requested_by="supervisor", source_role="researcher",
+            source_assignment_id=source_id, request="Classify R1 NEEDS_REVIEW.",
+            reason="assignment explicitly requested scientific review",
+        )
+        cli.do_assign("P/low2", review["request"], node_id="R1",
+                      handoff_id=review["handoff_id"])
+        review_id = ledger.current("low2")["assignment_id"]
+        ledger.update(
+            worker="low2", state="DONE", actor="runtime", outcome="COMPLETE",
+            result=("The scientific route remains ambiguous.\n"
+                    "DANUS_REVIEW_CLASS_VERIFIED: SCIENTIFIC_AMBIGUITY"),
+        )
+        handoffs.resolve(review["handoff_id"], assignment_id=review_id,
+                         actor="low2", summary="classification complete")
+        escalation = handoffs.open(
+            kind="ESCALATE", plan_version=2, node_id="R1",
+            subject_type="ASSIGNMENT", subject_id=source_id,
+            requested_by="supervisor", source_role="researcher",
+            source_assignment_id=source_id, parent_handoff_id=review["handoff_id"],
+            request="Main intervention required.",
+            reason="restricted supervisor selected escalate",
+        )
+        pause = L.WorkerLayout(L.worker_dir("P", "low")).pause
+        pause.write_text("review:assignment_needs_review\n", encoding="utf-8")
+
+        recovered = A.recover_premature_proposal_review("P", token_budget=10000000)
+        assert recovered["result"] == "assigned"
+        assert recovered["action"] == "RETRY_PREMATURE_PROPOSAL_REVIEW"
+        assert recovered["previous_assignment_id"] == source_id
+        assert recovered["downstream_review_nodes"] == ["V1"]
+        assert HandoffRequests(ProgressLedger(root)).get(escalation["handoff_id"])["status"] == "CANCELLED"
+        assert HandoffRequests(ProgressLedger(root)).get(review["handoff_id"])["status"] == "RESOLVED"
+        assert not pause.exists()
+        assert ledger.current("low")["assignment_id"] != source_id
+        assert ledger.current("low")["node_id"] == "R1"
+        assert ledger.current("low")["state"] == "ASSIGNED"
+        assert not ledger.completed_nodes()
+        with pytest.raises(ValueError, match="exactly one current blocked Researcher"):
+            A.recover_premature_proposal_review("P", token_budget=10000000)
+
