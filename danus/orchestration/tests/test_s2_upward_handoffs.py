@@ -482,7 +482,15 @@ def test_idle_router_retries_exact_blocked_researcher_task_at_r2_style_escalatio
         assert ledger.current("low")["assignment_id"] != source_id
         assert ledger.current("low")["task_sha256"] == ProgressLedger.task_sha256(task)
         assert not pause.exists()
-        assert HandoffRequests(ledger).get(escalated["handoff_id"])["status"] == "CANCELLED"
+        cancelled = HandoffRequests(ledger).get(escalated["handoff_id"])
+        assert cancelled["status"] == "CANCELLED"
+        assert cancelled["terminal_reason"] == (
+            "Supervisor idle-watchdog re-routed an unresolved main escalation"
+        )
+        # The raw event remains an explicit cancellation, even though the
+        # obsolete source Assignment is now STALE.
+        history = HandoffRequests(ledger)._replay()[escalated["handoff_id"]]
+        assert history["status"] == "CANCELLED"
         assert "R2" not in ledger.completed_nodes()
 
 
