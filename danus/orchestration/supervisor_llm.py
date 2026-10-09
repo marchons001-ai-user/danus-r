@@ -191,8 +191,8 @@ def _prompt(packet: Dict[str, Any]) -> str:
         "route from candidate_routes using only the supplied packet.\n\n"
         "Route meanings:\n"
         "- INTERPRET: the evidence/review is valid but a Researcher should synthesize its scientific meaning.\n"
-        "- RETHINK: the current scientific direction or assumption needs substantive reworking by a Researcher.\n"
-        "- ESCALATE: the supplied state is insufficient or inappropriate for autonomous routing and a human/main agent must decide.\n\n"
+        "- RETHINK: the current scientific direction, biological grounding, or experimental controls need substantive reworking by a Researcher. Prefer this for scientific deficiencies that the Researcher can investigate or revise autonomously.\n"
+        "- ESCALATE: reserve for an actual external/authority blocker, incompatible instructions, or missing essential information that cannot be obtained by either scientific role; scientific uncertainty by itself is not grounds for human escalation.\n\n"
         "Return exactly one JSON object and nothing else with exactly these keys: "
         "route, rationale, basis. route must be in candidate_routes. rationale must be a "
         f"short string of at most {_MAX_RATIONALE_CHARS} characters. basis must be a non-empty "
@@ -1164,6 +1164,8 @@ def research_main(argv: List[str]) -> int:
                         help="retry one unchanged blocked Reviewer Assignment in an existing Plan")
     parser.add_argument("--recover-provenance-review", action="store_true",
                         help="restart one Reviewer after validation of repaired committed Plan provenance")
+    parser.add_argument("--recover-premature-proposal-review", action="store_true",
+                        help="retry a blocked Researcher who already saved a proposal for a downstream Reviewer")
     parser.add_argument("--heartbeat", type=float, default=1800.0)
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--token-budget", type=int, default=0)
@@ -1175,8 +1177,12 @@ def research_main(argv: List[str]) -> int:
         model=args.model,
     )
     print(json.dumps({"research_init": init}, ensure_ascii=False, sort_keys=True), flush=True)
-    if args.retry_blocked_review and args.recover_provenance_review:
-        parser.error("choose one Reviewer recovery mode")
+    if sum(bool(x) for x in (
+        args.retry_blocked_review,
+        args.recover_provenance_review,
+        args.recover_premature_proposal_review,
+    )) > 1:
+        parser.error("choose one review recovery mode")
     if args.retry_blocked_review:
         from .autonomy import retry_blocked_review
 
@@ -1187,6 +1193,13 @@ def research_main(argv: List[str]) -> int:
 
         retried = recover_review_after_provenance_fix(args.project)
         print(json.dumps({"review_retry": retried}, ensure_ascii=False, sort_keys=True), flush=True)
+    if args.recover_premature_proposal_review:
+        from .autonomy import recover_premature_proposal_review
+
+        retried = recover_premature_proposal_review(
+            args.project, token_budget=args.token_budget,
+        )
+        print(json.dumps({"proposal_review_retry": retried}, ensure_ascii=False, sort_keys=True), flush=True)
     if args.once:
         applied = planning.planning_step(args.project, token_budget=args.token_budget)
         report = CLI.do_supervise(
