@@ -892,12 +892,23 @@ def recover_review_after_provenance_fix(project: str) -> Dict[str, Any]:
         and h.get("node_id") == node_id
     ]
     pending = [h for h in related if h.get("status") in {"OPEN", "ASSIGNED"}]
-    if len(pending) != 1:
-        raise ValueError("requires exactly one pending Reviewer escalation")
-    handoff = pending[0]
+    retriable_cancellation = [
+        h for h in related
+        if h.get("status") == "CANCELLED"
+        and h.get("terminal_reason") ==
+        "source re-audit authorized after verified committed Plan provenance became available"
+    ]
+    # A previous attempt may have retired the handoff but failed to launch.
+    # Permit only that exact interrupted recovery, never an arbitrary cancellation.
+    if len(pending) == 1:
+        handoff = pending[0]
+    elif not pending and len(retriable_cancellation) == 1:
+        handoff = retriable_cancellation[0]
+    else:
+        raise ValueError("requires one pending escalation or precisely one interrupted recovery")
     if (handoff.get("kind") != "ESCALATE"
         or handoff.get("target_role") != "main"
-        or handoff.get("status") != "OPEN"
+        or handoff.get("status") not in {"OPEN", "CANCELLED"}
         or handoff.get("source_role") != "reviewer"
         or int(handoff.get("plan_version") or 0) != plan["plan_version"]):
         raise ValueError("pending escalation is not a recoverable Reviewer provenance request")
@@ -916,10 +927,11 @@ def recover_review_after_provenance_fix(project: str) -> Dict[str, Any]:
 
     # Do not mislabel an unanswered main escalation as resolved. Retire only
     # this outdated request and ask the Reviewer to decide again independently.
-    handoffs.cancel(
-        handoff["handoff_id"], actor="supervisor",
-        reason="source re-audit authorized after verified committed Plan provenance became available",
-    )
+    if handoff["status"] == "OPEN":
+        handoffs.cancel(
+            handoff["handoff_id"], actor="supervisor",
+            reason="source re-audit authorized after verified committed Plan provenance became available",
+        )
     if pause_reason:
         wl.pause.unlink()
         rows = CLI._project_rows(project)
@@ -935,6 +947,7 @@ def recover_review_after_provenance_fix(project: str) -> Dict[str, Any]:
     return {**result, "retired_handoff_id": handoff["handoff_id"],
             "previous_assignment_id": source["assignment_id"],
             "validated_change_id": change_id}
+
 
 def apply_autonomy(
     project: str,
