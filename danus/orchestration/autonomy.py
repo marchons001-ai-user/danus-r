@@ -661,8 +661,36 @@ def _dispatch_candidates(
                 "reason": spec.get("reason"), "priority": 3,
             })
 
+    # A Worker Result may express a preference among *already authorized*
+    # candidates, never invent a route or bypass its priority/gates.
+    from .intent import terminal_intents
+
+    hints = {
+        (str(e["next_intent"].get("kind") or ""),
+         str(e["next_intent"].get("subject_id") or ""))
+        for e in terminal_intents(root)
+    }
+    handoff_cache = {
+        h["handoff_id"]: h for h in HandoffRequests(ledger).all()
+    }
+
+    def intent_rank(item: Dict[str, Any]) -> int:
+        if item["kind"] == "HANDOFF":
+            handoff = handoff_cache.get(item["handoff_id"]) or {}
+            category = (
+                "REVIEW_CONTRACT" if handoff.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                else "REVIEW_PLAN" if handoff.get("subject_type") == "PLAN_CHANGE"
+                else ""
+            )
+            return 0 if (category, str(handoff.get("subject_id") or "")) in hints else 1
+        if item["kind"] == "CONTRACT":
+            return 0 if ("RUN_EXPERIMENT", item["contract_id"]) in hints else 1
+        if item["kind"] == "PLAN_NODE":
+            return 0 if ("RUN_NODE", item["node_id"]) in hints else 1
+        return 1
+
     queue.sort(key=lambda item: (
-        item["priority"], str(item.get("node_id") or ""),
+        item["priority"], intent_rank(item), str(item.get("node_id") or ""),
         str(item.get("handoff_id") or item.get("contract_id") or ""),
     ))
     reserved_workers: set[str] = set()
@@ -673,11 +701,9 @@ def _dispatch_candidates(
         kind = item["kind"]
         node_id = item["node_id"]
         action_name = {
-            "HANDOFF": "IMPLEMENTATION_REVIEW" if item["role"] == "reviewer"
-                       and item.get("handoff_id") in {
-                           h["handoff_id"] for h in HandoffRequests(ledger).all()
-                           if h.get("subject_type") == "IMPLEMENTATION_CONTRACT"
-                       } else "HANDOFF",
+            "HANDOFF": "IMPLEMENTATION_REVIEW"
+                       if (handoff_cache.get(item.get("handoff_id")) or {}).get("subject_type")
+                          == "IMPLEMENTATION_CONTRACT" else "HANDOFF",
             "CONTRACT": "IMPLEMENTATION_ASSIGN",
             "PLAN_NODE": "AUTO_DISPATCH",
             "INVALID": "AUTO_DISPATCH",
