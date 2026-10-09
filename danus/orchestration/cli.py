@@ -1025,6 +1025,7 @@ def watch_supervisor(
     last_signature: Optional[str] = None
     last_reconcile = 0.0
     last_telemetry_refresh: Optional[float] = None
+    last_idle_snapshot_refresh = 0.0
     while True:
         with project_control_lock(pdir):
             _recover_project(pdir)
@@ -1070,11 +1071,23 @@ def watch_supervisor(
             if report.get("project_state") == "COMPLETE" and not report.get("decisions"):
                 deadlocks.observe(report, _project_rows(project), token_budget=token_budget)
                 return
-        # Poll the watchdog independently of the 1800-second default heartbeat.
-        # No second research controller, no extra automatic Plan writes.
+        # Poll the watchdog independently of the 1800-second heartbeat.
+        # Refresh *read-only* semantic state while idle: a cached report can
+        # disagree with the Watchdog's live validation after Handoff replay
+        # or code upgrades and indefinitely reset the 180-second clock.
         if last_report is not None:
+            idle_rows = _project_rows(project)
+            if (
+                not any(row.get("alive") for row in idle_rows)
+                and now - last_idle_snapshot_refresh >= 10.0
+            ):
+                last_report = do_supervise(
+                    project, apply=False, token_budget=token_budget,
+                    trigger="deadlock_idle_snapshot",
+                )
+                last_idle_snapshot_refresh = now
             deadlocks.observe(
-                last_report, _project_rows(project), token_budget=token_budget,
+                last_report, idle_rows, token_budget=token_budget,
             )
         time.sleep(poll)
 
