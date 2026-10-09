@@ -1,137 +1,57 @@
-"""A2-7k quota-aware Supervisor tests. Offline; no model/network calls."""
+"""Regression for removing speculative quota stops without changing manual controls."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 from danus.execution import layout as L
-from danus.orchestration import cli
-from danus.orchestration.control import quota_policy
+from danus.orchestration import cli, quota as Q
 
 
-def _iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-
-
-def _snapshot(*, now: float, weekly_remaining: float = 50,
-              reset_in: float = 10 * 60 * 60, weekly_equivalent: float = 5,
-              proxy_status: str = "ready") -> dict:
-    return {
-        "schema_version": 1,
-        "available": True,
-        "observed_at": _iso(now),
-        "limit_id": "codex",
-        "plan_type": "plus",
-        "rate_limit_reached_type": None,
-        "windows": {
-            "5h": None,
-            "weekly": {
-                "used_percent": 100 - weekly_remaining,
-                "remaining_percent": weekly_remaining,
-                "window_duration_mins": 10080,
-                "resets_at": int(now + reset_in),
-            },
-        },
-        "five_hour_proxy": {
-            "status": proxy_status,
-            "weekly_equivalent_percent": weekly_equivalent,
-        },
-    }
-
-
-def test_policy_is_fail_open_for_missing_or_stale_telemetry():
-    now = 100_000.0
-    assert quota_policy(None, now=now)["block_new_codex_rounds"] is False
-    policy = quota_policy(_snapshot(now=now - 901), now=now)
-    assert policy["state"] == "UNKNOWN"
-    assert policy["reason"] == "telemetry_stale"
-    assert policy["block_new_codex_rounds"] is False
-
-
-def test_policy_blocks_only_when_official_limit_is_exhausted():
-    now = 100_000.0
-    policy = quota_policy(_snapshot(now=now, weekly_remaining=0), now=now)
-    assert policy["state"] == "EXHAUSTED"
-    assert policy["block_new_codex_rounds"] is True
-
-
-def test_policy_uses_current_reset_and_recent_proxy_not_fixed_quota_size():
-    now = 100_000.0
-    pressure = quota_policy(
-        _snapshot(now=now, weekly_remaining=10, reset_in=10 * 60 * 60, weekly_equivalent=6),
-        now=now,
-    )
-    assert pressure["state"] == "PRESSURE"
-    assert pressure["projected_weekly_burn_to_reset"] == 12.0
-    assert pressure["block_new_codex_rounds"] is True
-
-    normal = quota_policy(
-        _snapshot(now=now, weekly_remaining=10, reset_in=5 * 60 * 60, weekly_equivalent=6),
-        now=now,
-    )
-    assert normal["state"] == "NORMAL"
-    assert normal["projected_weekly_burn_to_reset"] == 6.0
-    assert normal["block_new_codex_rounds"] is False
-
-
-def test_policy_does_not_hard_gate_uncalibrated_proxy():
-    now = 100_000.0
-    policy = quota_policy(_snapshot(now=now, proxy_status="uncalibrated"), now=now)
-    assert policy["state"] == "UNKNOWN"
-    assert policy["reason"] == "short_window_not_ready"
-    assert policy["block_new_codex_rounds"] is False
-
-
-def test_quota_gate_uses_existing_graceful_stop_boundary_and_skips_dsh(tmp_path: Path, monkeypatch):
+def _project(tmp_path: Path, monkeypatch):
     root = tmp_path / "projects"
     monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
-    cli.do_new("P", roles="high:2")
-    codex = L.WorkerLayout(root / "P" / "workers" / "high")
-    dsh = L.WorkerLayout(root / "P" / "workers" / "high2")
-    codex.role.write_text("ROLE=researcher\nBACKEND=chatgpt\n", encoding="utf-8")
-    dsh.role.write_text("ROLE=reviewer\nBACKEND=dsh\n", encoding="utf-8")
-
-    def forbidden(*_a, **_k):
-        raise AssertionError("quota must not SIGTERM")
-
-    monkeypatch.setattr(cli, "_stop_one", forbidden)
-    rows = [
-        {"worker": "high", "alive": True, "progress_state": "RUNNING"},
-        {"worker": "high2", "alive": True, "progress_state": "RUNNING"},
-    ]
-    applied = cli._apply_quota_gate(
-        "P", rows,
-        {"state": "PRESSURE", "reason": "pace", "block_new_codex_rounds": True},
-    )
-
-    assert applied == [{"worker": "high", "result": "pause-at-round-boundary"}]
-    assert codex.pause.read_text(encoding="utf-8").startswith("quota:pressure:")
-    assert codex.stop.exists()
-    assert not dsh.pause.exists()
-    assert not dsh.stop.exists()
+    cli.do_new("P", roles="high:3")
+    return root
 
 
-def test_quota_recovery_clears_only_quota_owned_pause(tmp_path: Path, monkeypatch):
-    root = tmp_path / "projects"
-    monkeypatch.setenv("DANUS_AGENTS_ROOT", str(root))
-    cli.do_new("P", roles="high:2")
-    quota_worker = L.WorkerLayout(root / "P" / "workers" / "high")
-    manual_worker = L.WorkerLayout(root / "P" / "workers" / "high2")
-    quota_worker.pause.write_text("quota:pressure:pace\n", encoding="utf-8")
-    manual_worker.pause.write_text("manual\n", encoding="utf-8")
+def test_historical_quota_pauses_are_cleared_without_touching_manual_pause(tmp_path, monkeypatch):
+    root = _project(tmp_path, monkeypatch)
+    legacy = L.WorkerLayout(root / "P" / "workers" / "high")
+    manual = L.WorkerLayout(root / "P" / "workers" / "high2")
+    budget = L.WorkerLayout(root / "P" / "workers" / "high3")
+    legacy.pause.write_text("quota:pressure:recent_pace_exhausts_before_weekly_reset\n")
+    legacy.stop.touch()
+    manual.pause.write_text("manual\n")
+    budget.pause.write_text("budget:resource_token_budget\n")
+    budget.stop.touch()
+    monkeypatch.setattr(cli, "_worker_alive", lambda _wl: False)
 
-    started = []
-    monkeypatch.setattr(cli, "_start_one", lambda wl: started.append(wl.name) or "started")
-    rows = [
-        {"worker": "high", "alive": False, "progress_state": "RUNNING"},
-        {"worker": "high2", "alive": False, "progress_state": "RUNNING"},
-    ]
-    applied = cli._apply_quota_gate(
-        "P", rows,
-        {"state": "NORMAL", "reason": "recovered", "block_new_codex_rounds": False},
-    )
+    applied = cli._clear_legacy_quota_pauses("P")
+    assert applied == [{"worker": "high", "result": "legacy-quota-pause-cleared"}]
+    assert not legacy.pause.exists()
+    assert not legacy.stop.exists()
+    assert manual.pause.read_text() == "manual\n"
+    assert budget.pause.read_text() == "budget:resource_token_budget\n"
+    assert budget.stop.exists()
+    assert cli._clear_legacy_quota_pauses("P") == []
 
-    assert applied == [{"worker": "high", "result": "started"}]
-    assert started == ["high"]
-    assert not quota_worker.pause.exists()
-    assert manual_worker.pause.read_text(encoding="utf-8").strip() == "manual"
+
+def test_quota_migration_keeps_live_worker_stop_file(tmp_path, monkeypatch):
+    root = _project(tmp_path, monkeypatch)
+    legacy = L.WorkerLayout(root / "P" / "workers" / "high")
+    legacy.pause.write_text("quota:pressure:prior\n")
+    legacy.stop.touch()
+    monkeypatch.setattr(cli, "_worker_alive", lambda wl: wl.name == "high")
+    assert cli._clear_legacy_quota_pauses("P")[0]["worker"] == "high"
+    assert not legacy.pause.exists()
+    assert legacy.stop.exists()
+
+
+def test_observational_quota_has_no_local_five_hour_prediction(tmp_path):
+    project = tmp_path / "project"
+    assert Q.load_quota(project) is None
+    data = Q._failure("simulated offline")
+    assert data["available"] is False
+    assert "five_hour_proxy" not in data
+    assert "block_new_codex_rounds" not in data
+    assert not hasattr(cli, "_apply_quota_gate")
