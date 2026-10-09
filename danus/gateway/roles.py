@@ -19,6 +19,7 @@ ALL_TOOLS: Tuple[str, ...] = (
     "experiment_protocol_get",
     "workflow_submit_result",
     "implementation_pending_contracts",
+    "implementation_render_task",
     "implementation_submit_contract",
     "implementation_review_contract",
     "plan_pending_changes",
@@ -35,7 +36,8 @@ ROLE_TOOLS: Dict[str, Tuple[str, ...]] = {
     # not only in prompts.
     "researcher": (
         "gm_add", "gm_search", "fact_submit", "fact_search", "handoff_request",
-        "implementation_pending_contracts", "implementation_submit_contract",
+        "implementation_pending_contracts", "implementation_render_task",
+        "implementation_submit_contract",
         "experiment_protocol_get", "workflow_submit_result",
         "plan_pending_changes", "plan_propose_change", "search_arxiv_theorems",
     ),
