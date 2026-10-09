@@ -91,6 +91,39 @@ def _review_governance_context(project: str, role_name: str, worker: str) -> str
                 + str(exc)[:250] + "</TRUSTED_PLAN_PROVENANCE_ERROR>")
 
 
+def _experiment_binding_context(project: str, worker: str, role_name: str) -> str:
+    """Reveal the authoritative approval IDs without changing the frozen TASK."""
+    if role_name != "experimenter":
+        return ""
+    root = L.project_dir(project)
+    ledger = ProgressLedger(root)
+    assignment = ledger.current(worker, refresh_stale=False)
+    if not assignment or not assignment.get("implementation_contract_id"):
+        return ""
+    contract_id = assignment["implementation_contract_id"]
+    contract = ledger.implementation_contract(contract_id)
+    if (not contract or contract.get("gate_status") != "APPROVE"
+        or contract.get("consumed_by_assignment_id") != assignment["assignment_id"]):
+        return ""
+    return (
+        "\n\n<APPROVED_EXPERIMENT_BINDING>\n"
+        f"implementation_contract_id: {contract_id}\n"
+        f"execution_assignment_id: {assignment['assignment_id']}\n"
+        "This is your Reviewer-approved experiment authority. If TASK.md has no "
+        "EXPERIMENT_PROTOCOL_ID marker, implement the approved task, freeze exactly "
+        "one runnable protocol via EvidenceStore.freeze_protocol using both IDs "
+        "above as keyword arguments, the pinned metric reducer, the finite approved "
+        "matrix, and the frozen execution bundle. Pass its returned protocol ID to "
+        "experiment_run(protocol_id). The Gateway pins your first dynamic protocol "
+        "to this Assignment and rejects a later switch. Do not widen the approved "
+        "scientific scope to make freezing easier. If the approved task lacks "
+        "decision-critical parameters, request clarification rather than choosing "
+        "them yourself. The optional protocol IDs above do not confer approval "
+        "to rerun or change experiments.\n"
+        "</APPROVED_EXPERIMENT_BINDING>"
+    )
+
+
 def _scientific_context(project: str, role_name: str, worker: str) -> str:
     role_path = L.scientific_role_md(role_name)
     if role_path is None:
@@ -125,6 +158,7 @@ def _scientific_context(project: str, role_name: str, worker: str) -> str:
         f"<PROJECT_RESEARCH_CHARTER>\n{charter_text}\n</PROJECT_RESEARCH_CHARTER>"
         f"{guidance_block}"
         f"{_review_governance_context(project, role_name, worker)}"
+        f"{_experiment_binding_context(project, worker, role_name)}"
     )
 
 
