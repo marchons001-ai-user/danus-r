@@ -134,7 +134,7 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
             "RUN_NODE, REVISE, INTERPRET_EVIDENCE, WAIT, FINISH. This structured "
             "result does not authorize bypassing the Plan, Contract, Handoff or "
             "independent scientific review. Do not invent IDs. "
-            "7. Runtime terminal protocol: only when this assignment reaches a terminal 
+            "7. Runtime terminal protocol: only when this assignment reaches a terminal "
             "point, end your final response with exactly one standalone line "
             "`DANUS_OUTCOME: COMPLETE`, `DANUS_OUTCOME: BLOCKED`, or "
             "`DANUS_OUTCOME: NEEDS_REVIEW`. COMPLETE means the assigned task is done; "
