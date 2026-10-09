@@ -759,10 +759,25 @@ def _dispatch_handoff(project: str, handoff: Dict[str, Any]) -> Dict[str, Any]:
             "handoff_id": current["handoff_id"],
             "result": current["status"].lower(),
         }
-    return A.dispatch_explicit(
-        project, str(current["target_role"]), current["request"], current["node_id"],
-        handoff_id=current["handoff_id"], action="PLAN_ASSIGN",
+    # PLAN_CHANGE handoffs share the same authorized dispatch queue as the
+    # ordinary Plan nodes and frozen implementation contracts.
+    applied = A._dispatch_candidates(
+        project, rows=cli._project_rows(project),
+        assign=cli.do_assign, start=cli._start_one,
+        role_of=cli._read_worker_role,
     )
+    picked = next((
+        item for item in applied
+        if item.get("handoff_id") == current["handoff_id"]
+    ), None)
+    if picked is not None:
+        return {**picked, "action": "PLAN_ASSIGN"}
+    return {
+        "action": "PLAN_ASSIGN",
+        "role": current["target_role"],
+        "handoff_id": current["handoff_id"],
+        "result": "awaiting_authorized_dispatch",
+    }
 
 def _open_review_handoff(
     pdir: Path,
