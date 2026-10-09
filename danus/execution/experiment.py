@@ -231,7 +231,6 @@ def _persist_evidence_report(root: Path, protocol_id: str, result: Dict[str, Any
     Numbers are copied from the artifact JSON or trusted reducer, never invented by
     an LLM. The report is a derived index, not independent empirical authority.
     """
-    import hashlib
     from danus.execution import layout as L
     from danus.execution.scaffold import atomic_write
 
@@ -273,7 +272,18 @@ def _persist_evidence_report(root: Path, protocol_id: str, result: Dict[str, Any
                 "ref": ref, "scalar_results": scalars,
             })
         cells.append(row)
+    observed = [
+        item["scalar_results"].get("improved")
+        for row in cells for item in row["artifacts"]
+        if type(item["scalar_results"].get("improved")) is bool
+    ]
+    comparison = (
+        {"improved": sum(observed), "non_improving": len(observed) - sum(observed),
+         "count_with_explicit_improved_flag": len(observed)}
+        if observed else None
+    )
     report = {
+        "observed_comparison": comparison,
         "schema_version": 1,
         "evidence_id": evidence_id,
         "protocol_id": protocol_id,
@@ -296,12 +306,13 @@ def _persist_evidence_report(root: Path, protocol_id: str, result: Dict[str, Any
     lines = [
         "# Experiment Evidence Packet",
         "",
-        f"Evidence ID: \`{evidence_id}\` | Frozen protocol: \`{protocol_id}\`",
+        f"Evidence ID: `{evidence_id}` | Frozen protocol: `{protocol_id}`",
         f"Question: {report['question']}",
         f"Pre-specified hypothesis: {report['hypothesis']}",
         f"Decision rule: {report['decision_rule']}",
         f"Coverage: {json.dumps(report['matrix_coverage'], ensure_ascii=False)}",
         f"Primary metrics: {json.dumps(report['primary_metrics'], ensure_ascii=False)}",
+        f"Observed comparison (only explicit per-unit flags): {json.dumps(comparison)}",
         f"Failures: {json.dumps(report['failures'], ensure_ascii=False)}",
         f"Deviations: {json.dumps(report['deviations'], ensure_ascii=False)}",
         "",
@@ -328,7 +339,8 @@ def _persist_evidence_report(root: Path, protocol_id: str, result: Dict[str, Any
     return {
         "evidence_id": evidence_id,
         "report_path": str(shared_path),
-        "report": report,
+        "report": {**report, "cells": cells[:20],
+                   "omitted_cells_in_tool_response": max(0, len(cells) - 20)},
     }
 
 
