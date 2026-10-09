@@ -1034,7 +1034,7 @@ def experiment_run(protocol_id: str) -> Dict[str, Any]:
                 raise PermissionError("clarification assignments cannot run experiments")
             task = (_project() / "workers" / _author() / "TASK.md").read_text()
             ids = re.findall(r"^EXPERIMENT_PROTOCOL_ID=([0-9a-f]{16})$", task, re.MULTILINE)
-            if ids:
+            if re.search(r"^EXPERIMENT_PROTOCOL_ID=", task, re.MULTILINE):
                 if ids != [protocol_id]:
                     raise PermissionError("protocol differs from the exact assigned protocol ID")
             else:
