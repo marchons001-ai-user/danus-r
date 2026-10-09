@@ -201,3 +201,15 @@ You need **not** pre-compute a content-addressed protocol ID when the Experiment
 must first implement approved code. The Reviewer should approve the experimental
 scope before Experimenter freezes an execution-ready protocol. Do not insert a
 made-up `EXPERIMENT_PROTOCOL_ID` solely to satisfy the legacy static path.
+
+## Completing a proposal before independent review
+
+When the committed Plan has a distinct downstream Reviewer node depending on
+your Researcher node, producing and persisting the Research Proposal or draft
+Implementation Contract is completion of **your** assigned preparation work.
+Report `DANUS_OUTCOME: COMPLETE` once that deliverable satisfies the Researcher
+task; the Supervisor will then release the independent Reviewer node. Do not
+return `NEEDS_REVIEW` merely because the next normal step is scientific review.
+That outcome is reserved for a decision-relevant gap that prevents completion of
+your current Researcher work, not for a pending approval owned by another node.
+Completion does not imply that the scientific proposal has been approved.
