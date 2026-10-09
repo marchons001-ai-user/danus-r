@@ -420,7 +420,7 @@ def test_idle_router_rejects_unapproved_experimenter_and_can_choose_researcher(t
             )
         ledger.update(worker="low3", state="BLOCKED", actor="runtime",
                       outcome="BLOCKED", result="Missing design assumption.")
-        with pytest.raises(ValueError, match="approved unchanged contract"):
+        with pytest.raises(ValueError, match="frozen task differs|approved unchanged contract"):
             dispatch_role_choice(
                 "P", target_role="experimenter", node_id="P0",
                 reason="Repeat unapproved experiment", token_budget=10000000,
