@@ -359,3 +359,23 @@ def test_premature_researcher_review_retries_without_completing_own_node(tmp_pat
         with pytest.raises(ValueError, match="exactly one current blocked Researcher"):
             A.recover_premature_proposal_review("P", token_budget=10000000)
 
+
+def test_source_opened_escalation_survives_terminal_blocked(tmp_path, monkeypatch):
+    """An ESCALATE requested before BLOCKED must not silently turn STALE."""
+    with _root(tmp_path):
+        root, ledger = _setup(tmp_path, monkeypatch)
+        with _gateway(root, "low3", "experimenter"):
+            opened = server.handoff_request(
+                "ESCALATE", "Numerical precondition cannot be proven from current data."
+            )
+        assert HandoffRequests(ledger).get(opened["handoff_id"])["status"] == "OPEN"
+        ledger.update(
+            worker="low3", state="BLOCKED", actor="runtime", outcome="BLOCKED",
+            result="No verified numerical prerequisite. DANUS_OUTCOME: BLOCKED",
+        )
+        revived = HandoffRequests(ProgressLedger(root)).get(opened["handoff_id"])
+        assert revived["status"] == "OPEN"
+        assert revived["target_role"] == "main"
+        assert revived["subject_id"] == ledger.current("low3")["assignment_id"]
+
+
