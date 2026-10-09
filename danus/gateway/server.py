@@ -688,6 +688,23 @@ def _contract_target_authorized(assignment: Dict[str, Any], target: str,
         raise PermissionError("cannot rewrite a dispatched or completed experiment")
 
 
+@_worker_write_scope()
+def workflow_submit_result(
+    outcome: str, next_intent: str, subject_id: str = "",
+    artifact_refs: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Submit one structured next-step request, not an execution command."""
+    from danus.orchestration.intent import submit
+
+    # The context-manager decorator already binds and authorizes this worker.
+    current = _pl().current(_author(), refresh_stale=True)
+    return submit(
+        _project(), current, outcome=outcome,
+        next_intent=next_intent, subject_id=subject_id,
+        artifact_refs=artifact_refs,
+    )
+
+
 def implementation_pending_contracts(project: Optional[str] = None) -> Dict[str, Any]:
     """Return the latest unconsumed implementation contract for each gated node."""
     contracts = _pl(project).pending_implementation_contracts()
@@ -952,6 +969,7 @@ _TOOLS = {
     "experiment_run": experiment_run,
     "implementation_pending_contracts": implementation_pending_contracts,
     "experiment_protocol_get": experiment_protocol_get,
+    "workflow_submit_result": workflow_submit_result,
     "implementation_submit_contract": implementation_submit_contract,
     "implementation_review_contract": implementation_review_contract,
     "plan_pending_changes": plan_pending_changes,
@@ -967,7 +985,7 @@ def _bound_tool(fn):
     def call(*args, **kwargs):
         if fn.__name__ in {
             "fact_submit", "experiment_run", "handoff_request", "implementation_submit_contract", "plan_propose_change",
-            "implementation_review_contract", "plan_review_change", "experiment_protocol_get",
+            "implementation_review_contract", "plan_review_change", "experiment_protocol_get", "workflow_submit_result",
         }:
             # These functions enforce their own capability scope/locks; do not
             # wrap them again or flock() can deadlock against this same process.
