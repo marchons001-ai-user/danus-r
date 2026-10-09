@@ -463,6 +463,7 @@ def handoff_request(
     kind: str,
     reason: str,
     evidence_refs: Optional[List[str]] = None,
+    target_role: str = "",
 ) -> Dict[str, Any]:
     """Open the caller's one durable upward handoff for this assignment.
 
@@ -480,7 +481,7 @@ def handoff_request(
     allowed = {
         "experimenter": {"INTERPRET", "ESCALATE"},
         "researcher": {"ESCALATE"},
-        "reviewer": {"ESCALATE"},
+        "reviewer": {"ESCALATE", "CLARIFY"},
     }
     ledger = _pl()
     author = _author()
@@ -491,6 +492,12 @@ def handoff_request(
     role = source_role if gateway_role == "all" else gateway_role
     if role not in allowed or requested_kind not in allowed[role]:
         raise ValueError(f"role {role or 'unknown'} cannot request {requested_kind or 'empty'} handoff")
+    requested_role = str(target_role or "").strip().lower()
+    if requested_kind == "CLARIFY":
+        if requested_role not in {"researcher", "experimenter"}:
+            raise ValueError("CLARIFY needs target_role=researcher or experimenter")
+    elif requested_role:
+        raise ValueError("target_role is supported only for CLARIFY")
     if source_role != role:
         raise ValueError(f"gateway role {role} does not match current assignment role {source_role}")
     if source.get("state") not in {"ASSIGNED", "RUNNING"}:
@@ -527,9 +534,9 @@ def handoff_request(
     )
     if existing is not None:
         existing_refs = list(existing.get("evidence_refs") or [])
-        if existing_refs != refs:
+        if existing_refs != refs or (requested_kind == "CLARIFY" and existing.get("target_role") != requested_role):
             raise ValueError(
-                "existing handoff for this assignment has different evidence_refs"
+                "existing handoff for this assignment has different evidence_refs or target_role"
             )
         return {
             "handoff_id": existing["handoff_id"],
@@ -556,6 +563,17 @@ def handoff_request(
             "scientific meaning without re-running or broadening the experiment. Use only existing Researcher-authorized "
             "knowledge, Plan, or Implementation Contract paths if a concrete follow-up is justified. Do not alter "
             "the source Assignment or Handoff state. End with COMPLETE when this interpretation request itself is handled.\n"
+        )
+    elif requested_kind == "CLARIFY":
+        request = (
+            "# Answer a Reviewer Clarification\n\n"
+            f"Reviewer assignment `{source_id}` on Plan node `{source['node_id']}` requests a bounded "
+            f"answer from the {requested_role} role.\n\n"
+            f"Question / missing information:\n{reason_text}\n\n"
+            "Reuse existing approved reports, artifacts and decisions; do not execute or rerun an experiment, "
+            "change a Plan or contract, or promote a fact in response to this clarification. "
+            "State what is known and still missing. Record an answer in your final response and end COMPLETE. "
+            "The original Reviewer retains its verdict authority.\n"
         )
     else:
         request = (
@@ -584,6 +602,7 @@ def handoff_request(
         request=request,
         reason=reason_text,
         evidence_refs=refs,
+        target_role=requested_role,
     )
     return {
         "handoff_id": opened["handoff_id"],
