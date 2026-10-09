@@ -171,6 +171,9 @@ def test_canonical_preview_precedes_node_and_creates_no_contract(tmp_path, monke
         worker="low", role="researcher", node_id="S1",
         plan_version=2, task="Submit identical implementation fields.", write_task=True,
     )
+    # Preview rights are bound to the current Assignment, not a reusable token.
+    with pytest.raises(PermissionError, match="active assignment"):
+        gateway._bound_tool(gateway.implementation_render_task)(**fields)
     binding = capability.issue(tmp_path, "low", "researcher")
     monkeypatch.setattr(gateway, "_BOUND_WORKER", binding)
     proposed = gateway.implementation_submit_contract(
