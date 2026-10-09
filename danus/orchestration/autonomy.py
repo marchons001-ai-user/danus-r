@@ -270,6 +270,23 @@ def _dispatch_handoff(
             "result": current["status"].lower(),
         }
     role = str(current["target_role"])
+    if (
+        current.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+        and current.get("kind") == "REVIEW"
+    ):
+        contract = ledger.implementation_contract(str(current.get("subject_id") or ""))
+        if contract is None:
+            return {"handoff_id": current["handoff_id"], "result": "missing_contract"}
+        if current["node_id"] != contract["node_id"]:
+            # A frozen V1 reviewer task can only start after R1 is completed.
+            # The E1 experiment itself stays locked until this review resolves.
+            graph = ResearchPlanGraph(L.project_dir(project)).snapshot()
+            node = graph["nodes"].get(current["node_id"]) or {}
+            completed = set(ledger.completed_nodes())
+            if node.get("state") != "ACTIVE":
+                return {"handoff_id": current["handoff_id"], "result": "review_node_inactive"}
+            if any(dep not in completed for dep in node.get("depends_on") or []):
+                return {"handoff_id": current["handoff_id"], "result": "waiting_dependencies"}
     wl = _idle_worker(project, role, rows, reserved, role_of)
     if wl is None:
         return {
@@ -391,11 +408,24 @@ def _open_nonplan_handoff(
         contract = ledger.implementation_contract(subject_id)
         if contract is None:
             return None
-        request = (
-            _implementation_review_task(contract)
-            if kind == "REVIEW"
-            else _implementation_correction_task(contract, kind)
-        )
+        if kind == "REVIEW" and str(action["node_id"]) != contract["node_id"]:
+            from .control import _contract_review_node
+
+            graph = ResearchPlanGraph(ledger.root).snapshot()
+            expected = _contract_review_node(ledger.root, graph, contract)
+            if expected != str(action["node_id"]):
+                raise ValueError("contract REVIEW must bind the exact frozen Reviewer predecessor")
+            spec = _task_spec(ledger.root, expected)
+            # HandoffRequests.open() appends exactly one terminal newline.
+            # Preserve the complete frozen V1 task byte-for-byte so AUTO_COMPLETE
+            # can check its task hash and close the V1 Plan node.
+            request = spec["task"][:-1]
+        else:
+            request = (
+                _implementation_review_task(contract)
+                if kind == "REVIEW"
+                else _implementation_correction_task(contract, kind)
+            )
         reason = {
             "REVIEW": "implementation contract requires independent review",
             "REVISION": "reviewer requested implementation contract revision",
@@ -588,8 +618,20 @@ def apply_autonomy(
             applied.append(result)
     applied.extend(_close_completed_containers(project_dir))
 
-    # Ordinary task-file dispatch keeps the established resource-overlay behavior
-    # in S3-B. Plan/Contract/Handoff scientific routing below is reducer-owned.
+    # Keep one reviewer assignment for each frozen contract-gate node. A
+    # contract-bound V1 is dispatched through its REVIEW Handoff, not again
+    # through ordinary ready-node dispatch. E1 uses ASSIGN_CONTRACT only.
+    from .control import _contract_review_node
+
+    graph = ResearchPlanGraph(project_dir).snapshot()
+    ledger = ProgressLedger(project_dir)
+    contracts = ledger.pending_implementation_contracts()
+    review_reserved = {
+        candidate for c in contracts
+        if str(c.get("gate_status") or c.get("status") or "") == "PROPOSED"
+        if (candidate := _contract_review_node(project_dir, graph, c))
+    }
+    contract_targets = {str(c["node_id"]) for c in contracts}
     reserved: set[str] = set()
     for decision in decisions:
         if (
@@ -599,6 +641,8 @@ def apply_autonomy(
         ):
             continue
         node_id = str(decision.get("node_id") or "")
+        if node_id in review_reserved or node_id in contract_targets:
+            continue
         spec = _task_spec(project_dir, node_id)
         if spec.get("status") != "ready":
             if spec.get("status") == "invalid":
