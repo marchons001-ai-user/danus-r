@@ -97,3 +97,34 @@ def test_structured_intent_is_not_a_worker_credential(tmp_path):
     # Even a forged-looking FINISH request never closes a Plan node.
     assert ResearchPlanGraph(root).snapshot()["plan_version"] == 1
     assert ProgressLedger(root).current("researcher")["state"] == "ASSIGNED"
+
+
+def test_runtime_terminal_bridge_defaults_to_wait_and_is_idempotent(tmp_path):
+    root = _project(tmp_path)
+    assignment = _assignment(root)
+    ledger = ProgressLedger(root)
+    ledger.update(worker="researcher", state="DONE", actor="runtime",
+                  outcome="COMPLETE",
+                  expected_assignment_id=assignment["assignment_id"])
+    first = intent.ensure_terminal_result(root, assignment["assignment_id"], "COMPLETE")
+    second = intent.ensure_terminal_result(root, assignment["assignment_id"], "COMPLETE")
+    assert first == second
+    assert first["next_intent"] == {"kind": "WAIT", "subject_id": ""}
+    assert len(intent._path(root).read_text().splitlines()) == 1
+    assert len(intent.terminal_intents(root)) == 1
+
+
+def test_runtime_bridge_preserves_explicit_model_intent_and_rejects_rebind(tmp_path):
+    root = _project(tmp_path)
+    assignment = _assignment(root)
+    proposed = intent.submit(root, assignment, outcome="COMPLETE",
+                             next_intent="REVIEW_PLAN", subject_id="change123")
+    ledger = ProgressLedger(root)
+    ledger.update(worker="researcher", state="DONE", actor="runtime",
+                  outcome="COMPLETE",
+                  expected_assignment_id=assignment["assignment_id"])
+    assert intent.ensure_terminal_result(root, assignment["assignment_id"], "COMPLETE") == proposed
+    ledger.assign(worker="researcher", role="researcher", node_id="P0",
+                  plan_version=1, task="Fresh assignment\n")
+    with pytest.raises(ValueError, match="current Assignment"):
+        intent.ensure_terminal_result(root, assignment["assignment_id"], "COMPLETE")
