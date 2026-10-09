@@ -8,30 +8,16 @@ I/O and does not start/kill workers or invent scientific work.
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
-import time
 from typing import Any, Dict, List, Optional
 
 from danus.core import ProgressLedger, ResearchPlanGraph
 from danus.core.handoff import HandoffRequests
 from danus.execution import layout as L
 
-_FIVE_HOURS_SECONDS = 5 * 60 * 60
-_QUOTA_SNAPSHOT_MAX_AGE_SECONDS = 15 * 60
 _GENERIC_REVIEW_PREFIX = "DANUS_REVIEW_CLASS:"
 _GENERIC_REVIEW_VERIFIED_PREFIX = "DANUS_REVIEW_CLASS_VERIFIED:"
 _GENERIC_REVIEW_CLASSES = {"SCIENTIFIC_AMBIGUITY", "DETERMINISTIC"}
-
-
-def _snapshot_age(snapshot: Dict[str, Any], now: float) -> Optional[float]:
-    raw = snapshot.get("observed_at")
-    if not isinstance(raw, str):
-        return None
-    try:
-        return max(0.0, now - datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
-    except ValueError:
-        return None
 
 
 def reviewer_cost_policy(
