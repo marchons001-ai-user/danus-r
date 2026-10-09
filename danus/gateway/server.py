@@ -619,6 +619,65 @@ def handoff_request(
 # pre-code semantic alignment gate                                            #
 # --------------------------------------------------------------------------- #
 
+def _approved_dynamic_protocol(assignment: Dict[str, Any], protocol_id: str, *, pin: bool) -> Dict[str, Any]:
+    """Authorize one post-review protocol for exactly its bound Experimenter Assignment.
+
+    Caller holds capability.scope. The first execution attempt irrevocably pins
+    the protocol for this Assignment; retries must use the identical ID.
+    """
+    from danus.core.evidence import _content_id, protocol_identity
+
+    ledger = _pl()
+    if (not assignment or assignment.get("role") != "experimenter"
+        or assignment.get("state") not in {"ASSIGNED", "RUNNING"}
+        or ledger._is_plan_stale(assignment)):
+        raise PermissionError("dynamic protocol needs a current Experimenter assignment")
+    contract_id = str(assignment.get("implementation_contract_id") or "")
+    contract = ledger.implementation_contract(contract_id) if contract_id else None
+    if (not contract or contract.get("gate_status") != "APPROVE"
+        or contract.get("consumed_by_assignment_id") != assignment["assignment_id"]
+        or contract.get("task_sha256") != assignment.get("task_sha256")
+        or contract.get("node_id") != assignment.get("node_id")
+        or not contract.get("review_assignment_id")
+        or not contract.get("reviewed_at")):
+        raise PermissionError("dynamic protocol requires the exact reviewed Implementation Contract")
+    reviews = [
+        h for h in HandoffRequests(ledger).all()
+        if h.get("kind") == "REVIEW"
+        and h.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+        and h.get("subject_id") == contract_id
+        and h.get("status") == "RESOLVED"
+        and h.get("resolution_assignment_id") == contract["review_assignment_id"]
+    ]
+    if not reviews:
+        raise PermissionError("Implementation Contract approval handoff is not resolved")
+    protocol = EvidenceStore(_project()).get_protocol(protocol_id)
+    if (not protocol or protocol.get("protocol_id") != protocol_id
+        or protocol.get("status") != "frozen"
+        or _content_id(protocol_identity(protocol)) != protocol_id
+        or protocol.get("implementation_contract_id") != contract_id
+        or protocol.get("execution_assignment_id") != assignment["assignment_id"]
+        or protocol.get("author") != _author()
+        or str(protocol.get("frozen_at") or "") < str(contract["reviewed_at"])
+        or not isinstance(protocol.get("metric_reducer"), dict)
+        or not protocol.get("bundle_id")):
+        raise PermissionError("protocol must be frozen after approval for this contract and assignment")
+    if pin:
+        binding = {
+            "assignment_id": assignment["assignment_id"],
+            "worker": _author(), "contract_id": contract_id,
+            "protocol_id": protocol_id, "task_sha256": assignment["task_sha256"],
+        }
+        path = _project() / "experiment_runtime" / "assignment_protocols" / (
+            assignment["assignment_id"] + ".json"
+        )
+        try:
+            EvidenceStore._write_once(path, binding)
+        except ValueError as exc:
+            raise PermissionError("this Assignment already pinned a different protocol") from exc
+    return protocol
+
+
 def experiment_protocol_get(protocol_id: str) -> Dict[str, Any]:
     """Read only the frozen protocol explicitly named in this active task.
 
@@ -645,6 +704,9 @@ def experiment_protocol_get(protocol_id: str) -> Dict[str, Any]:
         ):
             raise PermissionError("protocol lookup requires an active assigned task")
         task = (_project() / "workers" / _author() / "TASK.md").read_text(encoding="utf-8")
+        if (assignment.get("role") == "experimenter"
+            and not re.search(r"^EXPERIMENT_PROTOCOL_ID=", task, re.MULTILINE)):
+            return {"protocol": _approved_dynamic_protocol(assignment, protocol_id, pin=False)}
         if protocol_id not in task:
             raise PermissionError("protocol is not referenced by the assigned task")
         brief = (_project() / "RESEARCH_BRIEF.md")
@@ -958,7 +1020,7 @@ def search_arxiv_theorems(query: str, num_results: int = 10) -> Dict[str, Any]:
 
 
 def experiment_run(protocol_id: str) -> Dict[str, Any]:
-    """Execute the frozen protocol named in this Experimenter's assigned task."""
+    """Execute a frozen protocol bound to either an exact ID or an approved contract."""
     from danus.execution.experiment import run_experiment
 
     @contextmanager
@@ -971,8 +1033,12 @@ def experiment_run(protocol_id: str) -> Dict[str, Any]:
             if handoff and handoff.get("kind") == "CLARIFY":
                 raise PermissionError("clarification assignments cannot run experiments")
             task = (_project() / "workers" / _author() / "TASK.md").read_text()
-            if re.findall(r"^EXPERIMENT_PROTOCOL_ID=([0-9a-f]{16})$", task, re.MULTILINE) != [protocol_id]:
-                raise PermissionError("protocol is not named in the current assigned task")
+            ids = re.findall(r"^EXPERIMENT_PROTOCOL_ID=([0-9a-f]{16})$", task, re.MULTILINE)
+            if ids:
+                if ids != [protocol_id]:
+                    raise PermissionError("protocol differs from the exact assigned protocol ID")
+            else:
+                _approved_dynamic_protocol(assignment, protocol_id, pin=True)
             yield
 
     with authorized():
