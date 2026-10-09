@@ -174,11 +174,12 @@ def _idle_worker(
     rows: List[Dict[str, Any]],
     reserved: set[str],
     role_of: Callable[[L.WorkerLayout], str],
+    *, retry_worker: str = "", retry_node: str = "",
 ) -> Optional[L.WorkerLayout]:
     ledger = ProgressLedger(L.project_dir(project))
     rows_by_worker = {str(row.get("worker") or ""): row for row in rows}
     for worker in L.list_workers(project):
-        if worker in reserved:
+        if worker in reserved or (retry_worker and worker != retry_worker):
             continue
         wl = L.WorkerLayout(L.worker_dir(project, worker))
         if role_of(wl) != role or wl.pause.is_file():
@@ -187,6 +188,12 @@ def _idle_worker(
         if row.get("alive"):
             continue
         current = ledger.current(worker, refresh_stale=True)
+        if retry_worker:
+            if not (current and current.get("state") == "BLOCKED"
+                    and current.get("outcome") == "BLOCKED"
+                    and current.get("node_id") == retry_node):
+                continue
+            return wl
         if current and not (
             current.get("state") in _TERMINAL_ASSIGNMENT_STATES
             or (current.get("state") == "BLOCKED" and current.get("outcome") == "NEEDS_REVIEW")
@@ -532,6 +539,7 @@ def dispatch_explicit(
     start: Optional[Callable[[L.WorkerLayout], str]] = None,
     role_of: Optional[Callable[[L.WorkerLayout], str]] = None,
     action: str = "PLAN_ASSIGN",
+    retry_worker: str = "", retry_node: str = "",
 ) -> Dict[str, Any]:
     """Shared allocation/claim/launch primitive for all research tasks.
 
@@ -551,7 +559,8 @@ def dispatch_explicit(
         start = CLI._start_one
     if role_of is None:
         role_of = CLI._read_worker_role
-    wl = _idle_worker(project, role, rows, reserved, role_of)
+    wl = _idle_worker(project, role, rows, reserved, role_of,
+                      retry_worker=retry_worker, retry_node=retry_node)
     if wl is None:
         return {"action": action, "role": role, "node_id": node_id, "result": "no_idle_worker"}
     try:
@@ -718,6 +727,8 @@ def _dispatch_candidates(
             action_name = (
                 "IMPLEMENTATION_REVIEW"
                 if source.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                else str(source.get("kind") or "HANDOFF")
+                if source.get("kind") in {"INTERPRET", "RETHINK"}
                 else "HANDOFF"
             )
         else:
@@ -749,6 +760,61 @@ def _dispatch_candidates(
         applied.append(result)
     return deferred + applied
 
+
+
+def retry_blocked_review(project: str) -> Dict[str, Any]:
+    """Retry one blocked Reviewer after an explicit operator restart."""
+    from . import cli as CLI
+
+    root = L.project_dir(project)
+    ledger = ProgressLedger(root)
+    plan = ResearchPlanGraph(root).snapshot()
+    candidates = [
+        a for a in ledger.snapshot(refresh_stale=True)
+        if a.get("role") == "reviewer"
+        and a.get("state") == "BLOCKED" and a.get("outcome") == "BLOCKED"
+        and not ledger._is_plan_stale(a)
+    ]
+    if len(candidates) != 1:
+        raise ValueError("retry requires exactly one blocked Reviewer assignment")
+    source = candidates[0]
+    node_id = source["node_id"]
+    node = plan["nodes"].get(node_id)
+    completed = set(ledger.completed_nodes())
+    if (
+        node is None or node.get("state") != "ACTIVE"
+        or node_id in completed
+        or any(dep not in completed for dep in node.get("depends_on") or [])
+        or any(item.get("parent") == node_id and item.get("state") == "ACTIVE"
+               for item in plan["nodes"].values())
+    ):
+        raise ValueError("blocked Reviewer Plan node is not ready for retry")
+    spec = _task_spec(root, node_id)
+    if (spec.get("status") != "ready" or spec.get("role") != "reviewer"
+            or ProgressLedger.task_sha256(spec["task"]) != source.get("task_sha256")):
+        raise ValueError("blocked Reviewer task changed since its Assignment")
+    if any(
+        h.get("node_id") == node_id and h.get("status") in {"OPEN", "ASSIGNED"}
+        and h.get("subject_type") == "ASSIGNMENT"
+        and h.get("subject_id") == source["assignment_id"]
+        for h in HandoffRequests(ledger).all()
+    ):
+        raise ValueError("blocked Reviewer's escalation is still pending")
+    rows = CLI._project_rows(project)
+    if (root / L.PAUSE_FILE).exists() or any(
+        row.get("worker") == source["worker"] and (row.get("alive") or row.get("paused"))
+        for row in rows
+    ):
+        raise ValueError("blocked Reviewer worker is still running or paused")
+    result = dispatch_explicit(
+        project, "reviewer", spec["task"], node_id,
+        rows=rows, assign=CLI.do_assign, start=CLI._start_one,
+        role_of=CLI._read_worker_role, action="RETRY_BLOCKED_REVIEW",
+        retry_worker=source["worker"], retry_node=node_id,
+    )
+    if result.get("result") != "assigned":
+        raise ValueError("blocked Reviewer retry failed: " + str(result))
+    return result
 
 def apply_autonomy(
     project: str,
