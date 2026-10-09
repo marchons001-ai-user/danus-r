@@ -90,6 +90,41 @@ def submit(
     return event
 
 
+
+def ensure_terminal_result(root: Path, assignment_id: str, outcome: str) -> Dict[str, Any]:
+    """Trusted runtime bridge: each terminal Assignment gets an immutable JSON result.
+
+    Existing model-supplied Next Intent wins; if missing, synthesize WAIT, not
+    a guessed role or authorization. Called *after* ledger.update() succeeded.
+    Lock ordering matches Gateway write paths, and a rebound worker is ignored.
+    """
+    from danus.orchestration.cli import project_control_lock
+
+    root = Path(root)
+    with project_control_lock(root):
+        ledger = ProgressLedger(root)
+        with ledger.assignment_lock():
+            current = next((
+                a for a in ledger.snapshot(refresh_stale=True)
+                if a.get("assignment_id") == assignment_id
+            ), None)
+            if (
+                current is None
+                or current.get("state") not in {"DONE", "BLOCKED"}
+                or current.get("outcome") != outcome
+                or ledger._is_plan_stale(current)
+            ):
+                raise ValueError("terminal Worker Result does not match current Assignment")
+            for previous in read_jsonl(_path(root)):
+                if previous.get("assignment_id") != assignment_id:
+                    continue
+                if previous.get("outcome") != outcome:
+                    raise ValueError("Worker Result outcome conflicts with durable terminal state")
+                return previous
+            return submit(root, current, outcome=outcome, next_intent="WAIT")
+
+
+
 def terminal_intents(root: Path) -> List[Dict[str, Any]]:
     """Read advisory events whose *exact* Assignment is terminal and current.
 
