@@ -94,9 +94,27 @@ def _packet(report: Dict[str, Any], rows: List[Dict[str, Any]], *, root: Optiona
             for h in HandoffRequests(ledger).all()
             if h.get("status") in {"OPEN", "ASSIGNED"}
         }
+    # Past dispatches are decision context, not merely postmortem logs.
+    prior_attempts = []
+    if root is not None:
+        stage_version = report.get("plan_version")
+        stage_completed = tuple(report.get("completed_nodes", []))
+        prior_attempts = [
+            {
+                "at": e.get("at"), "target_role": e.get("target_role"),
+                "node_id": e.get("node_id"), "result": e.get("result"),
+                "assignment_id": e.get("assignment_id"),
+                "handoff_id": e.get("handoff_id"),
+            }
+            for e in _history(root)
+            if e.get("event") == "DEADLOCK_ACTION"
+            and e.get("plan_version") == stage_version
+            and tuple(e.get("completed_nodes", [])) == stage_completed
+        ][-12:]
     return {
         "current_assignments": assignment_notes,
         "active_handoff_details": handoff_notes,
+        "prior_recovery_attempts": prior_attempts,
         "plan_version": report.get("plan_version"),
         "frontier": report.get("frontier", []),
         "completed_nodes": report.get("completed_nodes", []),
@@ -148,6 +166,10 @@ def _model_proposal(packet: Dict[str, Any]) -> Dict[str, str]:
         "resolve). You must select exactly one of the three roles. "
         "Your selection is NOT permission to bypass existing Plan dependencies, "
         "implementation approval, evidence integrity or role authorization. "
+        "Examine prior_recovery_attempts and current_assignments: if the same "
+        "role has already restarted this node in the same scientific stage "
+        "and returned BLOCKED, choose a DIFFERENT role to resolve its actual "
+        "prerequisite. Dispatch success is NOT scientific progress. "
         "If your selected route cannot legally execute, a deterministic "
         "control-plane validator will record its specific rejection; do not "
         "invent governance approvals. The workflow is not complete merely "
@@ -272,8 +294,9 @@ class DeadlockWatch:
             if not role or not node:
                 raise ValueError("no valid three-role model decision")
 
-            # Guard against repeated retries of the same role/node without a
-            # committed Plan revision or further completed scientific nodes.
+            # A recovered Assignment that again leaves the same scientific
+            # stage idle is a failed recovery, even if dispatch succeeded.
+            # Reject a second identical role/node choice before any mutation.
             completed = tuple(event["snapshot"].get("completed_nodes", []))
             plan_version = event["snapshot"].get("plan_version")
             repeated = [
@@ -283,10 +306,13 @@ class DeadlockWatch:
                 and e.get("node_id") == node
                 and e.get("plan_version") == plan_version
                 and tuple(e.get("completed_nodes", [])) == completed
-                and e.get("result") in {"assigned", "queued"}
+                and e.get("result") == "assigned"
             ]
-            if len(repeated) >= 2:
-                raise ValueError("same role/node was dispatched twice without scientific progress")
+            if repeated:
+                raise ValueError(
+                    "role/node was already dispatched with no new Plan version "
+                    "or completed-node progress; select a different scientific role"
+                )
 
             from .idle_recovery import dispatch_role_choice
             routed = dispatch_role_choice(
