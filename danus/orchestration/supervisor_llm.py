@@ -944,8 +944,8 @@ def apply_scientific_route_dispositions(
                     wl.pause.unlink(missing_ok=True)
                 ledger.update(
                     worker=source_worker, state="RUNNING", actor="supervisor",
-                    note=(f"resumed after scientific route {handoff['handoff_id']}\\n\\n"
-                          f"CLARIFY answer from {handoff['target_role']}:\\n{result}"),
+                    note=(f"resumed after scientific route {handoff['handoff_id']}\n\n"
+                          f"CLARIFY answer from {handoff['target_role']}:\n{result}"),
                     expected_assignment_id=source_id,
                 )
                 out.append({
