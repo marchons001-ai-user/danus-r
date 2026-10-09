@@ -131,3 +131,55 @@ def test_watchdog_excludes_manual_pauses_but_not_missing_token_telemetry(tmp_pat
     rows[0]["pause_reason"] = None
     report["budget"]["tokens"]["exceeded"] = True
     assert D._eligible(root, report, rows) is False
+
+
+
+def test_legacy_wait_for_operator_is_retriaged_once_by_new_role_policy(tmp_path, monkeypatch):
+    """A prior suggestion is not a decision made under the new role router."""
+    root = tmp_path / "P"
+    root.mkdir()
+    report, rows = _report(), _rows()
+    monkeypatch.setattr(L, "project_dir", lambda p: root)
+    monkeypatch.setattr(cli, "_project_rows", lambda p: rows)
+    monkeypatch.setattr(cli, "_do_supervise_unlocked", lambda p, **kw: report)
+    signature = D._fingerprint(report, rows)
+    D._write(root, {
+        "event": "DEADLOCK_OPEN", "deadlock_id": "f" * 16,
+        "signature": signature, "idle_seconds": 180, "capture": "automatic",
+        "snapshot": D._packet(report, rows),
+    })
+    D._write(root, {
+        "event": "DEADLOCK_SUGGESTION", "deadlock_id": "f" * 16,
+        "action": "WAIT_FOR_OPERATOR", "target_role": "", "node_id": "",
+        "rationale": "legacy whitelist does not authorize this deadlock",
+    })
+    selected = []
+    monkeypatch.setattr(D, "_model_proposal", lambda packet: (
+        selected.append(packet) or {
+            "target_role": "reviewer", "node_id": "R1",
+            "rationale": "review the blocked source independently",
+        }
+    ))
+    from danus.orchestration import idle_recovery
+
+    monkeypatch.setattr(idle_recovery, "dispatch_role_choice",
+                        lambda p, **kw: {
+                            "result": "assigned", "node_id": kw["node_id"],
+                            "assignment_id": "e" * 16,
+                        })
+    watch = D.DeadlockWatch("P")
+    assert watch.observe(report, rows, now=0) is None
+    assert watch.observe(report, rows, now=181)
+    events = D._history(root)
+    assert sum(e["event"] == "DEADLOCK_OPEN" for e in events) == 1
+    suggestions = [e for e in events if e["event"] == "DEADLOCK_SUGGESTION"]
+    assert len(suggestions) == 2
+    assert suggestions[-1]["policy_version"] == D._DECISION_POLICY
+    assert suggestions[-1]["target_role"] == "reviewer"
+    assert events[-1]["event"] == "DEADLOCK_ACTION"
+    assert events[-1]["result"] == "assigned"
+    assert events[-1]["deadlock_id"] == "f" * 16
+    assert watch.observe(report, rows, now=250) is None
+    assert len(selected) == 1
+    assert len(D._history(root)) == len(events)
+
