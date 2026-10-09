@@ -610,3 +610,38 @@ def test_stale_supervisor_pause_stop_and_retask_cannot_touch_rebound_worker(tmp_
         assert [x["result"] for x in results] == ["assignment_changed"] * 3
         assert not wl.pause.exists() and not wl.stop.exists()
         assert ledger.current("low")["assignment_id"] == current["assignment_id"]
+
+
+def test_workflow_result_gateway_is_role_bound_and_cannot_bypass_review(tmp_path, monkeypatch):
+    import pytest
+    from danus.gateway import capability
+    from danus.gateway.roles import tools_for
+    from danus.orchestration.intent import terminal_intents
+
+    with _root(tmp_path):
+        pdir, ledger, protocol_id, fields = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        assert "workflow_submit_result" in tools_for("researcher")
+        assert "workflow_submit_result" in tools_for("reviewer")
+        assert "workflow_submit_result" in tools_for("experimenter")
+        assert "workflow_submit_result" not in tools_for("worker")
+        assert "workflow_submit_result" not in tools_for("main")
+        assert "workflow_submit_result" not in tools_for("verifier")
+        result = server._bound_tool(server.workflow_submit_result)(
+            outcome="COMPLETE", next_intent="RUN_EXPERIMENT",
+            subject_id="unapproved-contract",
+        )
+        assert result["next_intent"] == {
+            "kind": "RUN_EXPERIMENT", "subject_id": "unapproved-contract"
+        }
+        assert terminal_intents(pdir) == []  # still running, no authority
+        assert ledger.implementation_contracts() == []
+        with pytest.raises(ValueError, match="conflicting"):
+            server.workflow_submit_result(
+                outcome="COMPLETE", next_intent="FINISH",
+            )
+        capability.revoke(server._BOUND_WORKER)
+        with pytest.raises((PermissionError, ValueError)):
+            server._bound_tool(server.workflow_submit_result)(
+                outcome="COMPLETE", next_intent="RUN_EXPERIMENT",
+                subject_id="unapproved-contract",
+            )
