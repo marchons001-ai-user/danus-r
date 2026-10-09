@@ -76,6 +76,48 @@ def _attack(session, body):
             sandbox._terminate_process_tree(proc)
 
 
+def test_autonomous_research_brief_is_mirrored_readonly_not_control_exposed(tmp_path):
+    """Bootstrap sees the exact Brief without access to the protected project."""
+    wl, _, _, role = _worker(tmp_path)
+    original = wl.project_dir / "RESEARCH_BRIEF.md"
+    original.write_text("Research brief fixture: frozen, read-only.\n", encoding="utf-8")
+    with W.worker_session(wl, role) as session:
+        view = session["cwd"]
+        assert (view / "RESEARCH_BRIEF.md").read_bytes() == original.read_bytes()
+        program = (
+            "from pathlib import Path\n"
+            f"mirror=Path({str(view / 'RESEARCH_BRIEF.md')!r})\n"
+            f"original=Path({str(original)!r})\n"
+            "assert mirror.read_text() == 'Research brief fixture: frozen, read-only.\\n'\n"
+            "for action in (lambda: mirror.write_text('FORGED'),"
+            " lambda: original.read_text(), lambda: original.write_text('FORGED')):\n"
+            "  try: action()\n"
+            "  except OSError: pass\n"
+            "  else: raise AssertionError('sandbox escaped research brief read-only boundary')\n"
+            "print('BRIEF_MIRROR_ISOLATED')\n"
+        )
+        result = subprocess.run(
+            [str(session["engine"]), "sandbox", "-P", "danus-worker",
+             "-C", str(view), sys.executable, "-I", "-c", program],
+            env=sandbox._sandbox_env(session["home"], session["engine"], {}),
+            cwd=view, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=20,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "BRIEF_MIRROR_ISOLATED" in result.stdout
+    assert original.read_text() == "Research brief fixture: frozen, read-only.\n"
+
+
+def test_autonomous_research_brief_rejects_symlink(tmp_path):
+    wl, _, _, role = _worker(tmp_path)
+    secret = tmp_path / "outside-secret"
+    secret.write_text("MUST_NOT_COPY")
+    (wl.project_dir / "RESEARCH_BRIEF.md").symlink_to(secret)
+    with pytest.raises(ValueError, match="research brief must not be a symlink"):
+        with W.worker_session(wl, role):
+            pytest.fail("symlinked brief was exposed")
+
+
 @pytest.mark.parametrize("role", ["researcher", "reviewer", "experimenter"])
 def test_real_worker_denies_files_and_forged_authority(tmp_path, role):
     wl, _, _, config = _worker(tmp_path, role)
