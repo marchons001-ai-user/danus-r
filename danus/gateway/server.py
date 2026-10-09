@@ -967,9 +967,10 @@ def _bound_tool(fn):
     def call(*args, **kwargs):
         if fn.__name__ in {
             "fact_submit", "experiment_run", "handoff_request", "implementation_submit_contract", "plan_propose_change",
-            "implementation_review_contract", "plan_review_change",
+            "implementation_review_contract", "plan_review_change", "experiment_protocol_get",
         }:
-            # These functions validate the capability inside their existing locks.
+            # These functions enforce their own capability scope/locks; do not
+            # wrap them again or flock() can deadlock against this same process.
             return fn(*args, **kwargs)
         if fn.__name__ == "search_arxiv_theorems":
             binding = _BOUND_WORKER
