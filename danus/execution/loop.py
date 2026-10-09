@@ -37,6 +37,56 @@ _OUTCOME_RE = re.compile(r"(?im)^DANUS_OUTCOME:\s*(COMPLETE|BLOCKED|NEEDS_REVIEW
 
 # --- the per-round prompt -------------------------------------------------- #
 
+def _review_governance_context(project: str, role_name: str) -> str:
+    """Inject a checked Plan-change summary only when the audit asks for it.
+
+    Reviewers verify science, not Supervisor event logs. This summary is derived
+    from the committed revision itself and is never an LLM-made approval claim.
+    """
+    if role_name != "reviewer":
+        return ""
+    root = L.project_dir(project)
+    task_path = root / "workers" / "low2" / "TASK.md"
+    # The actual worker may not be named low2; obtain it from the bound context.
+    task_path = root / "workers" / str(os.environ.get("DANUS_AUTHOR") or "") / "TASK.md"
+    try:
+        task = task_path.read_text(encoding="utf-8").lower()
+    except OSError:
+        return ""
+    if not any(x in task for x in ("revision provenance", "post-hoc provenance", "plan revision", "post_hoc")):
+        return ""
+    try:
+        graph = ResearchPlanGraph(root)
+        current = graph.snapshot()
+        change_id = str(current.get("committed_change_id") or "")
+        if not change_id:
+            return ""
+        record = graph.get_change(change_id)
+        if (record.get("status") != "COMMITTED"
+            or record.get("review_verdict") != "APPROVE"
+            or graph.committed_version(record, current) != current["plan_version"]):
+            raise ValueError("committed Plan revision is not independently consistent")
+        summary = {
+            "plan_version": current["plan_version"],
+            "change_id": change_id,
+            "status": record["status"],
+            "review_verdict": record["review_verdict"],
+            "proposer": record.get("proposer"),
+            "reviewer": record.get("reviewer"),
+            "committer": record.get("committer"),
+            "post_hoc": bool(record.get("post_hoc")),
+            "evidence_refs": record.get("evidence_refs", []),
+            "operations": record.get("operations", []),
+            "source": "validated committed ResearchPlanGraph revision",
+        }
+        return ("\n\n<TRUSTED_PLAN_PROVENANCE>\n"
+                + json.dumps(summary, ensure_ascii=False, sort_keys=True)
+                + "\n</TRUSTED_PLAN_PROVENANCE>")
+    except (OSError, ValueError, KeyError) as exc:
+        return ("\n\n<TRUSTED_PLAN_PROVENANCE_ERROR>"
+                + str(exc)[:250] + "</TRUSTED_PLAN_PROVENANCE_ERROR>")
+
+
 def _scientific_context(project: str, role_name: str) -> str:
     role_path = L.scientific_role_md(role_name)
     if role_path is None:
@@ -70,6 +120,7 @@ def _scientific_context(project: str, role_name: str) -> str:
         f"<SCIENTIFIC_ROLE_CONTRACT>\n{role_text}\n</SCIENTIFIC_ROLE_CONTRACT>\n\n"
         f"<PROJECT_RESEARCH_CHARTER>\n{charter_text}\n</PROJECT_RESEARCH_CHARTER>"
         f"{guidance_block}"
+        f"{_review_governance_context(project, role_name)}"
     )
 
 
