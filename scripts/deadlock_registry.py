@@ -33,11 +33,17 @@ def collect():
                 record["frontier"] = event.get("snapshot", {}).get("frontier", [])
                 record["capture"] = event.get("capture")
             elif event.get("event") == "DEADLOCK_SUGGESTION":
-                record["action"] = event.get("action", "")
+                record["action"] = event.get("action") or (
+                    "route:" + str(event.get("target_role") or "-")
+                )
+                record["target_role"] = event.get("target_role", "")
+                record["target_node"] = event.get("node_id", "")
                 record["rationale"] = event.get("rationale", "")
             elif event.get("event") == "DEADLOCK_ACTION":
                 record["result"] = event.get("result", "")
                 record["error"] = event.get("error", "")
+                record["assignment_id"] = event.get("assignment_id")
+                record["handoff_id"] = event.get("handoff_id")
             elif event.get("event") == "DEADLOCK_CLOSED":
                 record["state"] = "CLOSED"
                 record["closed_at"] = event.get("at")
@@ -62,7 +68,8 @@ def main():
             f"{e['opened_at']} {e['project']} {e['deadlock_id']} "
             f"{e['state']} plan=v{e.get('plan_version')} "
             f"frontier={','.join(e.get('frontier', []))} "
-            f"action={e.get('action') or '-'} result={e.get('result') or '-'}"
+            f"action={e.get('action') or '-'} node={e.get('target_node') or '-'} "
+            f"result={e.get('result') or '-'}"
         )
 
 
