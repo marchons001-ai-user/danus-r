@@ -166,14 +166,17 @@ def worker_session(wl: L.WorkerLayout, role: dict):
                 target=_relay_gateway_socket,
                 args=(listener, client_end, bridge_stop, socket_path), daemon=True)
             bridge_thread.start()
-            proxy_cmd = [sys.executable, "-I", str(proxy), "--socket", str(socket_path)]
+            # Preserve the direct-FD proxy invocation exposed to existing D2/D3
+            # isolation probes. Only Codex's MCP child uses the host-only bridge.
+            proxy_cmd = [sys.executable, "-I", str(proxy), str(fd)]
+            mcp_cmd = [sys.executable, "-I", str(proxy), "--socket", str(socket_path)]
             config = home / "config.toml"
             with config.open("a") as stream:
                 stream.write('\n[shell_environment_policy]\ninherit = "none"\n')
                 stream.write('set = { PATH = "/usr/local/bin:/usr/bin:/bin", LANG = "C.UTF-8" }\n')
                 stream.write('\n[mcp_servers.danus]\n')
-                stream.write('command = ' + json.dumps(proxy_cmd[0]) + '\n')
-                stream.write('args = ' + json.dumps(proxy_cmd[1:]) + '\n')
+                stream.write('command = ' + json.dumps(mcp_cmd[0]) + '\n')
+                stream.write('args = ' + json.dumps(mcp_cmd[1:]) + '\n')
                 stream.write('tool_timeout_sec = 3600\nrequired = true\ndefault_tools_approval_mode = "approve"\n')
                 stream.write('\n[mcp_servers.danus.env]\nCODEX_HOME = ' + json.dumps(str(home)) + '\n')
             auth = original_home / "auth.json"
