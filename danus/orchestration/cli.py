@@ -49,7 +49,7 @@ from . import autonomy as A
 from . import quota as Q
 from .control import reconcile, reviewer_cost_policy
 
-_QUOTA_REFRESH_SECONDS = 5 * 60
+_TELEMETRY_REFRESH_SECONDS = 5 * 60
 _REVIEWER_TERRA_MODEL = "gpt-5.6-terra"
 _REVIEWER_DSH_DEFAULT_MODEL = "deepseek-v4-flash"
 _TOKEN_USAGE_SEMANTICS = "completed_turn_usage_not_context_window"
@@ -1020,19 +1020,19 @@ def watch_supervisor(
     pdir = L.project_dir(project)
     last_signature: Optional[str] = None
     last_reconcile = 0.0
-    last_quota_refresh: Optional[float] = None
+    last_telemetry_refresh: Optional[float] = None
     while True:
         with project_control_lock(pdir):
             _recover_project(pdir)
         now = time.monotonic()
-        quota_due = (
-            last_quota_refresh is None
-            or now - last_quota_refresh >= _QUOTA_REFRESH_SECONDS
+        telemetry_due = (
+            last_telemetry_refresh is None
+            or now - last_telemetry_refresh >= _TELEMETRY_REFRESH_SECONDS
         )
-        if quota_due:
-            # Informational only: no quota snapshot is consulted for scheduling.
+        if telemetry_due:
+            # Display only. Never causes a reconcile or Worker pause.
             Q.refresh_quota(pdir)
-            last_quota_refresh = now
+            last_telemetry_refresh = now
 
         rows = _project_rows(project)
         budget = _resource_snapshot(pdir, rows, token_budget)
