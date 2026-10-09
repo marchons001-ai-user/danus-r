@@ -379,3 +379,61 @@ def test_source_opened_escalation_survives_terminal_blocked(tmp_path, monkeypatc
         assert revived["subject_id"] == ledger.current("low3")["assignment_id"]
 
 
+def test_idle_router_can_delegate_to_reviewer_without_deadlock_type_allowlist(tmp_path, monkeypatch):
+    from danus.orchestration.idle_recovery import dispatch_role_choice
+
+    with _root(tmp_path):
+        root, ledger = _setup(tmp_path, monkeypatch)
+        with _gateway(root, "low3", "experimenter"):
+            escalated = server.handoff_request(
+                "ESCALATE", "Unknown scientific precondition requires independent review."
+            )
+        ledger.update(
+            worker="low3", state="BLOCKED", actor="runtime",
+            outcome="BLOCKED", result="Cannot establish the numerical precondition.",
+        )
+        routed = dispatch_role_choice(
+            "P", target_role="reviewer", node_id="P0",
+            reason="Diagnose missing evidence without executing experiments.",
+            token_budget=10000000,
+        )
+        assert routed["result"] == "assigned"
+        assert routed["action"] == "WATCHDOG_ROLE_HANDOFF"
+        assert routed["role"] == "reviewer"
+        assert HandoffRequests(ledger).get(escalated["handoff_id"])["status"] == "CANCELLED"
+        handoff = HandoffRequests(ledger).get(routed["handoff_id"])
+        assert handoff["kind"] == "REVIEW"
+        assert handoff["status"] == "ASSIGNED"
+        assert ledger.current("low2")["handoff_id"] == routed["handoff_id"]
+        assert ledger.current("low3")["state"] == "BLOCKED"
+        assert "P0" not in ledger.completed_nodes()
+
+
+def test_idle_router_rejects_unapproved_experimenter_and_can_choose_researcher(tmp_path, monkeypatch):
+    from danus.orchestration.idle_recovery import dispatch_role_choice
+
+    with _root(tmp_path):
+        root, ledger = _setup(tmp_path, monkeypatch)
+        with _gateway(root, "low3", "experimenter"):
+            escalated = server.handoff_request(
+                "ESCALATE", "Need to revisit the current scientific design."
+            )
+        ledger.update(worker="low3", state="BLOCKED", actor="runtime",
+                      outcome="BLOCKED", result="Missing design assumption.")
+        with pytest.raises(ValueError, match="approved unchanged contract"):
+            dispatch_role_choice(
+                "P", target_role="experimenter", node_id="P0",
+                reason="Repeat unapproved experiment", token_budget=10000000,
+            )
+        assert HandoffRequests(ledger).get(escalated["handoff_id"])["status"] == "OPEN"
+        routed = dispatch_role_choice(
+            "P", target_role="researcher", node_id="P0",
+            reason="Reconsider the unverified assumption.", token_budget=10000000,
+        )
+        assert routed["result"] == "assigned"
+        assert routed["role"] == "researcher"
+        assert HandoffRequests(ledger).get(routed["handoff_id"])["kind"] == "RETHINK"
+        assert ledger.current("low")["handoff_id"] == routed["handoff_id"]
+        assert "P0" not in ledger.completed_nodes()
+
+
