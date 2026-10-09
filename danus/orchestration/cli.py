@@ -757,6 +757,19 @@ def _apply_supervisor_decisions(project: str, decisions: List[Dict[str, Any]]) -
         reason = str(decision.get("reason") or "")
         result = "no-op"
 
+        # Decisions are based on an earlier snapshot. An automatic handoff may
+        # rebind a worker in the same reconciliation pass: never STOP/PAUSE or
+        # RETASK that new assignment using the old assignment's decision.
+        if worker and action in {"REVIEW", "STOP", "RETASK"}:
+            current = ledger.current(worker, refresh_stale=False)
+            if (
+                not current
+                or str(current.get("assignment_id") or "") != str(decision.get("assignment_id") or "")
+                or str(current.get("node_id") or "") != str(decision.get("node_id") or "")
+            ):
+                applied.append({**decision, "result": "assignment_changed"})
+                continue
+
         if action == "CONTINUE":
             result = "continued"
         elif action == "REVIEW":
