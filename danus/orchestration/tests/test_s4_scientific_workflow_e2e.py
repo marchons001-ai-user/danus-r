@@ -201,6 +201,9 @@ def test_scientific_workflow_closes_without_automatic_plan_revision(tmp_path: Pa
         assert handoffs.get(contract_review["handoff_id"])["status"] == "RESOLVED"
         assert ledger.implementation_contract(contract["contract_id"])["status"] == "CONSUMED"
         assert EvidenceStore(pdir).get_record(evidence["evidence_id"])["protocol_id"] == evidence["protocol_id"]
+        assert evidence["report"]["evidence_id"] == evidence["evidence_id"]
+        assert Path(evidence["report_path"]).is_file()
+        assert len(evidence["report"]["cells"]) == evidence["completed_units"]
         assert len(ledger.assignments()) == assignment_count
         assert len(handoffs.all()) == handoff_count
         assert len(list(EvidenceStore(pdir).records_dir.glob("*.json"))) == 1
