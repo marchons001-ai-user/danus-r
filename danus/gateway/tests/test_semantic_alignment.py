@@ -143,6 +143,13 @@ def test_canonical_preview_precedes_node_and_creates_no_contract(tmp_path, monke
     assert ledger.path.read_bytes() == before_ledger
     assert graph.snapshot() == before_plan
     assert ledger.implementation_contracts() == []
+    # Rendering must not accidentally grant permission to submit a contract
+    # for a non-existent, uncommitted Experimenter Plan node.
+    with pytest.raises(PermissionError, match="not active in the assigned Plan"):
+        gateway.implementation_submit_contract(
+            node_id="E1", plan_version=1, **fields,
+        )
+    assert ledger.implementation_contracts() == []
     with pytest.raises(ValueError):
         gateway._bound_tool(gateway.implementation_render_task)(
             **{**fields, "acceptance_conditions": []}
