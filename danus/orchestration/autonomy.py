@@ -1018,7 +1018,6 @@ def recover_premature_proposal_review(project: str, *, token_budget: int = 0) ->
         candidate = (candidate if candidate.is_absolute() else workspace / candidate).resolve()
         if (candidate.is_relative_to(workspace)
             and candidate.is_file()
-            and "proposal" in candidate.name.lower()
             and "proposals" in candidate.parts):
             artifacts.append(candidate)
     if not artifacts or "proposal" not in result_text.lower():
