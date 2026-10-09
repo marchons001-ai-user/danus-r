@@ -467,8 +467,9 @@ def handoff_request(
 ) -> Dict[str, Any]:
     """Open the caller's one durable upward handoff for this assignment.
 
-    Experimenters may request INTERPRET or ESCALATE. Researchers and Reviewers may
-    request ESCALATE. ``evidence_refs`` is optional and valid only for INTERPRET;
+    Experimenters may request INTERPRET or ESCALATE. Researchers may request
+    ESCALATE. Reviewers may request ESCALATE or a role-directed CLARIFY, which
+    reuses the existing governed Handoff dispatcher and does not grant execution. ``evidence_refs`` is optional and valid only for INTERPRET;
     when an Experiment Runtime already produced Evidence Records, pass their ids so
     the Researcher receives exact immutable evidence instead of searching broadly.
     Routing identity is derived from the authenticated role and current Assignment;
@@ -529,6 +530,7 @@ def handoff_request(
             and item.get("subject_type") == "ASSIGNMENT"
             and item.get("subject_id") == source_id
             and item.get("source_assignment_id") == source_id
+            and (requested_kind != "CLARIFY" or item.get("status") in {"OPEN", "ASSIGNED"})
         ),
         None,
     )
