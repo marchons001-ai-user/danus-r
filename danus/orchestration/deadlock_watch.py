@@ -63,9 +63,38 @@ def _eligible(root: Path, report: Dict[str, Any], rows: List[Dict[str, Any]]) ->
     )
 
 
-def _packet(report: Dict[str, Any], rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _packet(report: Dict[str, Any], rows: List[Dict[str, Any]], *, root: Optional[Path] = None) -> Dict[str, Any]:
     """A bounded diagnostic summary, not permission to mutate the research."""
+    assignment_notes = {}
+    handoff_notes = {}
+    if root is not None:
+        from danus.core import ProgressLedger
+        from danus.core.handoff import HandoffRequests
+
+        ledger = ProgressLedger(root)
+        assignment_notes = {
+            a["assignment_id"]: {
+                "role": a.get("role"), "node_id": a.get("node_id"),
+                "state": a.get("state"), "outcome": a.get("outcome"),
+                "result": str(a.get("result") or "")[:1000],
+            }
+            for a in ledger.snapshot(refresh_stale=False)
+            if a.get("assignment_id")
+        }
+        handoff_notes = {
+            h["handoff_id"]: {
+                "kind": h.get("kind"), "status": h.get("status"),
+                "target_role": h.get("target_role"),
+                "subject_id": h.get("subject_id"),
+                "reason": str(h.get("reason") or "")[:400],
+                "request": str(h.get("request") or "")[:1000],
+            }
+            for h in HandoffRequests(ledger).all()
+            if h.get("status") in {"OPEN", "ASSIGNED"}
+        }
     return {
+        "current_assignments": assignment_notes,
+        "active_handoff_details": handoff_notes,
         "plan_version": report.get("plan_version"),
         "frontier": report.get("frontier", []),
         "completed_nodes": report.get("completed_nodes", []),
@@ -201,7 +230,7 @@ class DeadlockWatch:
                 "signature": signature,
                 "idle_seconds": round(tick - self._since, 1),
                 "capture": "automatic",
-                "snapshot": _packet(actual, actual_rows),
+                "snapshot": _packet(actual, actual_rows, root=self.root),
             }
             _write(self.root, event)
 
@@ -267,7 +296,7 @@ def capture_current_deadlock(project: str, *, token_budget: int = 0) -> Dict[str
         event = {
             "event": "DEADLOCK_OPEN", "deadlock_id": ident,
             "signature": signature, "idle_seconds": None,
-            "capture": "operator", "snapshot": _packet(report, rows),
+            "capture": "operator", "snapshot": _packet(report, rows, root=root),
         }
         _write(root, event)
         return event
