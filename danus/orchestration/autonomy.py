@@ -800,12 +800,19 @@ def retry_blocked_review(project: str) -> Dict[str, Any]:
         for h in HandoffRequests(ledger).all()
     ):
         raise ValueError("blocked Reviewer's escalation is still pending")
+    # Only this Supervisor-owned pause is recoverable. Manual, budget and
+    # quota pauses are never cleared by an audit retry.
+    wl = L.WorkerLayout(L.worker_dir(project, source["worker"]))
     rows = CLI._project_rows(project)
-    if (root / L.PAUSE_FILE).exists() or any(
-        row.get("worker") == source["worker"] and (row.get("alive") or row.get("paused"))
-        for row in rows
-    ):
-        raise ValueError("blocked Reviewer worker is still running or paused")
+    worker_row = next((row for row in rows if row.get("worker") == source["worker"]), None)
+    if (root / L.PAUSE_FILE).exists() or worker_row is None or worker_row.get("alive"):
+        raise ValueError("blocked Reviewer worker or project is still running or paused")
+    pause_reason = CLI._pause_reason(wl)
+    if pause_reason not in {None, "review:assignment_blocked"}:
+        raise ValueError(f"blocked Reviewer has unrelated pause: {pause_reason}")
+    if pause_reason:
+        wl.pause.unlink()
+        rows = CLI._project_rows(project)
     result = dispatch_explicit(
         project, "reviewer", spec["task"], node_id,
         rows=rows, assign=CLI.do_assign, start=CLI._start_one,
