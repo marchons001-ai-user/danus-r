@@ -174,7 +174,7 @@ def _idle_worker(
     rows: List[Dict[str, Any]],
     reserved: set[str],
     role_of: Callable[[L.WorkerLayout], str],
-    *, retry_worker: str = "", retry_node: str = "",
+    *, retry_worker: str = "", retry_node: str = "", retry_outcome: str = "BLOCKED",
 ) -> Optional[L.WorkerLayout]:
     ledger = ProgressLedger(L.project_dir(project))
     rows_by_worker = {str(row.get("worker") or ""): row for row in rows}
@@ -190,7 +190,7 @@ def _idle_worker(
         current = ledger.current(worker, refresh_stale=True)
         if retry_worker:
             if not (current and current.get("state") == "BLOCKED"
-                    and current.get("outcome") == "BLOCKED"
+                    and current.get("outcome") == retry_outcome
                     and current.get("node_id") == retry_node):
                 continue
             return wl
@@ -539,7 +539,7 @@ def dispatch_explicit(
     start: Optional[Callable[[L.WorkerLayout], str]] = None,
     role_of: Optional[Callable[[L.WorkerLayout], str]] = None,
     action: str = "PLAN_ASSIGN",
-    retry_worker: str = "", retry_node: str = "",
+    retry_worker: str = "", retry_node: str = "", retry_outcome: str = "BLOCKED",
 ) -> Dict[str, Any]:
     """Shared allocation/claim/launch primitive for all research tasks.
 
@@ -560,7 +560,8 @@ def dispatch_explicit(
     if role_of is None:
         role_of = CLI._read_worker_role
     wl = _idle_worker(project, role, rows, reserved, role_of,
-                      retry_worker=retry_worker, retry_node=retry_node)
+                      retry_worker=retry_worker, retry_node=retry_node,
+                      retry_outcome=retry_outcome)
     if wl is None:
         return {"action": action, "role": role, "node_id": node_id, "result": "no_idle_worker"}
     try:
@@ -823,6 +824,117 @@ def retry_blocked_review(project: str) -> Dict[str, Any]:
         raise ValueError("blocked Reviewer retry failed: " + str(result))
     return result
 
+
+
+def recover_review_after_provenance_fix(project: str) -> Dict[str, Any]:
+    """Explicitly re-audit a blocked Reviewer after a validated provenance-access fix.
+
+    This does not accept a scientific conclusion or reopen/complete a Plan node.
+    The historical NEEDS_REVIEW and ESCALATE remain in append-only records.
+    No ordinary or unrelated main escalation may be cleared by this route.
+    """
+    from . import cli as CLI
+    from danus.execution.loop import _review_governance_context
+    from danus.core.evidence import EvidenceStore
+
+    root = L.project_dir(project)
+    graph = ResearchPlanGraph(root)
+    plan = graph.snapshot()
+    ledger = ProgressLedger(root)
+    sources = [
+        a for a in ledger.snapshot(refresh_stale=True)
+        if a.get("role") == "reviewer"
+        and a.get("state") == "BLOCKED"
+        and a.get("outcome") == "NEEDS_REVIEW"
+        and not ledger._is_plan_stale(a)
+    ]
+    if len(sources) != 1:
+        raise ValueError("provenance recovery requires exactly one current NEEDS_REVIEW Reviewer")
+    source = sources[0]
+    node_id = source["node_id"]
+    node = plan["nodes"].get(node_id)
+    done = set(ledger.completed_nodes())
+    if (node is None or node.get("state") != "ACTIVE" or node_id in done
+        or any(dep not in done for dep in node.get("depends_on") or [])
+        or any(n.get("parent") == node_id and n.get("state") == "ACTIVE"
+               for n in plan["nodes"].values())):
+        raise ValueError("Reviewer node is not ready for an unchanged re-audit")
+    spec = _task_spec(root, node_id)
+    if (spec.get("status") != "ready" or spec.get("role") != "reviewer"
+        or ProgressLedger.task_sha256(spec["task"]) != source.get("task_sha256")):
+        raise ValueError("Reviewer frozen task changed")
+
+    # Validate the *committed* post-hoc change and its actual review authority.
+    change_id = str(plan.get("committed_change_id") or "")
+    if not change_id:
+        raise ValueError("no committed Plan change provides provenance")
+    change = graph.get_change(change_id)
+    if (change.get("status") != "COMMITTED"
+        or change.get("review_verdict") != "APPROVE"
+        or not change.get("post_hoc")
+        or not change.get("review_assignment_id")
+        or not change.get("evidence_refs")
+        or graph.committed_version(change, plan) != plan["plan_version"]):
+        raise ValueError("committed post-hoc Plan provenance is not valid for recovery")
+    graph._require_completed_review(change)
+    store = EvidenceStore(root)
+    if any(store.get_record(str(eid)) is None for eid in change["evidence_refs"]):
+        raise ValueError("committed Plan provenance references missing evidence")
+    context = _review_governance_context(project, "reviewer", source["worker"])
+    if "<TRUSTED_PLAN_PROVENANCE>" not in context:
+        raise ValueError("the updated Reviewer task does not receive verified Plan provenance")
+
+    handoffs = HandoffRequests(ledger)
+    related = [
+        h for h in handoffs.all()
+        if h.get("subject_type") == "ASSIGNMENT"
+        and h.get("subject_id") == source["assignment_id"]
+        and h.get("node_id") == node_id
+    ]
+    pending = [h for h in related if h.get("status") in {"OPEN", "ASSIGNED"}]
+    if len(pending) != 1:
+        raise ValueError("requires exactly one pending Reviewer escalation")
+    handoff = pending[0]
+    if (handoff.get("kind") != "ESCALATE"
+        or handoff.get("target_role") != "main"
+        or handoff.get("status") != "OPEN"
+        or handoff.get("source_role") != "reviewer"
+        or int(handoff.get("plan_version") or 0) != plan["plan_version"]):
+        raise ValueError("pending escalation is not a recoverable Reviewer provenance request")
+    reason = str(handoff.get("reason") or "").lower() + " " + str(source.get("result") or "").lower()
+    if not any(term in reason for term in ("provenance", "revision", "plan change", "plan v3")):
+        raise ValueError("the escalation does not identify a Plan provenance problem")
+
+    wl = L.WorkerLayout(L.worker_dir(project, source["worker"]))
+    rows = CLI._project_rows(project)
+    row = next((r for r in rows if r.get("worker") == source["worker"]), None)
+    if (root / L.PAUSE_FILE).exists() or row is None or row.get("alive")):
+        raise ValueError("Reviewer or project is still running or paused")
+    pause_reason = CLI._pause_reason(wl)
+    if pause_reason not in {None, "review:assignment_needs_review"}:
+        raise ValueError(f"unrelated Reviewer pause cannot be cleared: {pause_reason}")
+
+    # Do not mislabel an unanswered main escalation as resolved. Retire only
+    # this outdated request and ask the Reviewer to decide again independently.
+    handoffs.cancel(
+        handoff["handoff_id"], actor="supervisor",
+        reason="source re-audit authorized after verified committed Plan provenance became available",
+    )
+    if pause_reason:
+        wl.pause.unlink()
+        rows = CLI._project_rows(project)
+    result = dispatch_explicit(
+        project, "reviewer", spec["task"], node_id,
+        rows=rows, assign=CLI.do_assign, start=CLI._start_one,
+        role_of=CLI._read_worker_role, action="RETRY_PLAN_PROVENANCE_REVIEW",
+        retry_worker=source["worker"], retry_node=node_id,
+        retry_outcome="NEEDS_REVIEW",
+    )
+    if result.get("result") != "assigned":
+        raise ValueError("Reviewer recovery dispatch failed: " + str(result))
+    return {**result, "retired_handoff_id": handoff["handoff_id"],
+            "previous_assignment_id": source["assignment_id"],
+            "validated_change_id": change_id}
 
 def apply_autonomy(
     project: str,
