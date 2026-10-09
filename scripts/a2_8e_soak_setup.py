@@ -94,10 +94,13 @@ these five executable sibling nodes and no other initial nodes:
 3. E1 — Experimenter — depends_on [V1]. Its exact task text must be the
    Implementation Contract block below. Execute it once through the existing
    Experiment Runtime and finish only after immutable evidence exists.
-4. V2 — Reviewer — depends_on [E1]. Audit the E1 checkpoint, Evidence Record, and
-   all five raw artifacts mechanically. Record the evidence_id and whether the
-   universal-improvement hypothesis survived. Do not revise Plan.
-5. R2 — Researcher — depends_on [V2]. Read V2 and the E1 Evidence Record. If the
+4. V2 — Reviewer — depends_on [E1]. Read the E1 Evidence Packet and its
+   deterministic coverage/hash/metric integrity summary. Independently test whether
+   the reported cells support the frozen decision rule; inspect individual raw
+   artifacts only if the packet contains a concrete inconsistency. Preserve the
+   evidence_id and all negative/null cases. Do not revise Plan.
+5. R2 — Researcher — depends_on [V2]. Read V2 and the detailed E1 Evidence Packet;
+   do not repeat V2 raw-data processing. If the
    universal-improvement hypothesis is falsified, write exactly one Autonomous
    Plan Revision handoff against the then-current committed Plan version:
    - post_hoc=true;
@@ -107,8 +110,10 @@ these five executable sibling nodes and no other initial nodes:
    - add R3 (Researcher) under P0, depends_on [V3], title `Final bounded claim`,
      summary `Form the final scoped claim without more experiments.`;
    - provide exact tasks only for V3 and R3.
-   V3 must independently verify the E1 evidence, the falsification decision, and
-   the post-hoc evidence provenance without adding experiments. R3 must persist
+   V3 must independently assess whether the E1 packet, V2 audit and R2 reasoning
+   justify the bounded falsification claim, using the trusted committed Plan-change
+   provenance summary to identify post-hoc status; do not redo every raw artifact
+   check or audit Supervisor logs by default. No additional experiments. R3 must persist
    the narrowest final claim supported by E1, explicitly state what is not
    established outside this fixture, create no further Plan proposal, and run no
    experiment.
