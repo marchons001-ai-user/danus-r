@@ -796,6 +796,19 @@ def main(worker_dir: str) -> int:
                         break
                     raise
 
+            if scientific and outcome and ledger is not None and round_assignment is not None:
+                # Trusted runtime emits one durable JSON Result for *every*
+                # terminal scientific Assignment. The model's prior structured
+                # intent is preserved; legacy workers safely default to WAIT.
+                from danus.orchestration.intent import ensure_terminal_result
+
+                try:
+                    ensure_terminal_result(
+                        wl.project_dir, str(round_assignment["assignment_id"]), outcome
+                    )
+                except (OSError, ValueError) as exc:
+                    write_status(wl, worker_result_error=str(exc))
+
             status_fields = {
                 "state": "stopped" if outcome or dsh_quota else "idle",
                 "round": rnd,
