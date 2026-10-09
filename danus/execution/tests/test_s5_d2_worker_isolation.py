@@ -246,7 +246,7 @@ def test_plan_repair_error_only_exposed_for_repair_task(tmp_path):
         worker="r", role="researcher", node_id="root", plan_version=1,
         task="# Repair Autonomous Plan Proposal\n\nCorrect the draft\n", write_task=True,
     )
-    with W.worker_session(wl, role) as session:
+    with W.worker_session(wl, {"ROLE": "researcher", "MODEL": "test"}) as session:
         assert json.loads((session["cwd"] / "PLAN_REPAIR_ERROR.json").read_text()) == error
 
 
