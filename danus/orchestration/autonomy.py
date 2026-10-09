@@ -700,14 +700,19 @@ def _dispatch_candidates(
     for item in queue:
         kind = item["kind"]
         node_id = item["node_id"]
-        action_name = {
-            "HANDOFF": "IMPLEMENTATION_REVIEW"
-                       if (handoff_cache.get(item.get("handoff_id")) or {}).get("subject_type")
-                          == "IMPLEMENTATION_CONTRACT" else "HANDOFF",
-            "CONTRACT": "IMPLEMENTATION_ASSIGN",
-            "PLAN_NODE": "AUTO_DISPATCH",
-            "INVALID": "AUTO_DISPATCH",
-        }[kind]
+        if kind == "HANDOFF":
+            source = handoff_cache.get(item["handoff_id"]) or {}
+            action_name = (
+                "IMPLEMENTATION_REVIEW"
+                if source.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                else "HANDOFF"
+            )
+        else:
+            action_name = {
+                "CONTRACT": "IMPLEMENTATION_ASSIGN",
+                "PLAN_NODE": "AUTO_DISPATCH",
+                "INVALID": "AUTO_DISPATCH",
+            }[kind]
         if kind == "INVALID":
             applied.append({"action": action_name, "node_id": node_id,
                             "result": "blocked", "reason": item.get("reason")})
