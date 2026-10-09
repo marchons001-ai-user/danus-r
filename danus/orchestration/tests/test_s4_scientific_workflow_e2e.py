@@ -591,3 +591,22 @@ def test_multiple_review_predecessors_never_implicitly_choose_a_reviewer(tmp_pat
         spec.parent.mkdir(parents=True, exist_ok=True)
         spec.write_text("Review another implementation contract.\n")
         assert _contract_review_node(root, graph.snapshot(), contract) == ""
+
+
+def test_stale_supervisor_pause_stop_and_retask_cannot_touch_rebound_worker(tmp_path, monkeypatch):
+    with _root(tmp_path):
+        root, ledger, current, _, _ = _dedicated_v1_contract_fixture(
+            tmp_path, monkeypatch
+        )
+        wl = L.WorkerLayout(L.worker_dir("P", "low"))
+        assert not wl.pause.exists() and not wl.stop.exists()
+        old = "superseded-assignment"
+        decisions = [
+            {"action": action, "worker": "low", "node_id": "P0",
+             "assignment_id": old, "reason": "completion_not_recorded"}
+            for action in ("REVIEW", "STOP", "RETASK")
+        ]
+        results = cli._apply_supervisor_decisions("P", decisions)
+        assert [x["result"] for x in results] == ["assignment_changed"] * 3
+        assert not wl.pause.exists() and not wl.stop.exists()
+        assert ledger.current("low")["assignment_id"] == current["assignment_id"]
