@@ -827,7 +827,7 @@ def apply_scientific_route_dispositions(
         routes = [
             handoff
             for handoff in HandoffRequests(ledger).all()
-            if handoff.get("kind") in {"INTERPRET", "RETHINK"}
+            if handoff.get("kind") in {"INTERPRET", "RETHINK", "CLARIFY"}
             and handoff.get("subject_type") == "ASSIGNMENT"
             and handoff.get("status") == "RESOLVED"
         ]
@@ -879,7 +879,10 @@ def apply_scientific_route_dispositions(
                 or route_assignment is None
                 or route_assignment.get("state") != "DONE"
                 or route_assignment.get("outcome") != "COMPLETE"
-                or str(route_assignment.get("role") or "").lower() != "researcher"
+                or (handoff.get("kind") != "CLARIFY"
+                    and str(route_assignment.get("role") or "").lower() != "researcher")
+                or (handoff.get("kind") == "CLARIFY"
+                    and str(route_assignment.get("role") or "").lower() != handoff.get("target_role"))
             ):
                 continue
 
@@ -917,6 +920,42 @@ def apply_scientific_route_dispositions(
             source_role = str(source.get("role") or "").lower()
             source_worker = str(source.get("worker") or "")
             wl = L.WorkerLayout(L.worker_dir(project, source_worker)) if source_worker else None
+            if handoff.get("kind") == "CLARIFY" and source_role == "reviewer":
+                if (source.get("state") != "BLOCKED"
+                    or source.get("outcome") != "NEEDS_REVIEW"
+                    or not wl):
+                    continue
+                if node_id in completed:
+                    continue
+                current = ledger.current(source_worker, refresh_stale=True)
+                if not current or current.get("assignment_id") != source_id:
+                    continue
+                pause_reason = CLI._pause_reason(wl)
+                if pause_reason and pause_reason != "review:assignment_needs_review":
+                    out.append({"handoff_id": handoff["handoff_id"],
+                                "source_assignment_id": source_id,
+                                "result": "paused", "reason": pause_reason})
+                    continue
+                try:
+                    result = _checkpoint_message(root, route_assignment)
+                except ValueError:
+                    continue
+                if pause_reason == "review:assignment_needs_review":
+                    wl.pause.unlink(missing_ok=True)
+                ledger.update(
+                    worker=source_worker, state="RUNNING", actor="supervisor",
+                    note=(f"resumed after scientific route {handoff['handoff_id']}\\n\\n"
+                          f"CLARIFY answer from {handoff['target_role']}:\\n{result}"),
+                    expected_assignment_id=source_id,
+                )
+                out.append({
+                    "handoff_id": handoff["handoff_id"],
+                    "source_assignment_id": source_id,
+                    "result": "resumed",
+                    "start_result": CLI._start_one(wl),
+                })
+                continue
+
             if source_role == "experimenter":
                 consumed = _route_consumed(ledger, source_id, handoff["handoff_id"])
                 if consumed:
