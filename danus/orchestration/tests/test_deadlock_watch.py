@@ -91,6 +91,14 @@ def test_watchdog_recovery_calls_only_existing_validated_entrypoint(tmp_path, mo
         "action": "RECOVER_PREMATURE_PROPOSAL", "target_role": "researcher",
         "node_id": "R1", "rationale": "Existing downstream V1 reviewer",
     })
+    original_packet = D._packet
+    monkeypatch.setattr(D, "_packet", lambda report, rows, *, root=None: {
+        **original_packet(report, rows, root=root),
+        "current_assignments": {
+            "b" * 16: {"role": "researcher", "node_id": "R1",
+                       "state": "BLOCKED", "outcome": "NEEDS_REVIEW"},
+        },
+    })
     from danus.orchestration import autonomy
 
     invoked = []
