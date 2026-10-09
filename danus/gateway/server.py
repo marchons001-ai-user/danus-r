@@ -627,6 +627,8 @@ def _approved_dynamic_protocol(assignment: Dict[str, Any], protocol_id: str, *, 
     """
     from danus.core.evidence import _content_id, protocol_identity
 
+    if not re.fullmatch(r"[0-9a-f]{16}", str(protocol_id)):
+        raise ValueError("invalid dynamic protocol identity")
     ledger = _pl()
     if (not assignment or assignment.get("role") != "experimenter"
         or assignment.get("state") not in {"ASSIGNED", "RUNNING"}
@@ -679,7 +681,7 @@ def _approved_dynamic_protocol(assignment: Dict[str, Any], protocol_id: str, *, 
 
 
 def experiment_protocol_get(protocol_id: str) -> Dict[str, Any]:
-    """Read only the frozen protocol explicitly named in this active task.
+    """Read a fixed task/brief protocol or the exact approved dynamic binding.
 
     Source tasks are control-plane assigned; protocol IDs are never paths.
     No arbitrary project selection, directory read, or experiment execution.
@@ -1022,6 +1024,9 @@ def search_arxiv_theorems(query: str, num_results: int = 10) -> Dict[str, Any]:
 def experiment_run(protocol_id: str) -> Dict[str, Any]:
     """Execute a frozen protocol bound to either an exact ID or an approved contract."""
     from danus.execution.experiment import run_experiment
+
+    if not re.fullmatch(r"[0-9a-f]{16}", str(protocol_id)):
+        raise ValueError("invalid protocol identity")
 
     @contextmanager
     def authorized():
