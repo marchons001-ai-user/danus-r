@@ -137,6 +137,8 @@ def _inject_plan_read_inputs(view: Path, wl: L.WorkerLayout, role_name: str) -> 
 
     change_id = str(handoff.get("subject_id") or "")
     change = graph.get_change(change_id)
+    if int(change.get("base_plan_version") or 0) != snapshot["plan_version"]:
+        raise ValueError("assigned Plan Change is bound to a different Plan version")
     proposal_id = planning._proposal_id_from_change(change)
     if not proposal_id:
         raise ValueError("assigned Plan Change lacks immutable proposal identity")
@@ -144,7 +146,15 @@ def _inject_plan_read_inputs(view: Path, wl: L.WorkerLayout, role_name: str) -> 
     if record_path.is_symlink():
         raise ValueError("immutable Plan proposal must not be a symlink")
     record = planning._load_proposal_record(control, proposal_id)
-    if record.get("change_id") != change_id:
+    proposal = record.get("proposal") or {}
+    if (
+        record.get("change_id") != change_id
+        or record.get("proposer") != change.get("proposer")
+        or proposal.get("base_plan_version") != snapshot["plan_version"]
+        or proposal.get("operations") != change.get("operations")
+        or bool(proposal.get("post_hoc")) != bool(change.get("post_hoc"))
+        or list(proposal.get("evidence_refs") or []) != list(change.get("evidence_refs") or [])
+    ):
         raise ValueError("assigned Plan Change and immutable proposal differ")
     (view / "PLAN_PROPOSAL.json").write_text(
         json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
