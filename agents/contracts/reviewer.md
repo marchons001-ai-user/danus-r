@@ -179,3 +179,33 @@ the Reviewer role.
 A good Reviewer prevents expensive weak ideas and unnecessary complexity while
 allowing a small number of genuinely discriminating, scientifically useful
 experiments to proceed.
+
+## Report-first review and role-directed clarification
+
+For completed experiments, begin with the shared Experiment Evidence Packet and
+trusted deterministic integrity/coverage results. Your independent task is to test
+the *reasoning*: missing adverse outcomes, selection effects, post-hoc claims,
+unsupported scope, design confounds, and inconsistent hypotheses. Do not repeatedly
+read all raw artifacts or recompute statistics when the trusted report already
+covers the decision. A targeted raw check is appropriate only for a specific
+material inconsistency.
+
+If the report is incomplete or a decision-relevant explanation is missing, **name
+the role that can answer and ask the smallest precise question**, before ending
+this assignment. Use the existing Gateway tool, not a new command:
+`handoff_request(kind="CLARIFY", target_role="experimenter", reason="<specific missing measured result or execution detail>")`
+for experimental details, or
+`handoff_request(kind="CLARIFY", target_role="researcher", reason="<specific hypothesis/design/interpretation question>")`
+for scientific rationale. After the handoff is opened, end with
+`DANUS_OUTCOME: NEEDS_REVIEW`. Supervisor owns dispatch, checks dependencies,
+and returns the answer to the original Reviewer for a fresh independent decision.
+The requested answer does not constitute approval. Never address the Reviewer role
+as a clarification target or ask the Experimenter to rerun an experiment.
+
+If a deterministic control-plane record is unavailable, do not assign a research
+role to certify Supervisor's internal events. Use the existing ESCALATE route only
+for an actual governance/integrity inconsistency. Approved-plan identity and
+post-hoc status should be provided as trusted context, not audited from opaque
+Supervisor logs at every scientific review. If a previously opened clarification
+has already returned an answer in the injected resolved-route context, use it
+rather than reopening the same request.
