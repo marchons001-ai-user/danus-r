@@ -283,8 +283,9 @@ class EvidenceStore:
         return _read_json(self._record_path(evidence_id))
 
     # -------------------------------------------------------------- artifact
-    def artifact_ref(self, path: Path) -> Dict[str, Any]:
-        """Return a deterministic reference to an existing artifact; copy nothing."""
+    def artifact_ref(self, path: Path, *, relative_to: Optional[Path] = None) -> Dict[str, Any]:
+        """Hash a file; use a relative ref anchored to a separate source bundle when specified."""
+
         p = Path(path)
         if not p.is_file():
             raise ValueError(f"artifact is not a file: {p}")
@@ -293,9 +294,12 @@ class EvidenceStore:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         resolved = p.resolve()
+        base = Path(relative_to).resolve() if relative_to is not None else self.root.resolve()
         try:
-            stored_path = str(resolved.relative_to(self.root.resolve()))
+            stored_path = str(resolved.relative_to(base))
         except ValueError:
+            if relative_to is not None:
+                raise ValueError("artifact is outside the declared frozen source_root")
             stored_path = str(resolved)
         return {
             "path": stored_path,
