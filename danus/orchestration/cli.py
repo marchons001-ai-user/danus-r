@@ -1017,7 +1017,11 @@ def watch_supervisor(
     if poll <= 0:
         raise SystemExit("poll must be > 0")
 
+    from .deadlock_watch import DeadlockWatch
+
     pdir = L.project_dir(project)
+    deadlocks = DeadlockWatch(project)
+    last_report: Optional[Dict[str, Any]] = None
     last_signature: Optional[str] = None
     last_reconcile = 0.0
     last_telemetry_refresh: Optional[float] = None
@@ -1061,9 +1065,17 @@ def watch_supervisor(
                 rows = _project_rows(project)
                 budget = _resource_snapshot(pdir, rows, token_budget)
                 last_signature = _control_signature(project, rows, budget)
+            last_report = report
             yield report
             if report.get("project_state") == "COMPLETE" and not report.get("decisions"):
+                deadlocks.observe(report, _project_rows(project), token_budget=token_budget)
                 return
+        # Poll the watchdog independently of the 1800-second default heartbeat.
+        # No second research controller, no extra automatic Plan writes.
+        if last_report is not None:
+            deadlocks.observe(
+                last_report, _project_rows(project), token_budget=token_budget,
+            )
         time.sleep(poll)
 
 
