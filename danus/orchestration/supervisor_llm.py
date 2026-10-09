@@ -1162,6 +1162,8 @@ def research_main(argv: List[str]) -> int:
     parser.add_argument("--once", action="store_true", help="run one planning + Supervisor pass and return")
     parser.add_argument("--retry-blocked-review", action="store_true",
                         help="retry one unchanged blocked Reviewer Assignment in an existing Plan")
+    parser.add_argument("--recover-provenance-review", action="store_true",
+                        help="restart one Reviewer after validation of repaired committed Plan provenance")
     parser.add_argument("--heartbeat", type=float, default=1800.0)
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--token-budget", type=int, default=0)
@@ -1173,10 +1175,17 @@ def research_main(argv: List[str]) -> int:
         model=args.model,
     )
     print(json.dumps({"research_init": init}, ensure_ascii=False, sort_keys=True), flush=True)
+    if args.retry_blocked_review and args.recover_provenance_review:
+        parser.error("choose one Reviewer recovery mode")
     if args.retry_blocked_review:
         from .autonomy import retry_blocked_review
 
         retried = retry_blocked_review(args.project)
+        print(json.dumps({"review_retry": retried}, ensure_ascii=False, sort_keys=True), flush=True)
+    if args.recover_provenance_review:
+        from .autonomy import recover_review_after_provenance_fix
+
+        retried = recover_review_after_provenance_fix(args.project)
         print(json.dumps({"review_retry": retried}, ensure_ascii=False, sort_keys=True), flush=True)
     if args.once:
         applied = planning.planning_step(args.project, token_budget=args.token_budget)
