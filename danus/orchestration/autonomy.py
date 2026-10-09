@@ -919,7 +919,7 @@ def recover_review_after_provenance_fix(project: str) -> Dict[str, Any]:
     wl = L.WorkerLayout(L.worker_dir(project, source["worker"]))
     rows = CLI._project_rows(project)
     row = next((r for r in rows if r.get("worker") == source["worker"]), None)
-    if (root / L.PAUSE_FILE).exists() or row is None or row.get("alive")):
+    if (root / L.PAUSE_FILE).exists() or row is None or row.get("alive"):
         raise ValueError("Reviewer or project is still running or paused")
     pause_reason = CLI._pause_reason(wl)
     if pause_reason not in {None, "review:assignment_needs_review"}:
