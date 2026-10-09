@@ -602,8 +602,6 @@ def _route_stop_reason(root: Path, token_budget: int) -> str:
     CLI._apply_resource_budget(report, rows, CLI._resource_snapshot(root, rows, token_budget))
     if report.get("budget_stop"):
         return str(report["budget_stop"])
-    if CLI.quota_policy(CLI.Q.load_quota(root)).get("block_new_codex_rounds"):
-        return "quota_block_new_codex_rounds"
     return ""
 
 
@@ -1030,7 +1028,6 @@ def _eligible(report: Dict[str, Any]) -> bool:
         report.get("project_state") == "RUNNING"
         and report.get("convergence", {}).get("stable")
         and not report.get("budget_stop")
-        and not report.get("quota_policy", {}).get("block_new_codex_rounds")
     )
 
 
