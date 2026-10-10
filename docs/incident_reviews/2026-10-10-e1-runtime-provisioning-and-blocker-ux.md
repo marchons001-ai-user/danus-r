@@ -2,7 +2,7 @@
 
 Project: `fly-open10m-20261009`
 Date: 2026-10-10 (Asia/Shanghai)
-Status: TUI blocker visibility implemented in this branch; autonomous provisioning NOT implemented.
+Status: TUI blocker visibility and modal dismissal implemented; 45s Watchdog default implemented; opt-in isolated numerical venv scripts implemented. Autonomous Reviewer-approved environment provisioning is NOT implemented.
 
 ## Observed evidence
 
@@ -55,3 +55,12 @@ Status: TUI blocker visibility implemented in this branch; autonomous provisioni
 ## Interim safe handling
 
 Keep E1 BLOCKED; do not mutate the shared runtime. Use the TUI blocker panel to inspect the persisted environment preflight and escalation. The separately proposed 45s Watchdog threshold is unrelated to environment readiness. Provisioning/retry should wait for the reviewed, controlled runtime capability above. This document is an implementation contract for control-plane work, **not** a claim that provisioning is already supported.
+
+## Interim implementation in `fix/tui-close-idle45-20261010`
+
+- `b` opens a read-only Blocker dialogue. `Esc`, `b`, `q`, and the visible Close button dismiss it; the banner disappears when the current blocked Assignment is superseded by a non-BLOCKED Assignment.
+- `DANUS_DEADLOCK_IDLE_SECONDS` defaults to 45, applies only to eligible **all-idle** incidents, and does not bypass deterministic recovery guards or provision dependencies.
+- `scripts/provision_project_science_env.sh <project> [cuda|cpu]` is an **operator-run** opt-in script that installs a pinned numerical stack outside shared `runtime/venv`; it aborts if any frozen protocol already binds to the target interpreter. It records an environment identity and pip lock.
+- `scripts/run_project_science_research.sh <project> [budget]` launches the Supervisor and spawned workers/Gateways under that isolated Python interpreter; `bin/danus research` would instead use the shared venv unless deliberately configured otherwise.
+- The operator must stop the earlier Supervisor, provision and validate the project environment, use that interpreter for exactly one governed E1 recovery, and only then start the replacement Supervisor. The historical reviewer `ESCALATE` remains auditable; there is no implicit approval or silent cancellation.
+- These host scripts are an interim workaround. They are **not** an Agent-exposed installer, and no new automatic environment Request/Review/Provision gateway has been implemented. Future governed automation must enforce the full sequence and tests above before allowing unattended provisioning.
