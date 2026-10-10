@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Start a research control loop and its scientific workers in the SAME isolated
-# Python runtime. Do not launch this concurrently with another Supervisor.
-# Usage: bash scripts/run_project_science_research.sh <project> [token_budget]
+# Start a research control loop and its workers in ONE verified Python runtime.
+# Reuse an existing WSL numerical environment when supplied, without pip installs.
+# Do not launch this concurrently with another Supervisor.
+# Usage: bash scripts/run_project_science_research.sh <project> [budget] [existing_python]
+# Also accepts DANUS_SCIENCE_PY=/absolute/path/to/existing/bin/python.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="${1:-}"
@@ -11,9 +13,25 @@ if [[ ! "$PROJECT" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
 fi
 [[ "$BUDGET" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid token budget" >&2; exit 2; }
 . "$ROOT/scripts/env.sh"
-PY="$ROOT/runtime/science-envs/$PROJECT/bin/python"
-[[ -x "$PY" ]] || { echo "ERROR: science env missing; first run provision_project_science_env.sh" >&2; exit 3; }
-"$PY" -c 'import danus, numpy, scipy, torch; print("Research interpreter ready:", __import__("sys").executable, "torch:", torch.__version__)'
+PY="${3:-${DANUS_SCIENCE_PY:-$ROOT/runtime/science-envs/$PROJECT/bin/python}}"
+[[ "$PY" = /* ]] || { echo "ERROR: science Python path must be absolute" >&2; exit 3; }
+[[ -x "$PY" ]] || { echo "ERROR: interpreter not executable: $PY" >&2; exit 3; }
+# Source tree is on PYTHONPATH so an existing numerical environment need not
+# install or copy the Danus package or its PyTorch/CUDA wheels.
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+"$PY" - <<'PY'
+import sys, numpy, scipy, torch
+import danus.orchestration
+import danus.gateway
+import openai
+import anthropic
+x = torch.tensor(2.0, requires_grad=True)
+(x*x).backward()
+if x.grad.item() != 4.0:
+    raise SystemExit("autograd smoke check failed")
+print("Research interpreter ready:", sys.executable, "torch:", torch.__version__,
+      "CUDA built:", torch.version.cuda, "GPU available:", torch.cuda.is_available())
+PY
 export PATH="$(dirname "$PY"):$PATH"
 export DANUS_PY="$PY"
 export DANUS_SCIENTIFIC_WORKSPACE="$ROOT/runtime/workspaces/$PROJECT"
