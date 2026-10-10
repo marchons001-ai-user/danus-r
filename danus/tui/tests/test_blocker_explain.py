@@ -89,3 +89,43 @@ def test_tui_shows_blocker_banner_and_full_b_key_details(tmp_path, monkeypatch):
             assert not isinstance(app.screen, BlockerScreen)
     asyncio.run(check())
     assert ledger.path.read_bytes() == before
+
+
+def test_older_reviewer_escalation_is_not_misattributed_to_new_e1(tmp_path, monkeypatch):
+    project, ledger, current = _blocked_project(tmp_path, monkeypatch)
+    # A previous independent Reviewer can have an unrelated OPEN escalation on
+    # the same Plan node. E1's current blocker must show its own exact subject.
+    reviewer_dir = project / "workers" / "low2"
+    reviewer_dir.mkdir()
+    review = ledger.assign(
+        worker="low2", role="reviewer", node_id="P0",
+        plan_version=1, task="Independent diagnosis",
+    )
+    old = HandoffRequests(ledger).open(
+        kind="ESCALATE", plan_version=1, node_id="P0",
+        subject_type="ASSIGNMENT", subject_id=review["assignment_id"],
+        requested_by="low2", source_role="reviewer",
+        request="Provision old numerical environment",
+        reason="Old reviewer diagnosis, not the active Experimenter",
+        source_assignment_id=review["assignment_id"],
+    )
+    entry = load_project_snapshot("P")["blockers"][0]
+    assert entry["escalation_id"] == current["handoff_id"]
+    assert entry["escalation_id"] != old["handoff_id"]
+    assert "compatible isolated runtime" in entry["request"]
+
+
+def test_protocol_freezing_blocker_suggests_correct_gateway_tool(tmp_path, monkeypatch):
+    project, ledger, original = _blocked_project(tmp_path, monkeypatch)
+    ledger.assign(
+        worker="low3", role="experimenter", node_id="P0", plan_version=1,
+        task="Frozen execution retry",
+    )
+    ledger.update(
+        worker="low3", state="BLOCKED", actor="runtime", outcome="BLOCKED",
+        result="Python dependencies resolved; no authorized protocol-freezing interface is exposed.",
+    )
+    entry = load_project_snapshot("P")["blockers"][0]
+    assert entry["escalation_id"] == ""
+    assert "experiment_freeze_protocol" in entry["next_step"]
+    assert "protocol" in entry["reason"]
