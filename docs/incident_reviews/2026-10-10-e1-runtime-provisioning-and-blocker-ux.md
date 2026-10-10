@@ -64,3 +64,10 @@ Keep E1 BLOCKED; do not mutate the shared runtime. Use the TUI blocker panel to 
 - `scripts/run_project_science_research.sh <project> [budget]` launches the Supervisor and spawned workers/Gateways under that isolated Python interpreter; `bin/danus research` would instead use the shared venv unless deliberately configured otherwise.
 - The operator must stop the earlier Supervisor, provision and validate the project environment, use that interpreter for exactly one governed E1 recovery, and only then start the replacement Supervisor. The historical reviewer `ESCALATE` remains auditable; there is no implicit approval or silent cancellation.
 - These host scripts are an interim workaround. They are **not** an Agent-exposed installer, and no new automatic environment Request/Review/Provision gateway has been implemented. Future governed automation must enforce the full sequence and tests above before allowing unattended provisioning.
+
+
+## Reusing an existing WSL environment without reinstalling PyTorch
+
+The opt-in project launcher now accepts an absolute existing WSL Python interpreter as its third argument, or `DANUS_SCIENCE_PY`. Its preflight imports NumPy, SciPy, PyTorch, Danus Gateway/orchestration, OpenAI and Anthropic and verifies a minimal autodiff gradient. It does not invoke pip. Run `danus.core.runtime.identity()` on the candidate environment **before** recovering E1: a Conda package lacking a wheel `RECORD` may fail Danus's strict frozen runtime manifest check. If this happens, do not work around runtime validation or silently mutate frozen environments. Investigate controlled opt-in setup or a separate environment design.
+
+`nvidia-smi` proves WSL GPU-driver visibility, not that a Python torch wheel is installed. Inspect candidate WSL Python environments first, then choose an already compatible interpreter. Keep the shared `runtime/venv` unchanged, and never run a second Supervisor simultaneously.
