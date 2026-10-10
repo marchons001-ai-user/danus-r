@@ -201,7 +201,7 @@ def _blocker_rows(ledger: ProgressLedger) -> List[Dict[str, Any]]:
         if h.get("kind") == "ESCALATE" and h.get("status") == "OPEN"
     ]
     blockers = []
-    for assignment in ledger.assignments():
+    for assignment in ledger.snapshot(refresh_stale=False):
         if assignment.get("state") != "BLOCKED" or ledger._is_plan_stale(assignment):
             continue
         node_id = str(assignment.get("node_id") or "")
