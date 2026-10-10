@@ -16,6 +16,7 @@ ALL_TOOLS: Tuple[str, ...] = (
     "fact_revoke",
     "handoff_request",
     "experiment_run",
+    "experiment_freeze_protocol",
     "experiment_protocol_get",
     "workflow_submit_result",
     "implementation_pending_contracts",
@@ -47,7 +48,7 @@ ROLE_TOOLS: Dict[str, Tuple[str, ...]] = {
         "experiment_protocol_get", "workflow_submit_result",
         "plan_pending_changes", "plan_review_change", "search_arxiv_theorems",
     ),
-    "experimenter": ("gm_add", "gm_search", "fact_search", "handoff_request", "experiment_run", "experiment_protocol_get", "workflow_submit_result"),
+    "experimenter": ("gm_add", "gm_search", "fact_search", "handoff_request", "experiment_freeze_protocol", "experiment_run", "experiment_protocol_get", "workflow_submit_result"),
     # The current control-plane `main` identity is the Supervisor commit authority.
     "main": (
         "gm_add", "gm_search", "fact_search", "fact_revoke",
