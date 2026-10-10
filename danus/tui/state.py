@@ -206,15 +206,25 @@ def _blocker_rows(ledger: ProgressLedger) -> List[Dict[str, Any]]:
             continue
         node_id = str(assignment.get("node_id") or "")
         assignment_id = str(assignment.get("assignment_id") or "")
+        # Never attach another worker's older Main escalation to this new
+        # Assignment merely because both refer to the same Plan node.
         escalation = next((
-            h for h in reversed(escalations)
-            if h.get("subject_id") == assignment_id
-            or (h.get("node_id") == node_id and h.get("target_role") == "main")
+            h for h in escalations
+            if h.get("subject_type") == "ASSIGNMENT"
+            and h.get("subject_id") == assignment_id
+            and h.get("target_role") == "main"
         ), None)
         reason = str(assignment.get("result") or "").strip()
         request = str(escalation.get("reason") or "").strip() if escalation else ""
         both = (reason + " " + request).lower()
-        if "numpy" in both and ("autodiff" in both or "torch" in both):
+        if "protocol" in both and ("freez" in both or "freezing" in both):
+            next_step = (
+                "Current code requires the bound Experimenter Gateway "
+                "experiment_freeze_protocol tool. Verify that the updated Gateway "
+                "is installed, then retry E1 once through governed recovery; "
+                "retain the exact approved Contract and unchanged scientific scope."
+            )
+        elif "numpy" in both and ("autodiff" in both or "torch" in both):
             next_step = (
                 "Provision a separate pinned numerical Python environment with the "
                 "approved libraries; verify versions/resources and revalidate the "
