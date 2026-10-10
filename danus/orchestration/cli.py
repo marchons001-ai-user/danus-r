@@ -830,7 +830,7 @@ def _decorate_supervisor_report(
     report: Dict[str, Any],
     token_budget: int,
 ) -> tuple[Dict[str, Any], bool]:
-    quiescent = report.get("project_state") in {"PAUSED", "COMPLETE"}
+    quiescent = report.get("project_state") in {"PAUSED", "COMPLETE", "ACTION_REQUIRED"}
     budget = _resource_snapshot(pdir, rows, token_budget)
     report["budget"] = budget
     if not quiescent:
@@ -1068,8 +1068,12 @@ def watch_supervisor(
                 last_signature = _control_signature(project, rows, budget)
             last_report = report
             yield report
-            if report.get("project_state") == "COMPLETE" and not report.get("decisions"):
-                deadlocks.observe(report, _project_rows(project), token_budget=token_budget)
+            # A finished Plan with only outstanding Main escalations is not
+            # fully closed: leave their audit records OPEN, but exit the
+            # supervision loop once no scientific worker remains alive.
+            if (report.get("project_state") in {"COMPLETE", "ACTION_REQUIRED"}
+                and not report.get("decisions")
+                and not any(row.get("alive") for row in _project_rows(project))):
                 return
         # Poll the watchdog independently of the 1800-second heartbeat.
         # Refresh *read-only* semantic state while idle: a cached report can
