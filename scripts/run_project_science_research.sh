@@ -16,9 +16,14 @@ fi
 PY="${3:-${DANUS_SCIENCE_PY:-$ROOT/runtime/science-envs/$PROJECT/bin/python}}"
 [[ "$PY" = /* ]] || { echo "ERROR: science Python path must be absolute" >&2; exit 3; }
 [[ -x "$PY" ]] || { echo "ERROR: interpreter not executable: $PY" >&2; exit 3; }
-# Source tree is on PYTHONPATH so an existing numerical environment need not
-# install or copy the Danus package or its PyTorch/CUDA wheels.
-export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+# Extend the numerical interpreter's search path only with Danus's trusted,
+# existing control-plane site-packages. No pip install and no package copying.
+CONTROL_PY="$ROOT/runtime/venv/bin/python"
+[[ -x "$CONTROL_PY" ]] || { echo "ERROR: Danus control venv missing" >&2; exit 3; }
+CONTROL_SITE="$("$CONTROL_PY" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+[[ -d "$CONTROL_SITE" ]] || { echo "ERROR: control site-packages missing" >&2; exit 3; }
+export DANUS_TRUSTED_CONTROL_SITE="$CONTROL_SITE"
+export PYTHONPATH="$ROOT:$CONTROL_SITE"
 "$PY" - <<'PY'
 import sys, numpy, scipy, torch
 import danus.orchestration
@@ -36,7 +41,8 @@ export PATH="$(dirname "$PY"):$PATH"
 export DANUS_PY="$PY"
 export DANUS_SCIENTIFIC_WORKSPACE="$ROOT/runtime/workspaces/$PROJECT"
 mkdir -p "$ROOT/runtime/logs"
-echo "[science] launching project=$PROJECT with interpreter=$PY watchdog=${DANUS_DEADLOCK_IDLE_SECONDS:-45}s"
+echo "[science] launching project=$PROJECT with interpreter=$PY"
+echo "[science] control imports from $CONTROL_SITE; numerical packages from $PY; watchdog=${DANUS_DEADLOCK_IDLE_SECONDS:-45}s"
 cd "$ROOT"
 set -o pipefail
 "$PY" -m danus.orchestration research "$PROJECT" --token-budget "$BUDGET" 2>&1 | tee -a "$ROOT/runtime/logs/$PROJECT.log"
