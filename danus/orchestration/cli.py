@@ -1074,7 +1074,7 @@ def watch_supervisor(
         # Poll the watchdog independently of the 1800-second heartbeat.
         # Refresh *read-only* semantic state while idle: a cached report can
         # disagree with the Watchdog's live validation after Handoff replay
-        # or code upgrades and indefinitely reset the 180-second clock.
+        # or code upgrades and indefinitely reset the configured idle clock.
         if last_report is not None:
             idle_rows = _project_rows(project)
             if (
