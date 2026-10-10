@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from danus.core import ProgressLedger, ResearchPlanGraph
+from danus.core.handoff import HandoffRequests
 from danus.core.evidence import EvidenceStore
 from danus.execution import layout as L
 from danus.orchestration import cli as C
@@ -191,6 +192,54 @@ def _worker_row(project: str, worker: str, ledger: ProgressLedger) -> Dict[str, 
         "round": int(status.get("round") or 0),
         "age_s": round(age, 1) if age is not None else None,
     }
+
+
+def _blocker_rows(ledger: ProgressLedger) -> List[Dict[str, Any]]:
+    """Read-only synthesis of blocked assignments and unresolved Main escalations."""
+    escalations = [
+        h for h in HandoffRequests(ledger).all()
+        if h.get("kind") == "ESCALATE" and h.get("status") == "OPEN"
+    ]
+    blockers = []
+    for assignment in ledger.assignments():
+        if assignment.get("state") != "BLOCKED" or ledger._is_plan_stale(assignment):
+            continue
+        node_id = str(assignment.get("node_id") or "")
+        assignment_id = str(assignment.get("assignment_id") or "")
+        escalation = next((
+            h for h in reversed(escalations)
+            if h.get("subject_id") == assignment_id
+            or (h.get("node_id") == node_id and h.get("target_role") == "main")
+        ), None)
+        reason = str(assignment.get("result") or "").strip()
+        request = str(escalation.get("reason") or "").strip() if escalation else ""
+        both = (reason + " " + request).lower()
+        if "numpy" in both and ("autodiff" in both or "torch" in both):
+            next_step = (
+                "Provision a separate pinned numerical Python environment with the "
+                "approved libraries; verify versions/resources and revalidate the "
+                "contract before one governed retry. Do not mutate a shared Python "
+                "venv backing frozen protocols."
+            )
+        else:
+            next_step = (
+                "Resolve the actual prerequisite through the authorized control "
+                "path, then use governed recovery. Do not repeatedly dispatch an "
+                "unchanged blocked task."
+            )
+        blockers.append({
+            "node_id": node_id,
+            "worker": str(assignment.get("worker") or ""),
+            "role": str(assignment.get("role") or ""),
+            "assignment_id": assignment_id,
+            "reason": reason or "Blocked without a recorded result.",
+            "escalation_id": str(escalation.get("handoff_id") or "") if escalation else "",
+            "escalation_status": str(escalation.get("status") or "") if escalation else "",
+            "escalation_target": str(escalation.get("target_role") or "") if escalation else "",
+            "request": request,
+            "next_step": next_step,
+        })
+    return blockers
 
 
 def _protocol_total(protocol: Optional[Dict[str, Any]]) -> int:
@@ -529,6 +578,7 @@ def load_project_snapshot(project: str) -> Dict[str, Any]:
         "root_id": plan["root_id"],
         "nodes": nodes,
         "workers": workers,
+        "blockers": _blocker_rows(ledger),
         "experiments": _experiment_rows(project_dir),
         "activity": _activity_rows(project, project_dir),
         "quota": quota,
