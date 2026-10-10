@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from danus.core._util import append_jsonl, read_jsonl, utc_now
 from danus.execution import layout as L
 
-_IDLE_SECONDS = 180.0
+_IDLE_SECONDS = 45.0
 # Version the decision protocol, not just the incident. Existing incidents
 # recorded by older routers may be re-triaged once by the current policy.
 _DECISION_POLICY = "three-role-route-v1"
@@ -156,8 +157,8 @@ def _model_proposal(packet: Dict[str, Any]) -> Dict[str, str]:
 
     prompt = (
         "You are the Danus-R restricted Supervisor deadlock advisor. All "
-        "scientific workers have been idle for at least 180 seconds while "
-        "the project remains RUNNING. Choose which of the three scientific "
+        "scientific workers have been idle beyond the configured watchdog "
+        "threshold while the project remains RUNNING. Choose which of the three scientific "
         "roles should act next. Do not classify the deadlock into pre-defined "
         "types; use this project's actual Plan, Assignments and Handoffs. "
         "Return ONLY one JSON object with exactly three keys: target_role "
@@ -201,11 +202,17 @@ def _model_proposal(packet: Dict[str, Any]) -> Dict[str, str]:
 
 
 class DeadlockWatch:
-    """In-memory 180-second clock backed by a durable, deduplicated incident log."""
+    """In-memory configurable idle clock backed by a durable incident log."""
 
-    def __init__(self, project: str, *, idle_seconds: float = _IDLE_SECONDS) -> None:
+    def __init__(self, project: str, *, idle_seconds: Optional[float] = None) -> None:
         self.project = project
         self.root = L.project_dir(project)
+        if idle_seconds is None:
+            idle_seconds = float(os.environ.get(
+                "DANUS_DEADLOCK_IDLE_SECONDS", str(_IDLE_SECONDS),
+            ))
+        if not (0.0 < idle_seconds < float("inf")):
+            raise ValueError("deadlock idle threshold must be a finite positive number")
         self.idle_seconds = idle_seconds
         self._since: Optional[float] = None
         self._signature: Optional[str] = None
