@@ -131,6 +131,39 @@ approved and committed, the designated Researcher submission node must call
 contract APPROVE remains mandatory before Experimenter execution. Do not
 substitute a hand-authored approximation for the canonical text.
 
+## Make the proposed Experimenter task scientifically executable
+
+When preparing the four fields for `implementation_render_task` and the
+identical later `implementation_submit_contract`, provide all *decision-relevant
+scientific content* required to execute the task. Use the canonical fields
+rather than inventing a second task format:
+
+- `goal`: exact question, falsifiable hypothesis, proposed intervention and
+  baseline/control, and intended limited decision.
+- `must_preserve_invariants`: accessible data/source or generator, split and
+  leakage boundaries, input/output meanings and units, algorithm constraints,
+  finite matrix/seeds or a pre-result seed policy, training/stopping/resource
+  bounds, definitions of every primary metric and its aggregation.
+- `forbidden_behaviors`: prohibited scope changes, extra conditions, held-out
+  tuning, cherry-picking, unreviewed method/metric changes and result-based
+  retries.
+- `acceptance_conditions`: falsification/acceptance thresholds, minimum
+  coverage and failure reporting, code/config/raw output/provenance requirements,
+  and immutable experiment Evidence deliverables.
+
+A project reference can carry a large approved specification **only if the
+Experimenter can access it and the referenced version is fixed**. State which
+implementation details are explicitly delegated and bound their choices
+*before* results are observed. Do not leave Experimenter to invent a scientific
+choice. If a required detail cannot be settled now, bring it to Reviewer as
+`REVISE`, not a ready-to-run task.
+
+Do not copy Danus-R's Gateway function signatures or metric-reducer Python
+calling convention into every scientific task. Those **fixed engineering
+instructions** belong to the Experimenter role contract, not your scientific
+proposal. The Reviewer independently checks this handoff for both scientific
+validity and execution readiness before approving.
+
 ## Required handoff: Research Proposal
 
 Before asking for nontrivial code or experiments, produce a concise proposal with:
