@@ -1081,6 +1081,167 @@ def experiment_run(protocol_id: str) -> Dict[str, Any]:
     return run_experiment(root, protocol_id, author=author, authorize=authorized)
 
 
+
+def experiment_freeze_protocol(
+    question: str,
+    hypothesis: str,
+    matrix: Dict[str, Any],
+    primary_metrics: List[str],
+    decision_rule: str,
+    metric_reducer_path: str,
+    execution_files: List[str],
+    metric_reducer_function: str = "reduce_metrics",
+) -> Dict[str, Any]:
+    """Freeze one contract-bound runnable protocol from workspace files.
+
+    The Experimenter may write code in its scientific workspace but cannot
+    write the trusted Evidence Store directly. This role-gated host tool hashes
+    the declared source files, binds the protocol to the current reviewed
+    Implementation Contract and Assignment, and publishes an immutable bundle.
+    It does NOT execute any unit or accept arbitrary host paths.
+    """
+    from danus.core import bundle
+    from danus.execution import layout as L
+
+    if _BOUND_WORKER is None or _BOUND_WORKER["role"] != "experimenter":
+        raise PermissionError("protocol freezing requires a bound Experimenter Gateway")
+
+    # Authorization is checked before reading any workspace file. Freeze
+    # itself runs outside global project locks (runtime hashing may be slow).
+    with capability.scope(_BOUND_WORKER):
+        ledger = _pl()
+        assignment = ledger.current(_author(), refresh_stale=False)
+        if not assignment or assignment["assignment_id"] != _BOUND_WORKER["assignment_id"]:
+            raise PermissionError("protocol freezing requires the current Assignment")
+        if assignment.get("handoff_id"):
+            handoff = HandoffRequests(ledger).get(assignment["handoff_id"])
+            if handoff and handoff.get("kind") == "CLARIFY":
+                raise PermissionError("clarification assignments cannot freeze protocols")
+        task = (_project() / "workers" / _author() / "TASK.md").read_text(encoding="utf-8")
+        if re.search(r"^EXPERIMENT_PROTOCOL_ID=", task, re.MULTILINE):
+            raise PermissionError("exact-ID execution assignments cannot freeze new protocols")
+        contract_id = str(assignment.get("implementation_contract_id") or "")
+        contract = ledger.implementation_contract(contract_id) if contract_id else None
+        if (
+            not contract
+            or contract.get("gate_status") != "APPROVE"
+            or contract.get("consumed_by_assignment_id") != assignment["assignment_id"]
+            or contract.get("task_sha256") != assignment.get("task_sha256")
+            or contract.get("node_id") != assignment.get("node_id")
+            or not contract.get("review_assignment_id")
+            or not contract.get("reviewed_at")
+            or not any(
+                h.get("kind") == "REVIEW"
+                and h.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                and h.get("subject_id") == contract_id
+                and h.get("status") == "RESOLVED"
+                and h.get("resolution_assignment_id") == contract["review_assignment_id"]
+                for h in HandoffRequests(ledger).all()
+            )
+        ):
+            raise PermissionError("protocol freezing requires exact independently approved Implementation Contract")
+        root = _project()
+        worker = _author()
+        assignment_id = assignment["assignment_id"]
+        workspace = L.scientific_workspace(root)
+        if workspace == root.resolve():
+            raise PermissionError("dynamic protocol freezing requires a separate scientific workspace")
+
+    store = EvidenceStore(root)
+
+    def file_ref(name: str) -> Dict[str, Any]:
+        relative = bundle.relative_path(name)
+        source = workspace / relative
+        if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(workspace):
+            raise ValueError("protocol source must be a regular file inside the scientific workspace")
+        return store.artifact_ref(source, relative_to=workspace)
+
+    if not isinstance(matrix, dict) or not isinstance(matrix.get("units"), list):
+        raise ValueError("protocol requires matrix.units")
+    if not isinstance(execution_files, list) or not execution_files:
+        raise ValueError("protocol requires explicit execution_files")
+    declared = [bundle.relative_path(p) for p in execution_files]
+    if len(set(declared)) != len(declared):
+        raise ValueError("duplicate execution_files are not allowed")
+    for name in declared:
+        file_ref(name)
+
+    # Normalize input paths into trusted content references. Model-supplied
+    # digests, when present, must match actual workspace bytes.
+    units = []
+    for raw_unit in matrix["units"]:
+        if not isinstance(raw_unit, dict):
+            raise ValueError("experiment unit must be an object")
+        unit = dict(raw_unit)
+        inputs = unit.get("inputs", [])
+        if not isinstance(inputs, list):
+            raise ValueError("unit inputs must be a list")
+        frozen_inputs = []
+        for item in inputs:
+            if isinstance(item, str):
+                reference = file_ref(item)
+            elif isinstance(item, dict) and isinstance(item.get("path"), str):
+                reference = file_ref(item["path"])
+                supplied = {k: item[k] for k in ("sha256", "size") if k in item}
+                if supplied and (
+                    set(supplied) != {"sha256", "size"}
+                    or any(reference[k] != supplied[k] for k in supplied)
+                ):
+                    raise ValueError("unit input hash/size differs from current workspace file")
+            else:
+                raise ValueError("input must be a relative path or a path/hash/size object")
+            frozen_inputs.append(reference)
+        unit["inputs"] = frozen_inputs
+        units.append(unit)
+
+    frozen_matrix = {**matrix, "units": units}
+    from danus.execution.experiment import _units
+    validated_units = _units({"matrix": frozen_matrix})
+    for unit in validated_units:
+        argv = unit["argv"]
+        if len(argv) < 2 or argv[0] not in {"python", "python3"} or argv[1] not in declared:
+            raise ValueError("unit must invoke a declared frozen Python script")
+        for artifact in unit["artifacts"]:
+            bundle.relative_path(artifact)
+
+    reducer = file_ref(metric_reducer_path)
+    function = str(metric_reducer_function or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", function):
+        raise ValueError("invalid metric reducer function")
+    reducer["function"] = function
+
+    protocol_id = store.freeze_protocol(
+        question=question,
+        hypothesis=hypothesis,
+        matrix=frozen_matrix,
+        primary_metrics=primary_metrics,
+        decision_rule=decision_rule,
+        author=worker,
+        metric_reducer=reducer,
+        execution_files=declared,
+        source_root=workspace,
+        implementation_contract_id=contract_id,
+        execution_assignment_id=assignment_id,
+    )
+
+    # Recheck immediately after expensive hashing/writes. Stale/revoked
+    # Assignments cannot be handed an executable protocol, and execution is
+    # independently revalidated by experiment_run.
+    with capability.scope(_BOUND_WORKER):
+        current = _pl().current(worker, refresh_stale=False)
+        if not current or current["assignment_id"] != assignment_id:
+            raise PermissionError("Experimenter Assignment changed while freezing")
+        protocol = _approved_dynamic_protocol(current, protocol_id, pin=False)
+    return {
+        "protocol_id": protocol_id,
+        "bundle_id": protocol["bundle_id"],
+        "status": "frozen",
+        "implementation_contract_id": contract_id,
+        "execution_assignment_id": assignment_id,
+        "next_step": "Call experiment_run(protocol_id) with this exact ID.",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # role-based registration                                                     #
 # --------------------------------------------------------------------------- #
@@ -1093,6 +1254,7 @@ _TOOLS = {
     "fact_revoke": fact_revoke,
     "handoff_request": handoff_request,
     "experiment_run": experiment_run,
+    "experiment_freeze_protocol": experiment_freeze_protocol,
     "implementation_pending_contracts": implementation_pending_contracts,
     "experiment_protocol_get": experiment_protocol_get,
     "workflow_submit_result": workflow_submit_result,
@@ -1111,7 +1273,7 @@ def _bound_tool(fn):
     @wraps(fn)
     def call(*args, **kwargs):
         if fn.__name__ in {
-            "fact_submit", "experiment_run", "handoff_request", "implementation_submit_contract", "plan_propose_change",
+            "fact_submit", "experiment_run", "experiment_freeze_protocol", "handoff_request", "implementation_submit_contract", "plan_propose_change",
             "implementation_review_contract", "plan_review_change", "experiment_protocol_get", "workflow_submit_result",
         }:
             # These functions enforce their own capability scope/locks; do not
