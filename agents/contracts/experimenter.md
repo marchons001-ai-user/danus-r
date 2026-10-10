@@ -238,15 +238,23 @@ When the approved Implementation Contract does **not** contain a pre-frozen
 experiments. The round prompt injects the trusted `implementation_contract_id`
 and `execution_assignment_id`. First implement only the reviewed question,
 baseline, matrix/seed policy, primary metrics, and decision rule. Freeze exactly
-one runnable protocol with `EvidenceStore.freeze_protocol(...,
-implementation_contract_id=..., execution_assignment_id=...,
-metric_reducer=..., execution_files=...)`. Its returned content-addressed
-`protocol_id` is the argument to the existing `experiment_run(protocol_id)`
-tool. No additional tool is required. In a project with a separate scientific
-workspace, pass `source_root=workspace` to `freeze_protocol` and use
-`store.artifact_ref(reducer_path, relative_to=workspace)` (and the same pattern
-for input references). Frozen bundle file paths must be relative to that workspace,
-not absolute paths into the control project.
+one runnable protocol via the bound Gateway tool
+`experiment_freeze_protocol(question=..., hypothesis=..., matrix=...,
+primary_metrics=..., decision_rule=..., metric_reducer_path=...,
+execution_files=..., metric_reducer_function="reduce_metrics")`.
+This is the **only authorized protocol-freezing path in restricted Worker mode**:
+the control-side `EvidenceStore` is intentionally hidden from Worker shell access.
+Write the approved scripts and metric reducer in the scientific workspace first;
+pass only canonical **workspace-relative** paths. A unit has the form
+`{"id":"pilot-1", "argv":["python","pilot.py","outputs/pilot-1.json"],
+"artifacts":["outputs/pilot-1.json"], "inputs":[]}`;
+input entries may be workspace-relative paths or exact path/SHA-256/size refs.
+The Gateway hashes the files, validates the reviewed Contract and active
+Assignment, freezes the exact execution bundle, and returns `protocol_id`.
+Then call `experiment_run(protocol_id)` with that exact ID. Never call
+`EvidenceStore.freeze_protocol` directly from the restricted Worker, run
+`scripts/experiment.py` from shell, or write the trusted control directory.
+No separate approval is needed for the same exact already-reviewed Contract.
 
 The Gateway verifies the exact active Assignment, completed Reviewer handoff,
 approved contract, protocol author, freeze time, immutable protocol identity,
