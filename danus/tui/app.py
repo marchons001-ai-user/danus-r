@@ -7,7 +7,7 @@ from typing import Any, Dict
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import DescendantFocus
 from textual.screen import ModalScreen
@@ -95,6 +95,33 @@ class InterruptConfirmScreen(ModalScreen):
         self.dismiss(False)
 
 
+class BlockerScreen(ModalScreen):
+    """Show the persisted blocker and Main escalation without changing state."""
+
+    BINDINGS = [Binding("escape", "dismiss_blocker", "Close", show=False)]
+    CSS = """
+    BlockerScreen { align: center middle; }
+    #blocker-dialog {
+        width: 90%;
+        height: 80%;
+        border: round $error;
+        background: $surface;
+        padding: 1 2;
+    }
+    """
+
+    def __init__(self, content: str) -> None:
+        super().__init__()
+        self.content = content
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="blocker-dialog"):
+            yield Static(Text(self.content))
+
+    def action_dismiss_blocker(self) -> None:
+        self.dismiss(None)
+
+
 class DanusTUI(App[None]):
     TITLE = "Danus-R"
     AUTO_FOCUS = "#plan"
@@ -102,6 +129,7 @@ class DanusTUI(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("p", "toggle_pause", "Pause/Resume"),
         Binding("g", "guide", "Guide"),
+        Binding("b", "show_blockers", "Blockers"),
         Binding("I", "interrupt", "Interrupt", key_display="shift+i"),
         Binding("0", "filter_all", "All activity", show=False),
         Binding("1", "filter_researcher", "Researcher activity", show=False),
@@ -120,6 +148,7 @@ class DanusTUI(App[None]):
     }
     CSS = """
     #summary, #quota { height: 3; padding: 1 1; }
+    #blockers { height: 4; border: round $error; padding: 0 1; }
     #body { height: 1fr; }
     #plan { width: 2fr; border: round $primary; padding: 0 1; }
     #right { width: 3fr; height: 1fr; }
@@ -143,6 +172,7 @@ class DanusTUI(App[None]):
         height: 1;
         padding: 0 1;
     }
+    Screen.-medium-height #blockers, Screen.-short #blockers { height: 3; }
     Screen.-medium-height #experiments, Screen.-medium-height #activity { height: 7; }
     Screen.-short #experiments, Screen.-short #activity { height: 5; }
     """
@@ -342,6 +372,15 @@ class DanusTUI(App[None]):
                 f"Progress:   {row['progress_state'] or '—'}",
                 f"Round:      {row['round']}",
                 f"Round age:  {age}",
+                *[
+                    f"\nBLOCKED CAUSE:\n{issue['reason']}\n\n"
+                    f"MAIN ESCALATION: {issue['escalation_id'] or 'none'}\n"
+                    f"HOST REQUEST: {issue['request'] or 'none'}\n"
+                    f"NEXT STEP: {issue['next_step']}"
+                    for issue in self.snapshot.get("blockers", [])
+                    if issue["worker"] == row["worker"]
+                    and issue["node_id"] == row["node_id"]
+                ],
             ],
         )
 
@@ -402,6 +441,43 @@ class DanusTUI(App[None]):
                 if key == self._detail_key:
                     self._show_activity_detail(index)
                     return
+
+    def _blocker_text(self) -> str:
+        blockers = self.snapshot.get("blockers") or []
+        if not blockers:
+            return ""
+        issue = blockers[0]
+        reason = " ".join(issue["reason"].split())
+        if len(reason) > 140:
+            reason = reason[:139] + "…"
+        escalation = (
+            f"ESCALATE {issue['escalation_id'][:8]} -> {issue['escalation_target']}"
+            if issue.get("escalation_id") else "NO OPEN MAIN ESCALATION"
+        )
+        extra = f" (+{len(blockers) - 1} more)" if len(blockers) > 1 else ""
+        return (
+            f"BLOCKED {issue['node_id']} / {issue['worker']}{extra}: {reason}\n"
+            f"{escalation}  |  Press b for full cause and next step"
+        )
+
+    def action_show_blockers(self) -> None:
+        blockers = self.snapshot.get("blockers") or []
+        if not blockers:
+            self.notify("No unresolved blocked scientific assignments.")
+            return
+        sections = []
+        for issue in blockers:
+            sections.append(
+                f"BLOCKED: {issue['node_id']} / {issue['worker']} ({issue['role']})\n"
+                f"Assignment: {issue['assignment_id']}\n\n"
+                f"Recorded failure:\n{issue['reason']}\n\n"
+                f"Main escalation: {issue['escalation_id'] or 'none'}"
+                f" ({issue['escalation_status'] or 'none'})\n"
+                f"Requested host action:\n{issue['request'] or 'No open Main request recorded.'}\n\n"
+                f"Suggested next step (not an approval or executable command):\n"
+                f"{issue['next_step']}"
+            )
+        self.push_screen(BlockerScreen("\n\n" + ("\n\n" + "-" * 64 + "\n\n").join(sections)))
 
     def _summary_text(self) -> str:
         return (
@@ -527,6 +603,9 @@ class DanusTUI(App[None]):
         old_nodes = self.snapshot["nodes"]
         self.snapshot = load_project_snapshot(self.project_name)
         self.query_one("#summary", Static).update(self._summary_text())
+        blocker_banner = self.query_one("#blockers", Static)
+        blocker_banner.display = bool(self.snapshot.get("blockers"))
+        blocker_banner.update(Text(self._blocker_text()))
         self.query_one("#quota", Static).update(self._quota_text())
         if old_nodes != self.snapshot["nodes"]:
             self._populate_plan(self.query_one("#plan", Tree), reset=True)
@@ -538,6 +617,9 @@ class DanusTUI(App[None]):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(self._summary_text(), id="summary")
+        blocker_banner = Static(Text(self._blocker_text()), id="blockers")
+        blocker_banner.display = bool(self.snapshot.get("blockers"))
+        yield blocker_banner
         with Horizontal(id="body"):
             yield self._plan_tree()
             with Vertical(id="right"):
