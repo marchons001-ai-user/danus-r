@@ -105,10 +105,25 @@ def _experiment_binding_context(project: str, worker: str, role_name: str) -> st
     if (not contract or contract.get("gate_status") != "APPROVE"
         or contract.get("consumed_by_assignment_id") != assignment["assignment_id"]):
         return ""
+    from importlib import metadata
+    versions = {}
+    for name in ("numpy", "scipy", "torch"):
+        try:
+            versions[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            versions[name] = "missing"
     return (
         "\n\n<APPROVED_EXPERIMENT_BINDING>\n"
         f"implementation_contract_id: {contract_id}\n"
         f"execution_assignment_id: {assignment['assignment_id']}\n"
+        f"trusted_execution_python: {sys.executable}\n"
+        f"trusted_installed_numerical_packages: {versions}\n"
+        "The trusted experiment runtime and its frozen Python units use this "
+        "worker/Gateway interpreter. Verify this interpreter's available "
+        "dependencies and resources before freezing. Do not assume that "
+        "/usr/bin/python3 or a different shared runtime/venv is the bound "
+        "execution environment. Do not install packages or select an alternate "
+        "interpreter inside the scientific task without host authorization.\n"
         "This is your Reviewer-approved experiment authority. If TASK.md has no "
         "EXPERIMENT_PROTOCOL_ID marker, implement the approved task, freeze exactly "
         "one runnable protocol via EvidenceStore.freeze_protocol using both IDs "
