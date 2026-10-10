@@ -258,17 +258,35 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         for item in pending_implementation_contracts
         if active_route(str(item.get("node_id") or ""))
     ]
-    complete = bool(
+    # Main-directed ESCALATE records are durable operator obligations. An
+    # otherwise finished scientific Plan must not silently resolve them, but
+    # it must also not spin a Supervisor forever as if scientific work remains.
+    science_done = bool(
         plan.get("root_id") in completed
         and not frontier
         and not pending_plan_changes
         and not unresolved_implementation_contracts
-        and not pending_handoffs
         and not any(a.get("state") in {"ASSIGNED", "RUNNING", "BLOCKED"}
                     and active_route(str(a.get("node_id") or "")) for a in current_assignments)
     )
+    pending_main_escalations = [
+        item for item in pending_handoffs
+        if item["kind"] == "ESCALATE"
+        and item["target_role"] == "main"
+        and item["status"] == "OPEN"
+    ]
+    main_only = bool(
+        pending_handoffs
+        and len(pending_main_escalations) == len(pending_handoffs)
+    )
+    complete = science_done and not pending_handoffs
+    # ACTION_REQUIRED means science is finished; operator-request records
+    # remain OPEN, and the project is NOT governance-complete.
     project_state = (
-        "COMPLETE" if complete else "PAUSED" if snapshot.get("project_paused") else "RUNNING"
+        "COMPLETE" if complete
+        else "ACTION_REQUIRED" if science_done and main_only
+        else "PAUSED" if snapshot.get("project_paused")
+        else "RUNNING"
     )
 
     decisions: List[Dict[str, Any]] = []
@@ -395,7 +413,7 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     )
     if project_state == "PAUSED":
         decisions = []
-    elif project_state == "COMPLETE":
+    elif project_state in {"COMPLETE", "ACTION_REQUIRED"}:
         alive_workers = {
             str(row.get("worker") or "")
             for row in worker_rows
@@ -905,6 +923,8 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     )
     return {
         "project_state": project_state,
+        "scientific_complete": science_done,
+        "pending_main_escalations": pending_main_escalations,
         "plan_version": plan_version,
         "plan_changes": pending_plan_changes,
         "frontier": frontier,
