@@ -130,16 +130,21 @@ def test_scientific_dsh_prompt_excludes_legacy_math_harness(tmp: Path):
 def test_scientific_tool_sets():
     assert tools_for("researcher") == [
         "gm_add", "gm_search", "fact_submit", "fact_search", "handoff_request",
-        "implementation_pending_contracts", "implementation_submit_contract",
-        "plan_pending_changes", "plan_propose_change", "search_arxiv_theorems",
+        "implementation_pending_contracts", "implementation_render_task",
+        "implementation_submit_contract", "experiment_protocol_get",
+        "workflow_submit_result", "plan_pending_changes",
+        "plan_propose_change", "search_arxiv_theorems",
     ]
     assert tools_for("reviewer") == [
         "gm_add", "gm_search", "fact_search", "handoff_request",
         "implementation_pending_contracts", "implementation_review_contract",
+        "experiment_protocol_get", "workflow_submit_result",
         "plan_pending_changes", "plan_review_change", "search_arxiv_theorems",
     ]
     assert tools_for("experimenter") == [
-        "gm_add", "gm_search", "fact_search", "handoff_request", "experiment_run",
+        "gm_add", "gm_search", "fact_search", "handoff_request",
+        "experiment_freeze_protocol", "experiment_run",
+        "experiment_protocol_get", "workflow_submit_result",
     ]
     assert "fact_submit" not in tools_for("reviewer")
     assert "fact_submit" not in tools_for("experimenter")
