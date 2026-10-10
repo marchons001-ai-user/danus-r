@@ -492,9 +492,11 @@ class DanusTUI(App[None]):
         self.push_screen(BlockerScreen("\n\n" + ("\n\n" + "-" * 64 + "\n\n").join(sections)))
 
     def _summary_text(self) -> str:
+        outstanding = self.snapshot.get("pending_main_escalations") or []
+        pending = f"    Main requests: {len(outstanding)}" if outstanding else ""
         return (
             f"Project: {self.project_name}    State: {self.snapshot['project_state']}    "
-            f"Plan: v{self.snapshot['plan_version']}"
+            f"Plan: v{self.snapshot['plan_version']}{pending}"
         )
 
     def _quota_text(self) -> str:
@@ -508,8 +510,8 @@ class DanusTUI(App[None]):
         self.notify(message)
 
     def action_toggle_pause(self) -> None:
-        if self.snapshot["project_state"] == "COMPLETE":
-            self.notify("Project is already complete.", severity="warning")
+        if self.snapshot["project_state"] in {"COMPLETE", "ACTION_REQUIRED"}:
+            self.notify("Science is finished; outstanding Main requests need operator review.", severity="warning")
             return
         try:
             if self.snapshot["project_state"] == "PAUSED":
