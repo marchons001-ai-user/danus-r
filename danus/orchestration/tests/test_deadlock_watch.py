@@ -1,4 +1,4 @@
-"""Deterministic tests for journal dedupe, 180s idle detection and safe fallback."""
+"""Deterministic tests for journal dedupe, 45s idle detection and safe fallback."""
 import json
 
 from danus.execution import layout as L
@@ -36,7 +36,7 @@ def _rows():
     ]
 
 
-def test_deadlock_opens_once_after_180_seconds_and_closes_on_progress(tmp_path, monkeypatch):
+def test_deadlock_opens_once_after_45_seconds_and_closes_on_progress(tmp_path, monkeypatch):
     root = tmp_path / "P"
     root.mkdir()
     report, rows = _report(), _rows()
@@ -52,8 +52,8 @@ def test_deadlock_opens_once_after_180_seconds_and_closes_on_progress(tmp_path, 
     ))
     watch = D.DeadlockWatch("P")
     assert watch.observe(report, rows, now=0) is None
-    assert watch.observe(report, rows, now=179) is None
-    detected = watch.observe(report, rows, now=180)
+    assert watch.observe(report, rows, now=44.9) is None
+    detected = watch.observe(report, rows, now=45)
     assert detected["event"] == "DEADLOCK_OPEN"
     assert detected["snapshot"]["pending_handoffs"][0]["kind"] == "ESCALATE"
     assert len(calls) == 1
@@ -257,4 +257,35 @@ def test_different_role_remains_legal_after_researcher_retry(tmp_path, monkeypat
     assert len(dispatched) == 1
     assert dispatched[0]["target_role"] == "reviewer"
     assert D._history(root)[-1]["result"] == "assigned"
+
+
+def test_default_45s_threshold_and_reversible_env_override(tmp_path, monkeypatch):
+    root = tmp_path / "P"
+    root.mkdir()
+    monkeypatch.setattr(L, "project_dir", lambda p: root)
+    monkeypatch.delenv("DANUS_DEADLOCK_IDLE_SECONDS", raising=False)
+    assert D.DeadlockWatch("P").idle_seconds == 45
+    monkeypatch.setenv("DANUS_DEADLOCK_IDLE_SECONDS", "120")
+    assert D.DeadlockWatch("P").idle_seconds == 120
+    assert D.DeadlockWatch("P", idle_seconds=20).idle_seconds == 20
+    monkeypatch.setenv("DANUS_DEADLOCK_IDLE_SECONDS", "0")
+    import pytest
+    with pytest.raises(ValueError, match="finite positive"):
+        D.DeadlockWatch("P")
+    monkeypatch.setenv("DANUS_DEADLOCK_IDLE_SECONDS", "nan")
+    with pytest.raises(ValueError, match="finite positive"):
+        D.DeadlockWatch("P")
+
+
+def test_live_worker_does_not_trigger_45s_watchdog(tmp_path, monkeypatch):
+    root = tmp_path / "P"
+    root.mkdir()
+    report, rows = _report(), _rows()
+    monkeypatch.setattr(L, "project_dir", lambda p: root)
+    rows[0]["alive"] = True
+    assert D._eligible(root, report, rows) is False
+    watch = D.DeadlockWatch("P", idle_seconds=45)
+    assert watch.observe(report, rows, now=0) is None
+    assert watch.observe(report, rows, now=90) is None
+    assert D._history(root) == []
 
