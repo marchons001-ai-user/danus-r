@@ -19,6 +19,24 @@ from . import layout as L
 from . import context as C
 
 
+def _gateway_pythonpath() -> str:
+    """Expose only trusted Danus control dependencies to an external numerical Python.
+
+    The worker's inherited PYTHONPATH is not forwarded to the role-bound Gateway.
+    The optional extra directory must resolve under this repository's existing
+    runtime/venv; this does not grant worker shell access to that venv.
+    """
+    root = Path(__file__).resolve().parents[2]
+    value = os.environ.get("DANUS_TRUSTED_CONTROL_SITE", "").strip()
+    if not value:
+        return str(root)
+    site = Path(value).resolve()
+    control = (root / "runtime" / "venv").resolve()
+    if not site.is_dir() or not site.is_relative_to(control):
+        raise ValueError("trusted control site must exist under runtime/venv")
+    return os.pathsep.join((str(root), str(site)))
+
+
 def _overlaps(path: Path, other: Path) -> bool:
     return path == other or path in other.parents or other in path.parents
 
@@ -283,7 +301,7 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             env = codex.subprocess_env(agent_bin)
             env["CODEX_HOME"] = str(home)
             gateway_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
-                           "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+                           "PYTHONPATH": _gateway_pythonpath(),
                            "DANUS_SANDBOX_CODEX_BIN": str(engine)}
             for key in ("DANUS_VERIFY_URL", "DANUS_VERIFY_TIMEOUT"):
                 if key in os.environ:
