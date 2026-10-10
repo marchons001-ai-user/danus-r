@@ -546,13 +546,11 @@ def load_project_snapshot(project: str) -> Dict[str, Any]:
     plan = ResearchPlanGraph(project_dir).snapshot()
     ledger = ProgressLedger(project_dir)
     completed = _effective_completed(plan, set(ledger.completed_nodes()))
-    pending = _pending_change(project_dir, int(plan["plan_version"]))
-    if plan["root_id"] in completed and not pending:
-        project_state = "COMPLETE"
-    elif (project_dir / L.PAUSE_FILE).is_file():
-        project_state = "PAUSED"
-    else:
-        project_state = "RUNNING"
+    # Match the actual Supervisor's read-only state reduction: a completed
+    # science Plan can still require operator action for OPEN Main escalations.
+    # Reuse the same reducer rather than maintaining a looser UI-only rule.
+    control = C.reconcile(project_dir, C._project_rows(project))
+    project_state = control["project_state"]
 
     nodes: List[Dict[str, Any]] = []
     for node_id, node in plan["nodes"].items():
@@ -584,6 +582,8 @@ def load_project_snapshot(project: str) -> Dict[str, Any]:
     return {
         "project": project,
         "project_state": project_state,
+        "scientific_complete": control["scientific_complete"],
+        "pending_main_escalations": control["pending_main_escalations"],
         "plan_version": int(plan["plan_version"]),
         "root_id": plan["root_id"],
         "nodes": nodes,
