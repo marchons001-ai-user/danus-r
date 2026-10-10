@@ -115,7 +115,6 @@ def inspect(project: str, protocol_id: str, evidence_id: str, *, recompute: bool
     check(report_md.is_file(), "shared Evidence Packet markdown missing")
     reviewer = [a for a in progress.assignments()
                 if a.get("node_id") == "V3" and a.get("role") == "reviewer"]
-    reviewer.sort(key=lambda a: str(a.get("assignment_id") or ""))
     reviewer = [a for a in reviewer if a.get("state") == "DONE"]
     review = reviewer[-1] if reviewer else {}
     check(bool(review), "V3 completed Reviewer assignment not found")
@@ -172,11 +171,11 @@ def inspect(project: str, protocol_id: str, evidence_id: str, *, recompute: bool
         "# Danus-R completed-science evidence audit", "",
         f"Time UTC: {stamp}",
         f"Project: {project} | Plan v{plan['plan_version']} | state: {state['project_state']}",
-        f"Frozen protocol: \`{protocol_id}\` | Evidence: \`{evidence_id}\`",
+        f"Frozen protocol: `{protocol_id}` | Evidence: `{evidence_id}`",
         f"Evidence Packet: {report_md}", "",
         "## Actual recorded metrics", "",
-        "\`\`\`json", json.dumps(primary, indent=2, ensure_ascii=False),
-        "\`\`\`", "",
+        "```json", json.dumps(primary, indent=2, ensure_ascii=False),
+        "```", "",
         f"Independent recomputation: {json.dumps(checked_metrics, ensure_ascii=False)}",
         f"Coverage: {json.dumps(coverage, ensure_ascii=False)}",
         f"Raw artifact files: {len(verified)}; hash pass: {sum(bool(v.get('valid')) for v in verified)}",
