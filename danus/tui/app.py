@@ -11,7 +11,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import DescendantFocus
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Input, Static, Tree
+from textual.widgets import Button, DataTable, Footer, Header, Input, Static, Tree
 
 from danus.orchestration import cli as C
 from danus.orchestration import steering as S
@@ -98,7 +98,11 @@ class InterruptConfirmScreen(ModalScreen):
 class BlockerScreen(ModalScreen):
     """Show the persisted blocker and Main escalation without changing state."""
 
-    BINDINGS = [Binding("escape", "dismiss_blocker", "Close", show=False)]
+    BINDINGS = [
+        Binding("escape", "dismiss_blocker", "Close"),
+        Binding("b", "dismiss_blocker", "Close", show=False),
+        Binding("q", "dismiss_blocker", "Close", show=False),
+    ]
     CSS = """
     BlockerScreen { align: center middle; }
     #blocker-dialog {
@@ -108,6 +112,8 @@ class BlockerScreen(ModalScreen):
         background: $surface;
         padding: 1 2;
     }
+    #blocker-content { height: 1fr; }
+    #blocker-close { width: 100%; margin-top: 1; }
     """
 
     def __init__(self, content: str) -> None:
@@ -115,8 +121,14 @@ class BlockerScreen(ModalScreen):
         self.content = content
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="blocker-dialog"):
-            yield Static(Text(self.content))
+        with Vertical(id="blocker-dialog"):
+            with VerticalScroll(id="blocker-content"):
+                yield Static(Text(self.content))
+            yield Button("Close (Esc / b / q)", id="blocker-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "blocker-close":
+            self.dismiss(None)
 
     def action_dismiss_blocker(self) -> None:
         self.dismiss(None)
