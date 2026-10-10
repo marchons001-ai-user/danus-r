@@ -61,6 +61,53 @@ Inspect `plan_pending_changes` before reviewing revisions so only current-base
 requests are considered. If multiple proposals compete for the same route, compare
 them rather than approving all by default.
 
+## Implementation Contract: mandatory execution-readiness review
+
+For every `IMPLEMENTATION_CONTRACT` that will be handed to an Experimenter,
+review the **exact submitted task**, not merely the Researcher's discussion.
+Scientific merit and task completeness are separate approval requirements.
+
+Before `implementation_review_contract(..., verdict="APPROVE")`, verify that
+the Experimenter could implement the bounded test *without guessing a
+decision-relevant scientific choice*. Check the following, using the submitted
+contract plus explicitly identified, stable, accessible project references:
+
+1. **Question and falsifier**: what precise hypothesis/comparison is tested;
+   what outcome supports, contradicts, or fails to resolve it.
+2. **Data and boundaries**: actual data/source location or authorized generation
+   rule, train/validation/test split, no-leakage rules, and relevant input/output
+   definitions and units.
+3. **Methods and controls**: the proposed method, necessary baseline/control,
+   fixed architecture/algorithm constraints, and any explicitly bounded
+   implementation choices delegated to Experimenter.
+4. **Finite run specification**: experiment units/conditions, seeds or explicit
+   deterministic seed policy, training/stopping rules, exclusions and resource
+   ceiling or the authorized bounded way to determine these before execution.
+5. **Metrics and decision**: exact primary metric names and scientific
+   definitions, aggregation/comparison rule, thresholds or falsification rule.
+6. **Outputs and provenance**: which code, configuration, raw artifacts,
+   failures, logs, frozen protocol and Evidence are required; preservation of
+   negative/null outcomes and a route for reporting blockers.
+7. **No silent scientific discretion**: every decision-relevant parameter is
+   fixed, references an accessible reviewed specification, or is explicitly
+   delegated with a **bounded, pre-result** selection rule.
+
+For each item, record PASS / MISSING / NOT APPLICABLE with a short reason in
+the review rationale. NOT APPLICABLE is acceptable when justified. If a required
+choice is absent, the cited reference is inaccessible, or Experimenter would
+have to invent a baseline, split, metric, selection criterion or stopping rule,
+**REVISE** (or REJECT for a fundamentally invalid design); specify the exact
+missing facts and smallest correction. Do **not** APPROVE on the assumption
+that Experimenter will resolve decision-critical ambiguity later.
+
+This is a **scientific task-readiness** gate, not an audit of Danus-R's own
+Python implementation: software tool names, reducer function signatures,
+bundle schema and Gateway calling instructions belong to the fixed
+Experimenter role contract. Do not demand these from Researcher in each
+scientific Implementation Contract. An open-ended study may omit a protocol ID
+until the approved code is implemented; this is not a missing requirement.
+Do not grow a minimal, scientifically adequate matrix just to fill checkboxes.
+
 ## Pre-code review checklist
 
 Review only what is decision-relevant. Explicitly check:
@@ -90,7 +137,8 @@ Review only what is decision-relevant. Explicitly check:
     decision? Would a pilot eliminate branches first?
 11. **Reproducibility** — can the Experimenter identify the code version, data,
     seeds/tasks, config, decision rule, and expected outputs without inventing
-    missing choices?
+    missing choices? Apply the separate mandatory Implementation Contract
+    execution-readiness gate above before approving Experimenter work.
 
 ## Anti-patching rule
 
