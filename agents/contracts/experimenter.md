@@ -205,13 +205,23 @@ post-hoc adaptation with a pre-specified test.
 
 ## Frozen execution
 
-Use `experiment_run(protocol_id)` through the bound Gateway for the frozen
-protocol bound by the single `EXPERIMENT_PROTOCOL_ID=<id>` line in TASK.md. The host executes declared Python scripts from a
-verified read-only bundle with network disabled. Relative declared artifact
-arguments are mapped into the unit's writable scratch directory. Code and config
-resolve from the frozen working directory; writes must use those artifact paths.
-Do not invoke the host Experiment Runtime through shell tools or write control
-state. Protocol freezing is a trusted host operation before the assignment.
+There are **two** authorized modes; choose based on the exact assigned task:
+
+- **Pre-frozen**: if TASK.md contains `EXPERIMENT_PROTOCOL_ID=<id>`, call
+  `experiment_protocol_get(protocol_id)` when inspection is needed, then
+  `experiment_run(protocol_id)` for that **exact** ID. Do not freeze a new
+  protocol.
+- **Reviewer-approved dynamic implementation**: if there is no exact ID,
+  implement only the approved task in the bound scientific workspace, call
+  `experiment_freeze_protocol(...)`, then call
+  `experiment_run(protocol_id)` using the returned ID. A current independently
+  approved Implementation Contract and active Experimenter Assignment are
+  required. Do not construct IDs or edit the protected Evidence Store.
+
+The trusted host executes only declared, immutable Python scripts from a
+read-only frozen bundle, without network access. A unit's declared artifact
+argument is mapped into writable per-unit scratch. Code/config inputs are
+read-only. No shell-based substitute for the Gateway execution tool is allowed.
 
 ## Reusable report-first handoff
 
@@ -230,6 +240,142 @@ Answer only the stated question using existing results; never rerun an experimen
 or change a frozen protocol under a clarification assignment. If the answer does not
 exist in the saved report/evidence, state exactly what is absent instead of inventing
 an answer or expanding the experiment.
+
+## Fixed Experimenter engineering interface (read before implementation)
+
+This section describes **Danus-R's own stable tool API**, not a scientific choice.
+The Researcher supplies scientific values (data, model, baseline, seeds, metrics,
+decision rule) and Reviewer checks they are complete. Do not make up those
+scientific values. Tools can be selected by the current Assignment: the actual
+Gateway-exposed tool names are authoritative.
+
+### Workflow and Gateway tool arguments
+
+1. Read TASK.md, reviewed scientific scope and the trusted
+   `<APPROVED_EXPERIMENT_BINDING>` block (current Contract/Assignment IDs,
+   Python interpreter and dependency versions). Verify data access and compute
+   before authoring code. Do not install dependencies or change the interpreter
+   yourself.
+2. Write the **smallest** approved Python unit scripts, configurations and
+   reducer file inside `workspace/`. All file arguments to the freeze tool
+   must be relative to the scientific workspace root, e.g. `pilot.py` and
+   `metric.py` — **never** absolute paths or paths beginning with `../`.
+3. For a dynamic task use bound Gateway `experiment_freeze_protocol` with:
+   `question: str`, `hypothesis: str`, `matrix: dict`,
+   `primary_metrics: list[str]`, `decision_rule: str`,
+   `metric_reducer_path: str`, `execution_files: list[str]`, and optional
+   `metric_reducer_function: str = "reduce_metrics"`.
+   This tool requires an approved, current Implementation Contract; it creates
+   the frozen source bundle and returns `protocol_id`, `bundle_id`,
+   `status`, Contract ID and Assignment ID. It **does not execute** the experiment.
+4. Call `experiment_run(protocol_id: str)` via Gateway **once for the same
+   frozen protocol**. It validates approval, pinned code/data/environment,
+   executes the finite matrix, computes and verifies primary metrics, writes
+   Evidence, and returns an evidence ID, metrics and report information. Read
+   the returned report; preserve all failures and adverse outcomes.
+5. Hand back the exact Evidence ID, raw-artifact references, what ran versus
+   what was approved, and any remaining blocker. Do not claim success before
+   `experiment_run` produces verifiable evidence.
+
+Minimal **shape-only** example (replace the names/values with the actual
+Reviewer-approved scientific design, do not invent a pilot in real research):
+
+```python
+experiment_freeze_protocol(
+    question="Approved scientific question here",
+    hypothesis="Approved falsifiable hypothesis here",
+    matrix={"units": [{
+        "id": "u1",
+        "argv": ["python", "pilot.py", "raw/u1.json"],
+        "artifacts": ["raw/u1.json"],
+        "inputs": [],
+    }]},
+    primary_metrics=["mean_error"],
+    decision_rule="Approved numerical decision rule here",
+    metric_reducer_path="metric.py",
+    execution_files=["pilot.py"],
+    metric_reducer_function="reduce_metrics",
+)
+# Read returned protocol_id, then:
+# experiment_run(protocol_id="<exact returned 16-character ID>")
+```
+
+Each `matrix.units` entry must have a unique, stable `id`, a string
+`argv` starting with `"python"` or `"python3"` followed by a Python
+script listed in `execution_files`, and nonempty declared relative
+`artifacts` paths. `inputs` is a list of workspace-relative file paths
+(or exact `{path, sha256, size}` references); declare every actually used
+input. Each output written by the unit script must use the artifact path
+passed in its command-line arguments, rather than writing to arbitrary
+directories. Frozen units have **no network** and cannot write into the
+frozen code/data bundle.
+
+### Required metric reducer function: exact signature and return value
+
+The reducer is a regular Python file in `workspace/`. The frozen runtime
+loads it and **calls exactly**:
+
+```python
+from pathlib import Path
+
+def reduce_metrics(protocol: dict, artifacts: list[Path]) -> dict[str, float]:
+    # artifacts holds paths to the actual raw artifact files from all units.
+    # Compute ONLY the Reviewer-approved metric(s) from those files.
+    # Return exactly one finite numeric value for every primary metric.
+    ...
+```
+
+- `protocol` is the **frozen protocol dictionary**, including
+  `protocol["primary_metrics"]` and `protocol["matrix"]`. It is not a file
+  path, not an argparse Namespace, and not a list of metric names.
+- `artifacts` is a `list[pathlib.Path]` of already-produced **raw artifact
+  files**, not a list of dictionaries or output directories. Read and aggregate
+  them according to the **approved** metric definition.
+- The return object **must be a Python dict** with keys **exactly matching**
+  `protocol["primary_metrics"]`; every value must be a finite real number,
+  not bool, None, NaN, Infinity, or an unaggregated array.
+- The function name defaults to `reduce_metrics`. If the reviewed task
+  explicitly requires a different valid function name, pass it as
+  `metric_reducer_function` to the freeze tool.
+- The trusted runtime independently reruns this reducer in a **restricted
+  sandbox** to recompute/check primary metrics. Do not attempt network access,
+  mutate evidence, or depend on ambient project/control directories.
+
+A **format example only** for a scientifically approved mean of per-unit
+`error` values (real metric and denominator must come from the review):
+
+```python
+import json
+
+def reduce_metrics(protocol, artifacts):
+    values = [float(json.loads(path.read_text())["error"])
+              for path in artifacts]
+    if not values:
+        raise ValueError("no raw artifacts")
+    return {"mean_error": sum(values) / len(values)}
+```
+
+### Deterministic failures and recovery
+
+- No Reviewer APPROVE, stale Assignment, or wrong Contract: **stop** and
+  report the real authority error. Never self-approve, alter TASK.md or
+  retry an unchanged Assignment to bypass it.
+- `FileNotFoundError`, bad workspace-relative path, missing artifact, or
+  rejected hash: correct local file/path plumbing **within approved scope**
+  before freeze. Never edit the trusted evidence bundle.
+- Reducer signature mismatch, missing function, metric-key mismatch or
+  nonfinite result: use the exact signature above and correct **code bugs**
+  without changing the Reviewer-approved metric definition.
+- If `experiment_run` fails for an individual unit, inspect its returned
+  status/checkpoint/log; **do not** silently rerun an interrupted/failed unit,
+  re-freeze a new protocol, change seeds, or hide a failed cell. Escalate if a
+  fresh experiment approval or governed recovery is required.
+- Missing numeric package or GPU: report the bound interpreter and requested
+  dependency/resource; no package installation from the restricted worker.
+- Missing scientific input (baseline, split, seed policy, metric definition,
+  stop rule): ask for **scientific clarification** from Researcher/Reviewer,
+  rather than guessing. Missing tool signature: consult this fixed contract
+  and the exposed tool schema; it is **not** scientific ambiguity.
 
 ## Dynamic protocol authorization after Reviewer approval
 
