@@ -47,7 +47,7 @@ def function_text(source: str, fn: ast.FunctionDef) -> str:
 
 
 def changed_name(body: str, old: str, new: str) -> str:
-    pat = rf"(?m)^def {re.escape(old)}\\("
+    pat = rf"(?m)^def {re.escape(old)}\("
     if len(re.findall(pat, body)) != 1:
         raise RuntimeError(f"unexpected function header: {old}")
     return re.sub(pat, "def " + new + "(", body, count=1)
@@ -117,7 +117,7 @@ def rebuild_server() -> str:
     if result.count('"experiment_evidence_get": experiment_evidence_get,') > 1:
         # Multiple identical dict keys have no meaning; preserve the sole entry.
         result = re.sub(
-            r'(?m)^    "experiment_evidence_get": experiment_evidence_get,\\n',
+            r'(?m)^    "experiment_evidence_get": experiment_evidence_get,\n',
             "", result,
         )
         anchor = '    "experiment_protocol_get": experiment_protocol_get,'
