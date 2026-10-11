@@ -18,6 +18,7 @@ ALL_TOOLS: Tuple[str, ...] = (
     "experiment_run",
     "experiment_freeze_protocol",
     "experiment_protocol_get",
+    "experiment_evidence_get",
     "workflow_submit_result",
     "implementation_pending_contracts",
     "implementation_render_task",
@@ -39,7 +40,7 @@ ROLE_TOOLS: Dict[str, Tuple[str, ...]] = {
         "gm_add", "gm_search", "fact_submit", "fact_search", "handoff_request",
         "implementation_pending_contracts", "implementation_render_task",
         "implementation_submit_contract",
-        "experiment_protocol_get", "workflow_submit_result",
+        "experiment_protocol_get", "experiment_evidence_get", "workflow_submit_result",
         "plan_pending_changes", "plan_propose_change", "search_arxiv_theorems",
     ),
     "reviewer": (
