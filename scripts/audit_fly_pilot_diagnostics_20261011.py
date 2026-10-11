@@ -12,6 +12,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 
@@ -57,7 +58,13 @@ def field_inventory(data: object):
         elif isinstance(value, list):
             summary = {"type": "array", "length": len(value)}
         else:
-            summary = {"type": type(value).__name__, "value": value}
+            # Preserve malformed/non-finite source diagnostics as strings in
+            # the derived audit instead of crashing or silently rounding them.
+            printable = (
+                repr(value) if isinstance(value, float) and not math.isfinite(value)
+                else value
+            )
+            summary = {"type": type(value).__name__, "value": printable}
             if isinstance(value, str) and len(value) > 200:
                 summary["value"] = value[:200] + "..."
         # Matching is based on field *names*, not on guessed values.
