@@ -268,13 +268,26 @@ def main() -> None:
     out_server = rebuild_server()
     out_roles, permissions = rebuild_roles()
     out_tests = rebuild_test(permissions)
-    outputs = {SERVER: out_server, ROLES: out_roles, TESTS: out_tests}
+    # The remote branch received a follow-up test correction after the user
+    # began this merge. Import that exact tested source too; do not leave a
+    # stale test on disk from the original MERGE_HEAD commit.
+    if subprocess.run(["git", "diff", "--quiet", "--", NEW_TESTS]).returncode:
+        raise RuntimeError("local Evidence regression test has uncommitted edits")
+    remote_test = git("show", BRANCH + ":" + NEW_TESTS)
+    resolver_name = "scripts/resolve_interpret_evidence_merge_20261011.py"
+    remote_resolver = git("show", BRANCH + ":" + resolver_name)
+    outputs = {
+        SERVER: out_server, ROLES: out_roles, TESTS: out_tests,
+        NEW_TESTS: remote_test, resolver_name: remote_resolver,
+    }
     for path, contents in outputs.items():
         tree(contents)
     # Local code is preserved in the new _legacy_ helper. No runtime data touched.
     for path, contents in outputs.items():
-        Path(path).write_text(contents, encoding="utf-8")
-    subprocess.check_call(["git", "add", SERVER, ROLES, TESTS])
+        dest = Path(path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(contents, encoding="utf-8")
+    subprocess.check_call(["git", "add", *outputs])
     assert not git("diff", "--name-only", "--diff-filter=U")
     print("OK: original Evidence getter retained as _legacy_experiment_evidence_get")
     print("OK: new scoped INTERPRET Evidence lookup installed")
