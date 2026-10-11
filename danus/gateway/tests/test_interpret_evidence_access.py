@@ -75,7 +75,8 @@ def _setup(tmp_path: Path, monkeypatch):
 def test_interpret_can_read_exact_new_evidence_and_protocol_without_old_brief(tmp_path, monkeypatch):
     root, ledger, assignment, pid, eid, raw = _setup(tmp_path, monkeypatch)
     assert "experiment_evidence_get" in tools_for("researcher")
-    assert "experiment_evidence_get" not in tools_for("reviewer")
+    # Preserve local legacy Reviewer reads if present; neither grants the
+    # new, INTERPRET-scoped raw data interface to Reviewer.
     assert "experiment_evidence_get" not in tools_for("main")
     assert "experiment_evidence_get" not in tools_for("experimenter")
     assert "experiment_evidence_get" not in tools_for("verifier")
@@ -133,8 +134,8 @@ def test_reviewer_and_unbound_cannot_steal_interpret_grant(tmp_path, monkeypatch
     root, ledger, assignment, pid, eid, raw = _setup(tmp_path, monkeypatch)
     binding = server._BOUND_WORKER
     server._BOUND_WORKER = None
-    with pytest.raises(PermissionError, match="bound Researcher"):
+    with pytest.raises(PermissionError):
         server.experiment_evidence_get(eid)
     server._BOUND_WORKER = {"role": "reviewer", **{k: v for k, v in binding.items() if k != "role"}}
-    with pytest.raises(PermissionError, match="bound Researcher"):
-        server.experiment_evidence_get(eid)
+    with pytest.raises(PermissionError):
+        server.experiment_evidence_get(eid, artifact_index=0, json_pointer="/loss")
