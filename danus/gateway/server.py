@@ -615,6 +615,49 @@ def handoff_request(
     }
 
 
+def experiment_evidence_get(
+    evidence_id: str,
+    artifact_index: Optional[int] = None,
+    json_pointer: str = "",
+) -> Dict[str, Any]:
+    """Read only Evidence bound to this Researcher's active INTERPRET handoff.
+
+    Plain lookup returns verified Evidence and frozen protocol metadata with
+    artifact refs. Specify artifact_index + optional RFC6901 json_pointer to
+    read a small hash-checked JSON portion. No arbitrary paths, rerun or writes.
+    """
+    from .evidence_access import authorized_interpret_evidence, select_verified_json_artifact
+
+    if _BOUND_WORKER is None or _BOUND_WORKER.get("role") != "researcher":
+        raise PermissionError("Evidence lookup requires a bound Researcher")
+    with capability.scope(_BOUND_WORKER):
+        ledger = _pl()
+        assignment = ledger.current(_author(), refresh_stale=False)
+        if (not assignment
+            or assignment.get("assignment_id") != _BOUND_WORKER["assignment_id"]):
+            raise PermissionError("Evidence lookup requires the exact active task")
+        root = _project()
+        record, protocol = authorized_interpret_evidence(root, ledger, assignment, evidence_id)
+        answer = {
+            "evidence_id": evidence_id,
+            "protocol_id": protocol["protocol_id"],
+            "protocol": protocol,
+            "primary_metrics": record.get("primary_metrics", {}),
+            "matrix_coverage": record.get("matrix_coverage", {}),
+            "failures": record.get("failures", []),
+            "deviations": record.get("deviations", []),
+            "artifacts": record.get("artifacts", []),
+            "source": "immutable Evidence authorized by exact INTERPRET handoff",
+        }
+        if artifact_index is not None:
+            answer["selected_raw_json"] = select_verified_json_artifact(
+                root, protocol["protocol_id"], record, artifact_index, json_pointer,
+            )
+        elif json_pointer:
+            raise ValueError("json_pointer requires artifact_index")
+        return answer
+
+
 # --------------------------------------------------------------------------- #
 # pre-code semantic alignment gate                                            #
 # --------------------------------------------------------------------------- #
@@ -709,6 +752,21 @@ def experiment_protocol_get(protocol_id: str) -> Dict[str, Any]:
         if (assignment.get("role") == "experimenter"
             and not re.search(r"^EXPERIMENT_PROTOCOL_ID=", task, re.MULTILINE)):
             return {"protocol": _approved_dynamic_protocol(assignment, protocol_id, pin=False)}
+        # An INTERPRET task derives its read authority from the immutable
+        # source Experimenter's Handoff evidence_refs, not the older frozen
+        # research brief (which predates the newly executed protocol).
+        if assignment.get("role") == "researcher" and assignment.get("handoff_id"):
+            handoff = HandoffRequests(ledger).get(assignment["handoff_id"])
+            if handoff and handoff.get("kind") == "INTERPRET":
+                from .evidence_access import authorized_interpret_evidence
+                for evidence_id in handoff.get("evidence_refs", []):
+                    record = EvidenceStore(_project()).get_record(evidence_id)
+                    if record and record.get("protocol_id") == protocol_id:
+                        _, authorized = authorized_interpret_evidence(
+                            _project(), ledger, assignment, evidence_id,
+                        )
+                        return {"protocol": authorized}
+                raise PermissionError("protocol not bound to current INTERPRET Evidence")
         if protocol_id not in task:
             raise PermissionError("protocol is not referenced by the assigned task")
         brief = (_project() / "RESEARCH_BRIEF.md")
@@ -1257,6 +1315,7 @@ _TOOLS = {
     "experiment_freeze_protocol": experiment_freeze_protocol,
     "implementation_pending_contracts": implementation_pending_contracts,
     "experiment_protocol_get": experiment_protocol_get,
+    "experiment_evidence_get": experiment_evidence_get,
     "workflow_submit_result": workflow_submit_result,
     "implementation_render_task": implementation_render_task,
     "implementation_submit_contract": implementation_submit_contract,
@@ -1274,7 +1333,7 @@ def _bound_tool(fn):
     def call(*args, **kwargs):
         if fn.__name__ in {
             "fact_submit", "experiment_run", "experiment_freeze_protocol", "handoff_request", "implementation_submit_contract", "plan_propose_change",
-            "implementation_review_contract", "plan_review_change", "experiment_protocol_get", "workflow_submit_result",
+            "implementation_review_contract", "plan_review_change", "experiment_protocol_get", "experiment_evidence_get", "workflow_submit_result",
         }:
             # These functions enforce their own capability scope/locks; do not
             # wrap them again or flock() can deadlock against this same process.
