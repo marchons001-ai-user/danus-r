@@ -132,7 +132,7 @@ def test_scientific_tool_sets():
         "gm_add", "gm_search", "fact_submit", "fact_search", "handoff_request",
         "implementation_pending_contracts", "implementation_render_task",
         "implementation_submit_contract", "experiment_protocol_get",
-        "workflow_submit_result", "plan_pending_changes",
+        "experiment_evidence_get", "workflow_submit_result", "plan_pending_changes",
         "plan_propose_change", "search_arxiv_theorems",
     ]
     assert tools_for("reviewer") == [
