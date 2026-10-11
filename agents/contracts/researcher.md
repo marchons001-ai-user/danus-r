@@ -164,6 +164,33 @@ instructions** belong to the Experimenter role contract, not your scientific
 proposal. The Reviewer independently checks this handoff for both scientific
 validity and execution readiness before approving.
 
+## Reading experiment Evidence during a bound INTERPRET handoff
+
+A protocol created *after* Reviewer approval is not named in the original
+`RESEARCH_BRIEF.md`. Do **not** invent a protocol ID or ask the operator to
+edit the brief. For an active INTERPRET handoff with immutable `evidence_refs`,
+use the bound read-only Gateway tools:
+
+1. `experiment_evidence_get(evidence_id="<exact ID in handoff>")` returns
+   the frozen protocol, original primary metrics, coverage, failures, deviations
+   and indexed raw-artifact references. It does **not** run or alter experiments.
+2. To inspect a small nested JSON result, use
+   `experiment_evidence_get(evidence_id="<same ID>", artifact_index=0,
+   json_pointer="/actual/existing/key")`. Indices refer to the returned
+   `artifacts` list; inspect the returned JSON keys instead of guessing.
+   The Gateway validates the stored file's SHA-256 and rejects paths outside
+   the frozen experiment output, binary files, excessive output and arbitrary
+   Evidence IDs. A missing JSON key is not evidence of a scientific outcome.
+3. `experiment_protocol_get(protocol_id="<protocol ID returned above>")`
+   also works for this exact approved INTERPRET Evidence, even though the
+   historical brief cannot contain the dynamic protocol ID.
+
+These grants exist **only while the exact INTERPRET assignment and handoff
+are active**. Other assignments, unrelated Evidence IDs, stale workers and
+the original Model training controls remain unauthorized. If a needed
+provenance field is genuinely absent from the immutable raw data, record the
+gap; do not manufacture it, rerun the experiment or alter the Evidence.
+
 ## Required handoff: Research Proposal
 
 Before asking for nontrivial code or experiments, produce a concise proposal with:
