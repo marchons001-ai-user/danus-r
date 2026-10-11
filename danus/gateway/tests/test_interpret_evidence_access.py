@@ -117,6 +117,16 @@ def test_hash_mismatch_is_not_disclosed_as_raw_evidence(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="size differs"):
         server.experiment_evidence_get(eid, artifact_index=0, json_pointer="/loss")
     assert server.experiment_evidence_get(eid)["evidence_id"] == eid
+    # A same-size payload edit must be rejected by SHA-256, not just size.
+    untouched = json.dumps({"loss": 0.7, "diagnostics": {
+        "hardware": "cpu", "successful_swaps": 5,
+        "nested": {"peak_memory_mb": 123},
+    }})
+    tampered = untouched.replace('"cpu"', '"gpu"')
+    assert len(tampered) == len(untouched)
+    raw.write_text(tampered, encoding="utf-8")
+    with pytest.raises(PermissionError, match="hash differs"):
+        server.experiment_evidence_get(eid, artifact_index=0, json_pointer="/loss")
 
 
 def test_reviewer_and_unbound_cannot_steal_interpret_grant(tmp_path, monkeypatch):
