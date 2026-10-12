@@ -82,6 +82,12 @@ def _resume_worker(
     ledger = ProgressLedger(pdir) if ledger_path.is_file() else None
     current = ledger.current(worker, refresh_stale=True) if ledger else None
 
+    # Do not let the older BLOCKED/NEEDS_REVIEW recovery branch implicitly
+    # clear an unrelated system-owned budget pause.
+    if (current and current.get("state") == "BLOCKED"
+            and str(row.get("pause_reason") or "").startswith("budget:")):
+        return [{"worker": worker, "result": "system-paused"}]
+
     if current and current.get("state") == "BLOCKED":
         outcome = str(current.get("outcome") or "").upper()
         if outcome == "NEEDS_REVIEW":
