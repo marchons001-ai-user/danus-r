@@ -264,3 +264,16 @@ def test_final_review_must_cover_latest_science_not_just_any_old_review(tmp_path
                                  "verdict": "INCONCLUSIVE"})
     v8.apply_decision(s, {"action": "finish", "reason": "Scoped inconclusive conclusion"}, "low")
     assert s.state()["done"]
+
+
+def test_prompt_writing_targets_leave_room_for_valid_long_protocols():
+    # Suggested length is an LLM writing target, not a change to recovery limits.
+    assert "target at most 10,000 characters" in v8._WORKER_POLICY
+    assert "target at most 5,000 characters" in v8._WORKER_POLICY
+    assert "target at most 1,500 characters" in v8._WORKER_POLICY
+    assert "target at most 800 characters" in v8._WORKER_POLICY
+    assert "at most 4,000 characters" in v8._SUPERVISOR_POLICY
+    assert "CHARACTERS, not words" in v8._WORKER_POLICY
+    assert len(v8._proposal("x" * 19689)["content"]) == 19689
+    with pytest.raises(ValueError, match="32768"):
+        v8._proposal("x" * 32769)
