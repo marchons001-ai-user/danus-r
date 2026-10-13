@@ -122,7 +122,7 @@ class Store:
                  "assets": {}, "last": events[-1], "done": False, "halt": "",
                  "final_review": None, "material_seq": 0,
                  "last_experiment_seq": 0, "last_interpret_seq": 0,
-                 "validations": {}, "latest_validation": None
+                 "validations": {}, "latest_validation": None}
         for e in events[1:]:
             kind = e["kind"]
             if kind == "TASK":
