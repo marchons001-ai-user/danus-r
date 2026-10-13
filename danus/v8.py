@@ -342,15 +342,19 @@ def apply_decision(store: Store, choice: dict, level: str):
                 "Independently review the exact pending experiment proposal "
                 + proposal_id + ". State APPROVE, REVISE or REJECT with reasoning."
             )
+        material_version = state["material_seq"] if purpose in (
+            "interpret", "final_review") else 0
         if any(t["role"] == role and t["purpose"] == purpose
                and t["instruction"] == instruction and t["status"] != "BLOCKED"
+               and (purpose not in ("interpret", "final_review")
+                    or t["review_basis_seq"] == material_version)
                for t in state["tasks"].values()):
-            raise ValueError("identical task already exists")
+            raise ValueError("identical task already exists for this evidence version")
         task_id = _task_id(store)
         store.append("DECISION", level=level, action=action, reason=reason, task_id=task_id)
         store.append("TASK", id=task_id, role=role, purpose=purpose,
                      instruction=instruction, proposal_id=proposal_id, request_id=request_id,
-                     review_basis_seq=state["material_seq"] if purpose == "final_review" else 0)
+                     review_basis_seq=material_version)
         return task_id
     if action == "answer":
         request_id = choice.get("request_id", "")
