@@ -675,9 +675,11 @@ def main(argv=None):
     new.add_argument("project")
     new.add_argument("--goal-file", type=Path, required=True)
     new.add_argument("--reference", default="")
-    for command in ("run", "step", "status", "recover"):
+    for command in ("run", "step", "status", "recover", "unblock"):
         sub = commands.add_parser(command)
         sub.add_argument("project")
+        if command == "unblock":
+            sub.add_argument("--reason", required=True)
         if command == "run":
             sub.add_argument("--max-steps", type=int, default=0)
             sub.add_argument("--worker-timeout", type=int, default=1200)
@@ -692,6 +694,13 @@ def main(argv=None):
         return
     if args.command == "status":
         status(store)
+        return
+    if args.command == "unblock":
+        with store.lock():
+            if not store.state()["halt"]:
+                raise ValueError("project is not halted")
+            store.append("UNHALT", reason=_limit_text(args.reason, "reason", max_len=1000))
+            store.publish()
         return
     if args.command == "recover":
         with store.lock():
