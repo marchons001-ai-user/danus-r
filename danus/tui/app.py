@@ -466,8 +466,11 @@ class DanusTUI(App[None]):
         if len(reason) > 140:
             reason = reason[:139] + "…"
         escalation = (
-            f"ESCALATE {issue['escalation_id'][:8]} -> {issue['escalation_target']}"
-            if issue.get("escalation_id") else "NO OPEN MAIN ESCALATION"
+            "V8 WORKER FAILURE — see saved log / recover via V8 CLI"
+            if self.is_v8 else (
+                f"ESCALATE {issue['escalation_id'][:8]} -> {issue['escalation_target']}"
+                if issue.get("escalation_id") else "NO OPEN MAIN ESCALATION"
+            )
         )
         extra = f" (+{len(blockers) - 1} more)" if len(blockers) > 1 else ""
         return (
