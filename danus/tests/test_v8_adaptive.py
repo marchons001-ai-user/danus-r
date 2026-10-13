@@ -139,3 +139,48 @@ def test_existing_tui_can_display_live_v8_project(tmp_path, monkeypatch):
         "progress_state"] == "RUNNING"
     assert any(n["node_id"] == task for n in snapshot["nodes"])
     assert any(a["source"] == "RUNNING" for a in snapshot["activity"])
+
+
+def test_long_completed_codex_json_is_not_truncated_and_can_be_salvaged(tmp_path):
+    s = new_store(tmp_path)
+    task = dispatch(s, "researcher", "Make a bounded scientific proposal")
+    start(s, task)
+    s.append("RESULT", task_id=task, status="BLOCKED",
+             summary="execution/validation error: JSONDecodeError: Expecting value",
+             proposal=None, review=None, verdict="")
+    output = {"action": "complete", "summary": "Detailed outcome: " + "x" * 10000,
+              "proposal": "One seed; 2 minutes; compare noisy angles to baseline."}
+    log = s.root / "logs" / (task + "-4.jsonl")
+    log.parent.mkdir(exist_ok=True)
+    log.write_text("\n".join(json.dumps(x) for x in [
+        {"type": "thread.started", "thread_id": "offline"},
+        {"type": "item.completed", "item": {
+            "type": "agent_message", "text": json.dumps(output)}},
+        {"type": "turn.completed", "usage": {
+            "input_tokens": 1, "output_tokens": 1}},
+    ]) + "\n")
+    assert v8._completed_model_reply(log) == output
+    assert v8.recover_model_result(s, task)["status"] == "COMPLETE"
+    assert len(s.state()["tasks"]) == 1
+    assert len(s.state()["proposals"]) == 1
+    assert any(e["kind"] == "RECOVERY" for e in s.read())
+
+
+def test_worker_failure_does_not_dispatch_the_role_again_in_same_step(tmp_path, monkeypatch):
+    s = new_store(tmp_path)
+    calls = []
+    def model(store, level, error=""):
+        calls.append(level)
+        return {"action": "dispatch", "role": "researcher", "purpose": "work",
+                "task": "Analyze the existing data", "reason": "Necessary"}
+    def broken_worker(store, task_id, *, timeout=1200):
+        store.append("RUNNING", task_id=task_id)
+        store.append("RESULT", task_id=task_id, status="BLOCKED",
+                     summary="execution/validation error: JSONDecodeError",
+                     proposal=None, review=None, verdict="")
+        raise json.JSONDecodeError("bad model result", "", 0)
+    monkeypatch.setattr(v8, "_supervisor", model)
+    monkeypatch.setattr(v8, "_worker", broken_worker)
+    assert v8.step(s) == "WORKER_BLOCKED"
+    assert calls == ["low"]
+    assert len(s.state()["tasks"]) == 1
