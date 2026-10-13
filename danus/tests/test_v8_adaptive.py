@@ -277,3 +277,100 @@ def test_prompt_writing_targets_leave_room_for_valid_long_protocols():
     assert len(v8._proposal("x" * 19689)["content"]) == 19689
     with pytest.raises(ValueError, match="32768"):
         v8._proposal("x" * 32769)
+
+
+
+def test_researcher_may_reference_registered_artifacts_without_reregistering(tmp_path):
+    s = new_store(tmp_path)
+    exp = dispatch(s, "researcher", "Propose an experiment")
+    start(s, exp)
+    v8._worker_result(s, exp, {"action": "complete", "summary": "Design",
+                               "proposal": "One approved experiment, fixed condition"})
+    pid = next(iter(s.state()["proposals"]))
+    rv = dispatch(s, "reviewer", "Review experiment", "review_experiment", proposal_id=pid)
+    start(s, rv)
+    v8._worker_result(s, rv, {"action": "complete", "summary": "Approved", "verdict": "APPROVE"})
+    run = dispatch(s, "experimenter", "Produce measurements", "experiment", proposal_id=pid)
+    original = s.root / "workspace" / "output.csv"
+    original.write_text("x,error\n1,0.4\n")
+    start(s, run)
+    v8._worker_result(s, run, {"action": "complete", "summary": "Measured",
+                               "artifacts": ["output.csv"]})
+    before = s.state()["assets"]["output.csv"].copy()
+    interp = dispatch(s, "researcher", "Interpret output", "interpret")
+    start(s, interp)
+    v8._worker_result(s, interp, {
+        "action": "complete", "summary": "The registered artifact supports this interpretation",
+        "artifacts": ["output.csv"]
+    })
+    assert s.state()["tasks"][interp]["status"] == "COMPLETE"
+    assert s.state()["assets"]["output.csv"] == before
+    assert len([e for e in s.read() if e["kind"] == "ASSET"]) == 1
+    assert s.state()["last_interpret_seq"] > s.state()["last_experiment_seq"]
+
+
+def test_non_experiment_roles_cannot_register_unrecorded_files(tmp_path):
+    s = new_store(tmp_path)
+    task = dispatch(s, "researcher", "Examine an existing dataset")
+    (s.root / "workspace" / "unregistered.txt").write_text("unverified")
+    start(s, task)
+    with pytest.raises(PermissionError, match="unregistered artifact"):
+        v8._worker_result(s, task, {
+            "action": "complete", "summary": "Invalid request",
+            "artifacts": ["unregistered.txt"]})
+    assert "unregistered.txt" not in s.state()["assets"]
+
+
+def test_safely_salvage_role_artifact_reference_error(tmp_path):
+    s = new_store(tmp_path)
+    reference = s.root / "workspace" / "measurements.csv"
+    reference.write_text("estimate\n0.4\n")
+    original = {"path": "measurements.csv",
+                "sha256": hashlib.sha256(reference.read_bytes()).hexdigest(),
+                "bytes": reference.stat().st_size, "task_id": "task-source",
+                "description": "Previously measured"}
+    s.append("ASSET", **original)
+    task = dispatch(s, "researcher", "Interpret experiment")
+    start(s, task)
+    s.append("RESULT", task_id=task, status="BLOCKED",
+             summary="execution/validation error: PermissionError: only Experimenter may register new files as artifacts",
+             proposal=None, review=None, verdict="")
+    final = {"action": "complete", "summary": "Read the recorded measurements",
+             "artifacts": ["measurements.csv"]}
+    log = s.root / "logs" / (task + "-5.jsonl")
+    log.parent.mkdir(exist_ok=True)
+    log.write_text("\n".join(json.dumps(x) for x in (
+        {"type": "item.completed", "item": {"type": "agent_message",
+                                            "text": json.dumps(final)}},
+        {"type": "turn.completed"},
+    )) + "\n")
+    assert v8.recover_model_result(s, task)["status"] == "COMPLETE"
+    assert s.state()["assets"]["measurements.csv"] == original
+    assert len([e for e in s.read() if e["kind"] == "ASSET"]) == 1
+    assert any(e["kind"] == "RECOVERY" for e in s.read())
+
+
+def test_tui_highlights_current_blocker_but_not_older_failures(tmp_path, monkeypatch):
+    from danus.tui.v8_state import load_v8_project_snapshot
+    monkeypatch.setenv("DANUS_RUNTIME", str(tmp_path))
+    s = v8.Store(v8.project_root("blocker"))
+    v8.initialize(s, "Investigate measurement noise.")
+    old = dispatch(s, "researcher", "Old task")
+    start(s, old)
+    s.append("RESULT", task_id=old, status="BLOCKED", summary="old error",
+             proposal=None, review=None, verdict="")
+    now = dispatch(s, "researcher", "Current task")
+    start(s, now)
+    s.append("RESULT", task_id=now, status="BLOCKED", summary="current error",
+             proposal=None, review=None, verdict="")
+    snap = load_v8_project_snapshot("blocker")
+    assert snap["project_state"] == "RUNNING"
+    assert snap["failed_task_count"] == 1
+    assert len(snap["blockers"]) == 1
+    assert snap["blockers"][0]["assignment_id"] == now
+    successor = dispatch(s, "reviewer", "New independent work")
+    start(s, successor)
+    v8._worker_result(s, successor, {"action": "complete", "summary": "Done"})
+    snap = load_v8_project_snapshot("blocker")
+    assert snap["blockers"] == []
+    assert snap["failed_task_count"] == 2
