@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from danus import codex
+from danus import v8_validation
 
 ROLES = ("researcher", "reviewer", "experimenter")
 MODES = ("work", "answer", "experiment", "interpret", "review_experiment", "final_review")
@@ -120,7 +121,8 @@ class Store:
                  "tasks": {}, "requests": {}, "proposals": {},
                  "assets": {}, "last": events[-1], "done": False, "halt": "",
                  "final_review": None, "material_seq": 0,
-                 "last_experiment_seq": 0, "last_interpret_seq": 0}
+                 "last_experiment_seq": 0, "last_interpret_seq": 0,
+                 "validations": {}, "latest_validation": None
         for e in events[1:]:
             kind = e["kind"]
             if kind == "TASK":
@@ -166,6 +168,7 @@ class Store:
                 if e.get("proposal"):
                     pid = e["proposal"]["id"]
                     state["proposals"][pid] = {"id": pid, "content": e["proposal"]["content"],
+                                               "required_checks": e["proposal"].get("required_checks", []),
                                                "status": "PENDING", "by": e["task_id"]}
                 if e.get("review"):
                     review = e["review"]
@@ -178,6 +181,12 @@ class Store:
                 state["material_seq"] = e["seq"]
                 state["assets"][e["path"]] = {k: e[k] for k in
                     ("path", "sha256", "bytes", "task_id", "description")}
+            elif kind == "VALIDATION":
+                report = {"task_id": e["task_id"], "proposal_id": e["proposal_id"],
+                          "status": e["status"], "checks": e["checks"],
+                          "reason": e["reason"], "seq": e["seq"]}
+                state["validations"][e["task_id"]] = report
+                state["latest_validation"] = report
             elif kind == "FINISH":
                 state["done"] = True
             elif kind == "RESET":
@@ -207,7 +216,11 @@ class Store:
         for asset in state["assets"].values():
             lines.append(f"- {asset['path']} sha256={asset['sha256']} "
                          f"from {asset['task_id']}")
-        lines += ["", f"Done: {state['done']}", f"Halt: {state['halt']}"]
+        validation = state["latest_validation"]
+        lines += ["", "## Latest experiment validation",
+                  (f"{validation['status']} / {validation['task_id']}: "
+                   f"{validation['reason']}" if validation else "No validated experiment"),
+                  "", f"Done: {state['done']}", f"Halt: {state['halt']}"]
         _write(self.root / "PROJECT_STATE.md", "\n".join(lines) + "\n")
         _write(self.root / "ASSET_INDEX.json",
                json.dumps(state["assets"], ensure_ascii=False, indent=2) + "\n")
@@ -249,9 +262,14 @@ def initialize(store: Store, goal: str, reference=""):
         store.publish()
 
 
-def _proposal(proposal):
+def _proposal(proposal, required_checks=None):
     text = _limit_text(proposal, "proposal", max_len=32768)
-    return {"id": _hash({"proposal": text})[:16], "content": text}
+    checks = v8_validation.normalize_checks(required_checks)
+    identity = {"proposal": text}
+    if checks:
+        identity["required_checks"] = checks
+    return {"id": _hash(identity)[:16], "content": text,
+            "required_checks": checks}
 
 
 def _task_id(store):
@@ -373,6 +391,14 @@ def apply_decision(store: Store, choice: dict, level: str):
             raise PermissionError("independent final review required before finish")
         if state["final_review"]["basis_seq"] < state["material_seq"]:
             raise PermissionError("final review is stale; later scientific work requires new review")
+        if state["last_experiment_seq"]:
+            check = state["latest_validation"]
+            if (not check or check["status"] != "PASSED"
+                    or state["tasks"][check["task_id"]]["status"] != "COMPLETE"):
+                detail = check["reason"] if check else "no independent validation recorded"
+                raise PermissionError(
+                    "VALIDATION_DEBT: latest experimental evidence is not verified; "
+                    + detail + "; arrange an authorized corrective or validation experiment")
         store.append("DECISION", level=level, action=action, reason=reason)
         store.append("FINISH", reason=reason)
         return None
@@ -417,7 +443,7 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
         if result.get("proposal") is not None:
             if task["role"] != "researcher":
                 raise PermissionError("only Researcher may propose an experiment")
-            proposal = _proposal(result["proposal"])
+            proposal = _proposal(result["proposal"], result.get("required_checks"))
             if proposal["id"] in state["proposals"]:
                 raise ValueError("experiment proposal was already submitted")
         if task["purpose"] == "review_experiment":
@@ -467,6 +493,16 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
                  reply_to=task["request_id"] if action == "complete" else "")
     for asset in assets:
         store.append("ASSET", **asset)
+    if action == "complete" and task["purpose"] == "experiment":
+        # Model text cannot write this event. Compute it from the Reviewer-
+        # approved proposal and hashed, freshly registered output files.
+        current = store.state()
+        contract = current["proposals"][task["proposal_id"]]
+        report = v8_validation.run_gate(
+            store, task_id, contract, current["assets"])
+        store.append("VALIDATION", task_id=task_id, proposal_id=task["proposal_id"],
+                     status=report["status"], checks=report["checks"],
+                     reason=report["reason"])
 
 
 def recover_model_result(store: Store, task_id: str):
@@ -587,6 +623,7 @@ def _brief_state(store: Store, *, last=18):
             "requests": list(state["requests"].values()),
             "proposals": list(state["proposals"].values()),
             "assets": list(state["assets"].values()), "final_review": state["final_review"],
+            "latest_validation": state["latest_validation"],
             "recent_events": recent}
 
 
@@ -602,6 +639,15 @@ Never guess asset IDs or bypass Reviewer experiment approval. Never claim a
 scientific result is verified without actual evidence and independent review.
 Negative and inconclusive findings are acceptable; don't chase positive results.
 The runtime, not you, enforces authority.
+A Worker COMPLETE records execution only; it does not certify scientific
+validity. Independent host-side checks from the exact approved proposal
+produce VALIDATION PASSED, INCOMPLETE or FAILED. FINISH is forbidden while
+the latest experiment has validation debt. On INCOMPLETE or FAILED inspect
+the recorded check results and arrange authorized diagnostic work or a new
+Reviewer-approved corrective / validation-only experiment on frozen outputs.
+Never simply retry identical work or erase historical failed experiments.
+An INCONCLUSIVE scientific hypothesis is allowed only with valid experiment
+evidence. If no authorized repair is possible, HIGH may explicitly HALT.
 Keep JSON string fields concise; count CHARACTERS, not words or tokens.
 Target at most 4,000 characters for a new task instruction or answer message,
 and 800 characters for its reason. These are recommended output budgets,
@@ -666,6 +712,22 @@ For a blocked task: {"action":"blocked","summary":"specific blocker"}
 If Researcher proposes an experiment, set proposal to complete standalone
 experiment plan text: question, exact conditions, dataset, metric, controls,
 runtime/resource bounds, acceptance and negative/inconclusive outcome criteria.
+Alongside proposal, supply required_checks as a JSON list of independent,
+executable check specifications for the deterministic host Validation Gate:
+{"id":"assets","kind":"asset_integrity"} checks freshly registered hashes;
+{"id":"rows","kind":"csv_rows","path":"output.csv","expected_rows":256}
+checks actual CSV rows; {"id":"mean","kind":"csv_mean","path":"output.csv",
+"column":"mse","report_path":"report.json","report_key":"mse",
+"abs_tolerance":1e-9} independently recomputes a column average against
+a reported numeric field. For already frozen V7 records, v7_evidence can
+use pinned evidence_ids, scope and protocol_id (not a substitute for
+custom scientific checks). No check specification or unsupported bespoke
+checks => validation INCOMPLETE; never mark them passed from prose or a
+Worker-generated checks.json file. Reviewer must assess whether the
+listed executable checks cover the scientific invariants in the proposal.
+Do not falsely claim that these generic checks establish causal validity.
+Experimenter must deliver the exact approved artifact paths without
+changing required_checks. Model-declared VALID/PASS is not authority.
 For Reviewer purpose=review_experiment, use verdict APPROVE/REVISE/REJECT.
 For Researcher purpose=interpret, analyze the already recorded experimental
 outputs, including negative findings; do not produce a new experiment unless
@@ -820,6 +882,7 @@ def status(store: Store):
         "proposals": [{k: v for k, v in p.items() if k != "content"}
                       for p in state["proposals"].values()],
         "asset_count": len(state["assets"]), "final_review": state["final_review"],
+        "latest_validation": state["latest_validation"],
     }, ensure_ascii=False, indent=2))
 
 
