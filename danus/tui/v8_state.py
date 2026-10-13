@@ -191,18 +191,13 @@ def load_v8_project_snapshot(project: str) -> dict[str, Any]:
             "request": "Inspect EVENTS.jsonl and latest model logs",
             "next_step": "Use V8 CLI to diagnose or explicitly unblock; not V7 controls",
         })
-    for task in tasks.values():
-        if task["status"] == "BLOCKED":
-            blockers.append({
-                "worker": task["role"], "node_id": task["id"],
-                "role": task["role"], "assignment_id": task["id"],
-                "reason": task["summary"], "escalation_id": "",
-                "escalation_target": "", "escalation_status": "",
-                "request": "",
-                "next_step": "Supervisor may dispatch alternative work or seek high-level guidance",
-            })
+    # In V8 a failed worker is an auditable task outcome, not necessarily a
+    # project-level blocker. Keep it visible in the task tree and activity feed;
+    # reserve the red banner for a genuine Supervisor HALT.
+    historical_failures = sum(t["status"] == "BLOCKED" for t in tasks.values())
     return {
         "project": project,
+        "failed_task_count": historical_failures,
         "project_state": "COMPLETE" if state["done"] else
                          "ACTION_REQUIRED" if state["halt"] else "RUNNING",
         "scientific_complete": state["done"],
