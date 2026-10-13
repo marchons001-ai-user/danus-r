@@ -150,6 +150,8 @@ class Store:
                     ("path", "sha256", "bytes", "task_id", "description")}
             elif kind == "FINISH":
                 state["done"] = True
+            elif kind == "RESET":
+                state["tasks"][e["task_id"]]["status"] = "READY"
             elif kind == "HALT":
                 state["halt"] = e["reason"]
             elif kind == "UNHALT":
@@ -318,3 +320,131 @@ def apply_decision(store: Store, choice: dict, level: str):
         store.append("DECISION", level=level, action="escalate", reason=reason)
         return "HIGH"
     raise ValueError("unsupported Supervisor action")
+
+
+def _worker_result(store: Store, task_id: str, result: dict):
+    state = store.state()
+    task = state["tasks"][task_id]
+    if task["status"] != "RUNNING":
+        raise ValueError("result does not belong to the running task")
+    action = result.get("action")
+    summary = _limit_text(result.get("summary"), "worker summary", max_len=6000)
+    if action == "request":
+        target = result.get("to", "supervisor")
+        if target not in (*ROLES, "supervisor"):
+            raise ValueError("invalid recipient")
+        question = _limit_text(result.get("question"), "question", max_len=3000)
+        reason = _limit_text(result.get("reason"), "request reason", max_len=1800)
+        refs = result.get("refs", [])
+        if not isinstance(refs, list) or len(refs) > 12 or any(
+                not isinstance(x, str) or len(x) > 256 for x in refs):
+            raise ValueError("invalid asset references")
+        rid = _req_id(store)
+        store.append("REQUEST", id=rid, from_task=task_id, from_role=task["role"],
+                     to=target, question=question, reason=reason, refs=refs)
+        return
+    if action not in ("complete", "blocked"):
+        raise ValueError("worker must complete, request or block")
+    proposal, review, verdict = None, None, ""
+    if action == "complete":
+        if result.get("proposal") is not None:
+            if task["role"] != "researcher":
+                raise PermissionError("only Researcher may propose an experiment")
+            proposal = _proposal(result["proposal"])
+            if proposal["id"] in state["proposals"]:
+                raise ValueError("experiment proposal was already submitted")
+        if task["purpose"] == "review_experiment":
+            if task["role"] != "reviewer":
+                raise PermissionError("experiment approval requires independent Reviewer")
+            verdict = result.get("verdict")
+            if verdict not in ("APPROVE", "REVISE", "REJECT"):
+                raise ValueError("experiment review requires APPROVE/REVISE/REJECT")
+            proposal_id = task["proposal_id"]
+            if state["proposals"][proposal_id]["status"] != "PENDING":
+                raise ValueError("proposal was already reviewed")
+            review = {"proposal_id": proposal_id, "verdict": verdict}
+        if task["purpose"] == "final_review":
+            verdict = result.get("verdict")
+            if verdict not in ("ACCEPT", "INCONCLUSIVE", "REVISE", "REJECT"):
+                raise ValueError("final review requires a reviewer verdict")
+    paths = result.get("artifacts", [])
+    if not isinstance(paths, list) or len(paths) > 24 or not all(
+            isinstance(x, str) and x for x in paths):
+        raise ValueError("artifacts must be workspace-relative paths")
+    if paths and task["role"] != "experimenter":
+        raise PermissionError("only Experimenter may register new files as artifacts")
+    assets = []
+    for item in paths:
+        path = _asset_path(store, item)
+        raw = path.read_bytes()
+        known = state["assets"].get(item)
+        digest = hashlib.sha256(raw).hexdigest()
+        if known and known["sha256"] != digest:
+            raise PermissionError("frozen artifact was overwritten")
+        assets.append({"path": item, "sha256": digest, "bytes": len(raw),
+                       "task_id": task_id,
+                       "description": str(result.get("artifact_description") or "")[:500]})
+    if action == "complete" and task["request_id"]:
+        req = state["requests"][task["request_id"]]
+        if req["status"] != "OPEN":
+            raise RuntimeError("assigned request was answered before worker finished")
+    store.append("RESULT", task_id=task_id,
+                 status="COMPLETE" if action == "complete" else "BLOCKED",
+                 summary=summary, proposal=proposal, review=review, verdict=verdict)
+    for asset in assets:
+        store.append("ASSET", **asset)
+    if action == "complete" and task["request_id"]:
+        store.append("REPLY", request_id=task["request_id"], by=task["role"],
+                     message=summary)
+
+
+def _extract_json(message):
+    content = str(message or "").strip()
+    fence = chr(96) * 3
+    if content.startswith(fence):
+        lines = content.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == fence:
+            content = "\n".join(lines[1:-1]).strip()
+    value = json.loads(content)
+    if not isinstance(value, dict):
+        raise ValueError("model must return one JSON object")
+    return value
+
+
+def _call(model, effort, prompt, workdir, log_path, *, writable=False, timeout=1200):
+    """Reuse Danus's non-escalating Codex command and log telemetry parser."""
+    codex_bin = codex.resolve_bin()
+    cmd = codex.exec_cmd(
+        codex_bin, model, effort, "-C", str(workdir),
+        "--skip-git-repo-check", "--sandbox",
+        "workspace-write" if writable else "read-only", "--json", prompt,
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log:
+        proc = subprocess.Popen(cmd, cwd=str(workdir), stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=subprocess.STDOUT,
+                                env=codex.subprocess_env(codex_bin),
+                                start_new_session=True)
+        try:
+            code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            raise RuntimeError(f"model invocation timed out at {timeout}s")
+    telemetry = codex_context.inspect_log(log_path)
+    if code:
+        raise RuntimeError(f"model exited with {code}; see {log_path}")
+    return _extract_json(telemetry.get("last_agent_message"))
+
+
+def _brief_state(store: Store, *, last=18):
+    state = store.state()
+    recent = [{k: v for k, v in e.items()
+               if k not in ("instruction", "content")}
+              for e in store.read()[-last:] if e["kind"] != "INIT"]
+    return {"goal": state["goal"], "reference": state["reference"],
+            "tasks": list(state["tasks"].values()),
+            "requests": list(state["requests"].values()),
+            "proposals": list(state["proposals"].values()),
+            "assets": list(state["assets"].values()), "final_review": state["final_review"],
+            "recent_events": recent}
