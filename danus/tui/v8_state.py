@@ -142,13 +142,16 @@ def load_v8_project_snapshot(project: str) -> dict[str, Any]:
         })
 
     experiments = []
+    validations = state.get("validations", {})
     for task in tasks.values():
         if task["purpose"] != "experiment":
             continue
         proposal = state["proposals"].get(task["proposal_id"], {})
         status = task["status"]
+        check = validations.get(task["id"])
         experiments.append({
-            "protocol_id": task["id"], "label": task["purpose"],
+            "protocol_id": task["id"], "label": "experiment / " +
+                (check["status"] if check else "UNVERIFIED"),
             "state": status, "percent": 100 if status == "COMPLETE" else 0,
             "completed_units": 1 if status == "COMPLETE" else 0,
             "total_units": 1, "current_unit": task["id"],
@@ -171,6 +174,8 @@ def load_v8_project_snapshot(project: str) -> dict[str, Any]:
             "REPLY": lambda: f"{event['request_id']} reply: {event['message']}",
             "RESULT": lambda: f"{event['task_id']} {event['status']}: {event['summary']}",
             "ASSET": lambda: f"registered {event['path']}",
+            "VALIDATION": lambda: f"{event['task_id']} validation {event['status']}: "
+                                  f"{event.get('reason') or 'approved checks executed'}",
             "DENIED": lambda: f"denied: {event.get('error', '')}",
             "HALT": lambda: f"halt: {event.get('reason', '')}",
             "UNHALT": lambda: f"unhalt: {event.get('reason', '')}",
@@ -212,6 +217,7 @@ def load_v8_project_snapshot(project: str) -> dict[str, Any]:
     )
     return {
         "project": project,
+        "validation_status": (state.get("latest_validation") or {}).get("status", "NOT_RUN"),
         "failed_task_count": historical_failures,
         "project_state": "COMPLETE" if state["done"] else
                          "ACTION_REQUIRED" if state["halt"] else "RUNNING",
