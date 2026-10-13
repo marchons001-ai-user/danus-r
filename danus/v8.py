@@ -438,16 +438,22 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
     if not isinstance(paths, list) or len(paths) > 24 or not all(
             isinstance(x, str) and x for x in paths):
         raise ValueError("artifacts must be workspace-relative paths")
-    if paths and task["role"] != "experimenter":
-        raise PermissionError("only Experimenter may register new files as artifacts")
     assets = []
     for item in paths:
         path = _asset_path(store, item)
         raw = path.read_bytes()
         known = state["assets"].get(item)
         digest = hashlib.sha256(raw).hexdigest()
-        if known and known["sha256"] != digest:
-            raise PermissionError("frozen artifact was overwritten")
+        if known:
+            if known["sha256"] != digest or known["bytes"] != len(raw):
+                raise PermissionError("frozen artifact was overwritten")
+            # An existing registered asset can be CITED by any role; it must
+            # not be registered twice or acquire a new provenance owner.
+            continue
+        if task["role"] != "experimenter" or task["purpose"] != "experiment":
+            raise PermissionError(
+                "unregistered artifact cannot be claimed by this role: "
+                + item + "; only approved Experimenter runs register new files")
         assets.append({"path": item, "sha256": digest, "bytes": len(raw),
                        "task_id": task_id,
                        "description": str(result.get("artifact_description") or "")[:500]})
@@ -477,6 +483,8 @@ def recover_model_result(store: Store, task_id: str):
         known_failure = (
             "JSONDecodeError" in task["summary"] or
             "ValueError: proposal must be nonempty text <= 16000 characters"
+            in task["summary"] or
+            "PermissionError: only Experimenter may register new files as artifacts"
             in task["summary"]
         )
         if not known_failure:
@@ -486,10 +494,10 @@ def recover_model_result(store: Store, task_id: str):
             raise ValueError("requires exactly one original Codex log for task")
         reply = _completed_model_reply(logs[0])
         verify_assets(store)
+        _worker_result(store, task_id, reply, recovery=True)
         store.append("RECOVERY", task_id=task_id,
                      source_log=logs[0].name,
                      source_sha256=hashlib.sha256(logs[0].read_bytes()).hexdigest())
-        _worker_result(store, task_id, reply, recovery=True)
         store.publish()
         return {"task_id": task_id, "status": store.state()["tasks"][task_id]["status"]}
 
@@ -665,7 +673,13 @@ you have a separate scientific reason. For Reviewer purpose=final_review,
 assess the Researcher's interpretation against the underlying evidence,
 using verdict ACCEPT/INCONCLUSIVE/REVISE/REJECT.
 Experimenter may write files only for purpose=experiment, inside this workspace.
-Report generated artifacts as workspace-relative file paths.
+The artifacts array registers NEW output files only for approved Experimenter
+experiment tasks. Researcher and Reviewer should normally set artifacts=[]
+and cite previously registered asset paths in the summary instead.
+For compatibility, an existing REGISTERED asset path in artifacts is treated
+only as a read-only reference (not registered again). Never claim a new or
+unregistered file as your own evidence outside an approved experiment.
+Report newly generated experimental artifacts as workspace-relative paths.
 """
 
 
