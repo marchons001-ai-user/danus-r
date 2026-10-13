@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from danus import codex
 
 ROLES = ("researcher", "reviewer", "experimenter")
-MODES = ("work", "answer", "experiment", "review_experiment", "final_review")
+MODES = ("work", "answer", "experiment", "interpret", "review_experiment", "final_review")
 PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,80}$")
 MAX_TEXT = 12000
 LOW_MODEL = "gpt-5.6-luna"
@@ -119,7 +119,8 @@ class Store:
         state = {"goal": base["goal"], "reference": base.get("reference", ""),
                  "tasks": {}, "requests": {}, "proposals": {},
                  "assets": {}, "last": events[-1], "done": False, "halt": "",
-                 "final_review": None}
+                 "final_review": None, "material_seq": 0,
+                 "last_experiment_seq": 0, "last_interpret_seq": 0}
         for e in events[1:]:
             kind = e["kind"]
             if kind == "TASK":
@@ -127,7 +128,8 @@ class Store:
                     "id": e["id"], "role": e["role"], "purpose": e["purpose"],
                     "instruction": e["instruction"], "request_id": e.get("request_id", ""),
                     "proposal_id": e.get("proposal_id", ""),
-                    "status": "READY", "summary": ""}
+                    "status": "READY", "summary": "",
+                    "review_basis_seq": e.get("review_basis_seq", 0)}
             elif kind == "RUNNING":
                 state["tasks"][e["task_id"]]["status"] = "RUNNING"
             elif kind == "REQUEST":
@@ -153,6 +155,14 @@ class Store:
                         origin["status"] = "READY"
                 task["status"] = e["status"]
                 task["summary"] = e["summary"]
+                if e["status"] == "COMPLETE":
+                    if task["role"] in ("researcher", "experimenter") or (
+                            task["purpose"] == "review_experiment"):
+                        state["material_seq"] = e["seq"]
+                    if task["purpose"] == "experiment":
+                        state["last_experiment_seq"] = e["seq"]
+                    if task["purpose"] == "interpret":
+                        state["last_interpret_seq"] = e["seq"]
                 if e.get("proposal"):
                     pid = e["proposal"]["id"]
                     state["proposals"][pid] = {"id": pid, "content": e["proposal"]["content"],
@@ -162,8 +172,10 @@ class Store:
                     state["proposals"][review["proposal_id"]]["status"] = review["verdict"]
                 if task["purpose"] == "final_review":
                     state["final_review"] = {"verdict": e.get("verdict", ""),
-                                             "summary": e["summary"], "task_id": e["task_id"]}
+                                             "summary": e["summary"], "task_id": e["task_id"],
+                                             "basis_seq": task["review_basis_seq"]}
             elif kind == "ASSET":
+                state["material_seq"] = e["seq"]
                 state["assets"][e["path"]] = {k: e[k] for k in
                     ("path", "sha256", "bytes", "task_id", "description")}
             elif kind == "FINISH":
@@ -238,7 +250,7 @@ def initialize(store: Store, goal: str, reference=""):
 
 
 def _proposal(proposal):
-    text = _limit_text(proposal, "proposal", max_len=16000)
+    text = _limit_text(proposal, "proposal", max_len=32768)
     return {"id": _hash({"proposal": text})[:16], "content": text}
 
 
@@ -256,8 +268,19 @@ def _check_dispatch(state, role, purpose, proposal_id, request_id):
     if purpose in {"experiment", "review_experiment"} and role not in (
         {"experiment": "experimenter", "review_experiment": "reviewer"}[purpose],):
         raise PermissionError("purpose requires its designated role")
-    if purpose == "final_review" and role != "reviewer":
-        raise PermissionError("final review must be independent Reviewer")
+    if purpose == "final_review":
+        if role != "reviewer":
+            raise PermissionError("final review must be independent Reviewer")
+        if (state["last_experiment_seq"] and
+                state["last_interpret_seq"] <= state["last_experiment_seq"]):
+            raise PermissionError(
+                "latest experiment needs completed Researcher interpretation "
+                "before a final scientific review; use Reviewer work for early audits")
+    if purpose == "interpret":
+        if role != "researcher":
+            raise PermissionError("scientific interpretation belongs to Researcher")
+        if not state["last_experiment_seq"]:
+            raise PermissionError("interpretation requires recorded experiment evidence")
     if purpose == "experiment":
         p = state["proposals"].get(proposal_id)
         if not p or p["status"] != "APPROVE":
@@ -323,7 +346,8 @@ def apply_decision(store: Store, choice: dict, level: str):
         task_id = _task_id(store)
         store.append("DECISION", level=level, action=action, reason=reason, task_id=task_id)
         store.append("TASK", id=task_id, role=role, purpose=purpose,
-                     instruction=instruction, proposal_id=proposal_id, request_id=request_id)
+                     instruction=instruction, proposal_id=proposal_id, request_id=request_id,
+                     review_basis_seq=state["material_seq"] if purpose == "final_review" else 0)
         return task_id
     if action == "answer":
         request_id = choice.get("request_id", "")
@@ -340,6 +364,8 @@ def apply_decision(store: Store, choice: dict, level: str):
         if not state["final_review"] or state["final_review"]["verdict"] not in (
             "ACCEPT", "INCONCLUSIVE"):
             raise PermissionError("independent final review required before finish")
+        if state["final_review"]["basis_seq"] < state["material_seq"]:
+            raise PermissionError("final review is stale; later scientific work requires new review")
         store.append("DECISION", level=level, action=action, reason=reason)
         store.append("FINISH", reason=reason)
         return None
@@ -441,8 +467,13 @@ def recover_model_result(store: Store, task_id: str):
             raise ValueError("only a BLOCKED task may be salvaged")
         if task["purpose"] == "experiment":
             raise PermissionError("cannot salvage experimental execution via model logs")
-        if "JSONDecodeError" not in task["summary"]:
-            raise PermissionError("salvage is limited to this verified JSON parsing failure")
+        known_failure = (
+            "JSONDecodeError" in task["summary"] or
+            "ValueError: proposal must be nonempty text <= 16000 characters"
+            in task["summary"]
+        )
+        if not known_failure:
+            raise PermissionError("salvage is limited to known fixed result-validation defects")
         logs = sorted((store.root / "logs").glob(task_id + "-*.jsonl"))
         if len(logs) != 1:
             raise ValueError("requires exactly one original Codex log for task")
@@ -558,7 +589,7 @@ Negative and inconclusive findings are acceptable; don't chase positive results.
 The runtime, not you, enforces authority.
 Return exactly one JSON object and no markdown:
 New work: {"action":"dispatch","role":"researcher|reviewer|experimenter",
-"purpose":"work|answer|experiment|review_experiment|final_review",
+"purpose":"work|answer|experiment|interpret|review_experiment|final_review",
 "task":"precise assignment","request_id":"","proposal_id":"","reason":"why"}
 Resume an existing READY task: {"action":"dispatch","task_id":"task-N",
 "reason":"why"}
@@ -571,8 +602,12 @@ Finish only after independent final_review:
 If HIGH finds no legal route: {"action":"block","reason":"precise blocker"}
 For an experiment, Researcher must first return a proposal, then Reviewer
 reviews its exact proposal_id, only then dispatch experimenter with
-purpose=experiment and same proposal_id. Finally ask Reviewer to independently
-audit the evidence and interpretation before finishing.
+purpose=experiment and same proposal_id. After a successful experiment assign
+Researcher purpose=interpret to analyze actual evidence, then request a
+purpose=final_review from Reviewer. Reviewer purpose=work may inspect code
+and raw evidence earlier to catch faults; this is an early technical audit,
+NOT a final scientific conclusion review. A final_review must cover the latest
+interpretation and evidence. Never conclude from pre-interpretation review.
 """
 
 _WORKER_POLICY = """
@@ -599,7 +634,11 @@ If Researcher proposes an experiment, set proposal to complete standalone
 experiment plan text: question, exact conditions, dataset, metric, controls,
 runtime/resource bounds, acceptance and negative/inconclusive outcome criteria.
 For Reviewer purpose=review_experiment, use verdict APPROVE/REVISE/REJECT.
-For Reviewer purpose=final_review, use verdict ACCEPT/INCONCLUSIVE/REVISE/REJECT.
+For Researcher purpose=interpret, analyze the already recorded experimental
+outputs, including negative findings; do not produce a new experiment unless
+you have a separate scientific reason. For Reviewer purpose=final_review,
+assess the Researcher's interpretation against the underlying evidence,
+using verdict ACCEPT/INCONCLUSIVE/REVISE/REJECT.
 Experimenter may write files only for purpose=experiment, inside this workspace.
 Report generated artifacts as workspace-relative file paths.
 """
