@@ -786,6 +786,7 @@ def _worker(store: Store, task_id, *, timeout=1200):
         "replies_to_your_previous_questions": replies,
         "approved_experiment_proposal": state["proposals"].get(task["proposal_id"]),
         "known_assets": list(state["assets"].values()),
+        "latest_validation": state["latest_validation"],
         "recent_completed_work": [
             {"role": t["role"], "purpose": t["purpose"],
              "summary": t["summary"][:3000]}
