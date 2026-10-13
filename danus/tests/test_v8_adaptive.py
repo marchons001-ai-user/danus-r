@@ -226,7 +226,7 @@ def test_corrective_19689_character_proposal_recovers_from_existing_log(tmp_path
              proposal=None, review=None, verdict="")
     output = {
         "action": "complete", "summary": "Prepared a scientifically justified correction",
-        "proposal": "Fix targets and bootstrap intervals. " + "x" * 19650,
+        "proposal": "Fix targets and bootstrap intervals. " + "x" * 20000,
         "artifacts": [], "verdict": None,
     }
     assert len(output["proposal"]) > 19689
