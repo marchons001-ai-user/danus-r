@@ -125,3 +125,20 @@ def test_unexecutable_and_duplicated_check_specs_rejected_before_approval():
     with pytest.raises(ValueError, match="duplicate"):
         normalize_checks([{"id": "a", "kind": "asset_integrity"},
                           {"id": "a", "kind": "asset_integrity"}])
+
+
+
+def test_new_unverified_experiment_cannot_inherit_earlier_pass(tmp_path):
+    s = new_store(tmp_path)
+    pid = approved(s, "first", checks("first"))
+    experiment(s, pid, "first", "mse\n1\n3\n")
+    close_review(s)
+    new_pid = approved(s, "second", checks("second"))
+    newest = dispatch(s, "experimenter", "Run second", "experiment", proposal_id=new_pid)
+    s.append("RUNNING", task_id=newest)
+    s.append("RESULT", task_id=newest, status="BLOCKED",
+             summary="execution interrupted", proposal=None, review=None, verdict="")
+    assert s.state()["latest_validation"]["status"] == "INCOMPLETE"
+    assert s.state()["latest_validation"]["task_id"] == newest
+    with pytest.raises(PermissionError):
+        v8.apply_decision(s, {"action": "finish", "reason": "Reuse first validation"}, "low")
