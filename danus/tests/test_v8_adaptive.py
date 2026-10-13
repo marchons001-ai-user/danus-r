@@ -83,6 +83,15 @@ def test_review_required_and_artifacts_immutable(tmp_path):
         file.read_bytes()).hexdigest()
     with pytest.raises(PermissionError, match="independent final review"):
         v8.apply_decision(s, {"action": "finish", "reason": "looks done"}, "low")
+    with pytest.raises(PermissionError, match="interpretation"):
+        dispatch(s, "reviewer", "Premature final audit", "final_review")
+    early = dispatch(s, "reviewer", "Early evidence audit", "work")
+    start(s, early)
+    v8._worker_result(s, early, {"action": "complete", "summary": "Raw evidence checked"})
+    interp = dispatch(s, "researcher", "Explain observed results", "interpret")
+    start(s, interp)
+    v8._worker_result(s, interp, {"action": "complete",
+                                  "summary": "Evidence supports no reliable advantage"})
     final = dispatch(s, "reviewer", "Independent final audit", "final_review")
     start(s, final)
     v8._worker_result(s, final, {"action": "complete",
@@ -205,3 +214,53 @@ def test_failed_v8_worker_is_historical_not_a_project_halt(tmp_path, monkeypatch
     assert snap["blockers"] == []
     assert any(n["node_id"] == old and n["state"] == "BLOCKED"
                for n in snap["nodes"])
+
+
+
+def test_corrective_19689_character_proposal_recovers_from_existing_log(tmp_path):
+    s = new_store(tmp_path)
+    t = dispatch(s, "researcher", "Draft a revised experiment protocol")
+    start(s, t)
+    s.append("RESULT", task_id=t, status="BLOCKED",
+             summary="execution/validation error: ValueError: proposal must be nonempty text <= 16000 characters",
+             proposal=None, review=None, verdict="")
+    output = {
+        "action": "complete", "summary": "Prepared a scientifically justified correction",
+        "proposal": "Fix targets and bootstrap intervals. " + "x" * 19650,
+        "artifacts": [], "verdict": None,
+    }
+    assert len(output["proposal"]) > 19689
+    log = s.root / "logs" / (t + "-4.jsonl")
+    log.parent.mkdir(exist_ok=True)
+    log.write_text("\n".join(json.dumps(event) for event in (
+        {"type": "item.completed", "item": {
+            "type": "agent_message", "text": json.dumps(output)}},
+        {"type": "turn.completed", "usage": {"input_tokens": 1}},
+    )) + "\n")
+    assert v8.recover_model_result(s, t)["status"] == "COMPLETE"
+    proposals = list(s.state()["proposals"].values())
+    assert len(proposals) == 1
+    assert proposals[0]["content"] == output["proposal"]
+    assert proposals[0]["status"] == "PENDING"
+
+
+def test_final_review_must_cover_latest_science_not_just_any_old_review(tmp_path):
+    s = new_store(tmp_path)
+    first = dispatch(s, "researcher", "Initial study")
+    start(s, first)
+    v8._worker_result(s, first, {"action": "complete", "summary": "Initial analysis"})
+    review = dispatch(s, "reviewer", "Independent review", "final_review")
+    start(s, review)
+    v8._worker_result(s, review, {"action": "complete", "summary": "Initial review",
+                                 "verdict": "INCONCLUSIVE"})
+    second = dispatch(s, "researcher", "New interpretation")
+    start(s, second)
+    v8._worker_result(s, second, {"action": "complete", "summary": "New scientific finding"})
+    with pytest.raises(PermissionError, match="stale"):
+        v8.apply_decision(s, {"action": "finish", "reason": "Use the old review"}, "low")
+    latest = dispatch(s, "reviewer", "Review new finding", "final_review")
+    start(s, latest)
+    v8._worker_result(s, latest, {"action": "complete", "summary": "Reviewed new finding",
+                                 "verdict": "INCONCLUSIVE"})
+    v8.apply_decision(s, {"action": "finish", "reason": "Scoped inconclusive conclusion"}, "low")
+    assert s.state()["done"]
