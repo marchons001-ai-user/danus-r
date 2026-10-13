@@ -122,3 +122,20 @@ def test_escalation_and_denied_actions_do_not_grant_permissions(tmp_path, monkey
     with pytest.raises(PermissionError, match="approved"):
         dispatch(s, "experimenter", "Unapproved experiment", "experiment",
                  proposal_id="fake")
+
+
+def test_existing_tui_can_display_live_v8_project(tmp_path, monkeypatch):
+    from danus.tui.v8_state import load_v8_project_snapshot
+
+    monkeypatch.setenv("DANUS_RUNTIME", str(tmp_path))
+    s = v8.Store(v8.project_root("tui-smoke"))
+    v8.initialize(s, "Explore noisy directional memory without assuming improvement.")
+    task = dispatch(s, "researcher", "Design a bounded comparison")
+    start(s, task)
+    snapshot = load_v8_project_snapshot("tui-smoke")
+    assert snapshot["plan_version"] == 8
+    assert snapshot["project_state"] == "RUNNING"
+    assert next(r for r in snapshot["workers"] if r["role"] == "researcher")[
+        "progress_state"] == "RUNNING"
+    assert any(n["node_id"] == task for n in snapshot["nodes"])
+    assert any(a["source"] == "RUNNING" for a in snapshot["activity"])
