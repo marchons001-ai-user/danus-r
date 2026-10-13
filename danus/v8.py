@@ -448,3 +448,233 @@ def _brief_state(store: Store, *, last=18):
             "proposals": list(state["proposals"].values()),
             "assets": list(state["assets"].values()), "final_review": state["final_review"],
             "recent_events": recent}
+
+
+_SUPERVISOR_POLICY = """
+You are the Danus-R V8 adaptive scientific Supervisor.
+The roles are researcher, reviewer and experimenter. One scientific role runs
+at a time. You choose the next task dynamically, not from a fixed DAG.
+Research Plan is high-level and stable; the goal is immutable.
+Workers may ask any one role or Supervisor one question at a time, and continue
+after a reply. Resolve the oldest material open question before making new work.
+Prefer existing verified asset records and reports to re-reading raw data.
+Never guess asset IDs or bypass Reviewer experiment approval. Never claim a
+scientific result is verified without actual evidence and independent review.
+Negative and inconclusive findings are acceptable; don't chase positive results.
+The runtime, not you, enforces authority.
+Return exactly one JSON object and no markdown:
+New work: {"action":"dispatch","role":"researcher|reviewer|experimenter",
+"purpose":"work|answer|experiment|review_experiment|final_review",
+"task":"precise assignment","request_id":"","proposal_id":"","reason":"why"}
+Resume an existing READY task: {"action":"dispatch","task_id":"task-N",
+"reason":"why"}
+Answer a pending request using reliable recorded information:
+{"action":"answer","request_id":"req-N","message":"answer","reason":"why"}
+If LOW cannot find a legal useful next step:
+{"action":"escalate","reason":"what cannot be resolved"}
+Finish only after independent final_review:
+{"action":"finish","reason":"evidence-bounded conclusion"}
+If HIGH finds no legal route: {"action":"block","reason":"precise blocker"}
+For an experiment, Researcher must first return a proposal, then Reviewer
+reviews its exact proposal_id, only then dispatch experimenter with
+purpose=experiment and same proposal_id. Finally ask Reviewer to independently
+audit the evidence and interpretation before finishing.
+"""
+
+_WORKER_POLICY = """
+You are one assigned Danus-R scientific worker. Execute only your task.
+You can ask ONE question to researcher, reviewer, experimenter or supervisor
+at a time. State WHY the answer is needed. After it returns, reconsider next step.
+Do not modify the fixed research goal. A negative scientific result is valid.
+Keep experiment costs small. Never modify external reference repositories or
+previously frozen artifacts. Prefer summaries to full raw-data re-interpretation.
+Never fabricate successful tool calls, citations or file artifacts.
+Researcher may propose a specific small experiment but must not execute it.
+Reviewer independently checks proposed experiment and scientific conclusions.
+Experimenter only executes the exact Reviewer-approved experimental plan.
+Return exactly one JSON object (no markdown):
+For one question:
+{"action":"request","to":"researcher|reviewer|experimenter|supervisor",
+"question":"focused question","reason":"why it is needed","refs":[],
+"summary":"work done and what is missing"}
+For a completed task:
+{"action":"complete","summary":"detailed evidence-backed outcome","artifacts":[],
+"proposal":null,"verdict":null}
+For a blocked task: {"action":"blocked","summary":"specific blocker"}
+If Researcher proposes an experiment, set proposal to complete standalone
+experiment plan text: question, exact conditions, dataset, metric, controls,
+runtime/resource bounds, acceptance and negative/inconclusive outcome criteria.
+For Reviewer purpose=review_experiment, use verdict APPROVE/REVISE/REJECT.
+For Reviewer purpose=final_review, use verdict ACCEPT/INCONCLUSIVE/REVISE/REJECT.
+Experimenter may write files only for purpose=experiment, inside this workspace.
+Report generated artifacts as workspace-relative file paths.
+"""
+
+
+def _supervisor(store: Store, level, error=""):
+    prompt = (_SUPERVISOR_POLICY + "\nLEVEL: " + level +
+              "\nPrevious decision error: " + error +
+              "\nTrusted project status:\n" +
+              json.dumps(_brief_state(store), ensure_ascii=False, indent=2))
+    model = os.environ.get("DANUS_V8_LOW_MODEL", LOW_MODEL) if level == "low" else (
+        os.environ.get("DANUS_V8_HIGH_MODEL", HIGH_MODEL))
+    effort = LOW_EFFORT if level == "low" else HIGH_EFFORT
+    return _call(model, effort, prompt, store.root / "workspace",
+                 store.root / "logs" / f"supervisor-{len(store.read())}-{level}.jsonl",
+                 writable=False, timeout=180)
+
+
+def _worker(store: Store, task_id, *, timeout=1200):
+    with store.lock():
+        verify_assets(store)
+        state = store.state()
+        task = state["tasks"][task_id]
+        if task["status"] != "READY":
+            raise ValueError("task is not ready")
+        if any(t["status"] == "RUNNING" for t in state["tasks"].values()):
+            raise ValueError("another worker is active")
+        if task["purpose"] == "experiment":
+            _check_dispatch(state, task["role"], task["purpose"],
+                            task["proposal_id"], task["request_id"])
+        store.append("RUNNING", task_id=task_id)
+        store.publish()
+    state = store.state()
+    task = state["tasks"][task_id]
+    req = state["requests"].get(task["request_id"])
+    replies = [r for r in state["requests"].values()
+               if r["from_task"] == task_id and r["status"] == "ANSWERED"]
+    payload = {
+        "goal": state["goal"], "reference": state["reference"], "task": task,
+        "request_to_answer": req,
+        "replies_to_your_previous_questions": replies,
+        "approved_experiment_proposal": state["proposals"].get(task["proposal_id"]),
+        "known_assets": list(state["assets"].values()),
+        "recent_completed_work": [
+            {"role": t["role"], "purpose": t["purpose"],
+             "summary": t["summary"][:3000]}
+            for t in state["tasks"].values() if t["status"] == "COMPLETE"
+        ][-10:],
+    }
+    prompt = _WORKER_POLICY + "\nCurrent assignment:\n" + json.dumps(
+        payload, ensure_ascii=False, indent=2)
+    role = task["role"]
+    model, effort = DEFAULT_MODELS[role]
+    model = os.environ.get(f"DANUS_V8_{role.upper()}_MODEL", model)
+    effort = os.environ.get(f"DANUS_V8_{role.upper()}_EFFORT", effort)
+    log = store.root / "logs" / f"{task_id}-{len(store.read())}.jsonl"
+    try:
+        reply = _call(model, effort, prompt, store.root / "workspace", log,
+                      writable=role == "experimenter" and task["purpose"] == "experiment",
+                      timeout=timeout)
+        with store.lock():
+            _worker_result(store, task_id, reply)
+            verify_assets(store)
+            store.publish()
+    except Exception as exc:
+        with store.lock():
+            state = store.state()
+            if state["tasks"][task_id]["status"] == "RUNNING":
+                store.append("RESULT", task_id=task_id, status="BLOCKED",
+                             summary=f"execution/validation error: {type(exc).__name__}: {exc}",
+                             proposal=None, review=None, verdict="")
+                store.publish()
+        raise
+
+
+def step(store: Store, *, worker_timeout=1200):
+    with store.lock():
+        verify_assets(store)
+        state = store.state()
+        if state["done"] or state["halt"]:
+            return "STOP"
+        if any(t["status"] == "RUNNING" for t in state["tasks"].values()):
+            raise RuntimeError("interrupted worker must be reconciled before continuing")
+    error = ""
+    for level in ("low", "low", "high"):
+        try:
+            decision = _supervisor(store, level, error)
+            with store.lock():
+                selected = apply_decision(store, decision, level)
+                store.publish()
+            if selected == "HIGH":
+                error = "Low Supervisor voluntarily escalated"
+                continue
+            if isinstance(selected, str):
+                _worker(store, selected, timeout=worker_timeout)
+            return selected or "CONTROL"
+        except (ValueError, KeyError, PermissionError, RuntimeError,
+                json.JSONDecodeError, OSError, subprocess.SubprocessError) as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            with store.lock():
+                store.append("DENIED", level=level, error=error)
+                store.publish()
+    with store.lock():
+        store.append("HALT", reason="No legal decision from either Supervisor: " + error)
+        store.publish()
+    return "HALT"
+
+
+def status(store: Store):
+    state = store.state()
+    print(json.dumps({
+        "goal": state["goal"], "done": state["done"], "halt": state["halt"],
+        "tasks": [{"id": t["id"], "role": t["role"], "status": t["status"],
+                   "purpose": t["purpose"], "summary": t["summary"][:300]}
+                  for t in state["tasks"].values()],
+        "requests": list(state["requests"].values()),
+        "proposals": [{k: v for k, v in p.items() if k != "content"}
+                      for p in state["proposals"].values()],
+        "asset_count": len(state["assets"]), "final_review": state["final_review"],
+    }, ensure_ascii=False, indent=2))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Danus-R V8 adaptive runner")
+    commands = parser.add_subparsers(dest="command", required=True)
+    new = commands.add_parser("new")
+    new.add_argument("project")
+    new.add_argument("--goal-file", type=Path, required=True)
+    new.add_argument("--reference", default="")
+    for command in ("run", "step", "status", "recover"):
+        sub = commands.add_parser(command)
+        sub.add_argument("project")
+        if command == "run":
+            sub.add_argument("--max-steps", type=int, default=0)
+            sub.add_argument("--worker-timeout", type=int, default=1200)
+        if command == "recover":
+            sub.add_argument("--task-id", required=True)
+    args = parser.parse_args(argv)
+    store = Store(project_root(args.project))
+    if args.command == "new":
+        initialize(store, args.goal_file.read_text(encoding="utf-8"),
+                   reference=args.reference)
+        print(store.root)
+        return
+    if args.command == "status":
+        status(store)
+        return
+    if args.command == "recover":
+        with store.lock():
+            task = store.state()["tasks"].get(args.task_id)
+            if not task or task["status"] != "RUNNING":
+                raise ValueError("only interrupted RUNNING tasks can be recovered")
+            if task["purpose"] == "experiment":
+                raise PermissionError("cannot blindly rerun an interrupted experiment")
+            store.append("RESET", task_id=args.task_id,
+                         reason="operator reconciliation of read-only task")
+            store.publish()
+        return
+    limit = 1 if args.command == "step" else args.max_steps
+    if limit < 0:
+        raise ValueError("negative step limit")
+    iteration = 0
+    while not limit or iteration < limit:
+        outcome = step(store, worker_timeout=getattr(args, "worker_timeout", 1200))
+        print(f"V8 step {iteration + 1}: {outcome}", flush=True)
+        iteration += 1
+        if outcome in ("STOP", "HALT"):
+            break
+
+
+if __name__ == "__main__":
+    main()
