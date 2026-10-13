@@ -301,6 +301,18 @@ def apply_decision(store: Store, choice: dict, level: str):
             return task_id
         instruction = _limit_text(choice.get("task"), "task")
         _check_dispatch(state, role, purpose, proposal_id, request_id)
+        if purpose == "experiment":
+            instruction = (
+                "Execute ONLY the independently approved experiment proposal "
+                + proposal_id + ". Use the approved design, controls and metrics "
+                "without modification. Record exact runtime, negative results and "
+                "workspace-relative output files. Do not alter external repositories."
+            )
+        elif purpose == "review_experiment":
+            instruction = (
+                "Independently review the exact pending experiment proposal "
+                + proposal_id + ". State APPROVE, REVISE or REJECT with reasoning."
+            )
         if any(t["role"] == role and t["purpose"] == purpose
                and t["instruction"] == instruction and t["status"] != "BLOCKED"
                for t in state["tasks"].values()):
