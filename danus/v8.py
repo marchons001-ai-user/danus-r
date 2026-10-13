@@ -676,21 +676,30 @@ def step(store: Store, *, worker_timeout=1200):
             with store.lock():
                 selected = apply_decision(store, decision, level)
                 store.publish()
-            if selected == "HIGH":
-                error = "Low Supervisor voluntarily escalated"
-                force_high = True
-                continue
-            if isinstance(selected, str):
-                _worker(store, selected, timeout=worker_timeout)
-                print(f"[V8] {selected}: {store.state()['tasks'][selected]['status']}",
-                      flush=True)
-            return selected or "CONTROL"
         except (ValueError, KeyError, PermissionError, RuntimeError,
                 json.JSONDecodeError, OSError, subprocess.SubprocessError) as exc:
             error = f"{type(exc).__name__}: {exc}"
             with store.lock():
                 store.append("DENIED", level=level, error=error)
                 store.publish()
+            continue
+        if selected == "HIGH":
+            error = "Low Supervisor voluntarily escalated"
+            force_high = True
+            continue
+        if isinstance(selected, str):
+            # One decision starts at most one Worker. A failed worker is NOT a
+            # rejected Supervisor decision, and must not trigger immediate
+            # duplicate research or experimental execution.
+            try:
+                _worker(store, selected, timeout=worker_timeout)
+            except Exception as exc:
+                print(f"[V8] {selected} failed: {type(exc).__name__}: {exc}. "
+                      "Inspect its log; do not silently rerun.", flush=True)
+                return "WORKER_BLOCKED"
+            print(f"[V8] {selected}: {store.state()['tasks'][selected]['status']}",
+                  flush=True)
+        return selected or "CONTROL"
     with store.lock():
         store.append("HALT", reason="No legal decision from either Supervisor: " + error)
         store.publish()
