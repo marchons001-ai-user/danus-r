@@ -195,6 +195,19 @@ class Store:
                 state["halt"] = e["reason"]
             elif kind == "UNHALT":
                 state["halt"] = ""
+        # Only the most recently assigned experiment may qualify as current
+        # evidence. A newer READY/RUNNING/BLOCKED experiment cannot silently
+        # inherit an earlier run's PASSED certificate.
+        newest = next((t for t in reversed(list(state["tasks"].values()))
+                       if t["purpose"] == "experiment"), None)
+        if newest and (not state["latest_validation"] or
+                       state["latest_validation"]["task_id"] != newest["id"]):
+            state["latest_validation"] = {
+                "task_id": newest["id"], "proposal_id": newest["proposal_id"],
+                "status": "INCOMPLETE", "checks": [],
+                "reason": f"newest experiment {newest['id']} ({newest['status']}) "
+                          "has no independent validation report", "seq": 0,
+            }
         return state
 
     def publish(self):
@@ -391,7 +404,7 @@ def apply_decision(store: Store, choice: dict, level: str):
             raise PermissionError("independent final review required before finish")
         if state["final_review"]["basis_seq"] < state["material_seq"]:
             raise PermissionError("final review is stale; later scientific work requires new review")
-        if state["last_experiment_seq"]:
+        if any(t["purpose"] == "experiment" for t in state["tasks"].values()):
             check = state["latest_validation"]
             if (not check or check["status"] != "PASSED"
                     or state["tasks"][check["task_id"]]["status"] != "COMPLETE"):
