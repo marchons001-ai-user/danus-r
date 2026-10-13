@@ -848,6 +848,16 @@ def step(store: Store, *, worker_timeout=1200):
             break
         recent_blocks += 1
     force_high = recent_blocks >= 2
+    validation_events = [e for e in store.read() if e["kind"] == "VALIDATION"]
+    if len(validation_events) >= 2 and validation_events[-1]["status"] != "PASSED":
+        def debt_signature(event):
+            return (event["status"], tuple(sorted(
+                (r["id"], r["status"]) for r in event["checks"]
+                if r["status"] != "PASSED")))
+        # Two separately executed runs with identical unresolved checks are
+        # concrete lack of progress. Escalate routing, never bypass the gate.
+        if debt_signature(validation_events[-1]) == debt_signature(validation_events[-2]):
+            force_high = True
     for attempt in range(3):
         level = "high" if force_high or attempt == 2 else "low"
         try:
