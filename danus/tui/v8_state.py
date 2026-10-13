@@ -191,10 +191,25 @@ def load_v8_project_snapshot(project: str) -> dict[str, Any]:
             "request": "Inspect EVENTS.jsonl and latest model logs",
             "next_step": "Use V8 CLI to diagnose or explicitly unblock; not V7 controls",
         })
-    # In V8 a failed worker is an auditable task outcome, not necessarily a
-    # project-level blocker. Keep it visible in the task tree and activity feed;
-    # reserve the red banner for a genuine Supervisor HALT.
-    historical_failures = sum(t["status"] == "BLOCKED" for t in tasks.values())
+    # A blocked *last assigned* worker needs immediate attention. Older failed
+    # attempts are history, not an active project halt (as in task-7/task-12).
+    last_task = next(reversed(tasks.values())) if tasks else None
+    latest_blocked = last_task if last_task and last_task["status"] == "BLOCKED" else None
+    if latest_blocked:
+        blockers.append({
+            "worker": latest_blocked["role"], "node_id": latest_blocked["id"],
+            "role": latest_blocked["role"], "assignment_id": latest_blocked["id"],
+            "reason": latest_blocked["summary"], "escalation_id": "",
+            "escalation_target": "", "escalation_status": "",
+            "request": "The most recently assigned Worker failed; no accepted result",
+            "next_step": "Inspect its saved Codex log and V8 task status. "
+                         "Recover a valid completed result through V8 salvage "
+                         "when supported; do not rerun the experiment blindly.",
+        })
+    historical_failures = sum(
+        t["status"] == "BLOCKED" for t in tasks.values()
+        if t is not latest_blocked
+    )
     return {
         "project": project,
         "failed_task_count": historical_failures,
