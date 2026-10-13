@@ -145,6 +145,29 @@ def _experiment_binding_context(project: str, worker: str, role_name: str) -> st
     )
 
 
+def _interpret_evidence_context(project: str, role_name: str, worker: str) -> str:
+    if role_name != "researcher":
+        return ""
+    ledger = ProgressLedger(L.project_dir(project))
+    assignment = ledger.current(worker, refresh_stale=False)
+    handoff_id = str((assignment or {}).get("handoff_id") or "")
+    handoff = HandoffRequests(ledger).get(handoff_id) if handoff_id else None
+    if (not handoff or handoff.get("kind") != "INTERPRET"
+        or handoff.get("status") != "ASSIGNED"
+        or handoff.get("assigned_assignment_id") != assignment["assignment_id"]):
+        return ""
+    refs = list(handoff.get("evidence_refs") or [])
+    return (
+        "\n\n<ASSIGNED_INTERPRET_EVIDENCE>\n"
+        "The current Plan Researcher task also owns the INTERPRET handoff. "
+        "Read only the immutable Evidence IDs listed here via the bounded "
+        "experiment_evidence_get tool, then write the single interpretation "
+        "deliverable required by TASK.md. Do not start a second interpretation.\n"
+        + "\n".join(f"- {ref}" for ref in refs)
+        + "\n</ASSIGNED_INTERPRET_EVIDENCE>"
+    )
+
+
 def _scientific_context(project: str, role_name: str, worker: str) -> str:
     role_path = L.scientific_role_md(role_name)
     if role_path is None:
@@ -180,6 +203,7 @@ def _scientific_context(project: str, role_name: str, worker: str) -> str:
         f"{guidance_block}"
         f"{_review_governance_context(project, role_name, worker)}"
         f"{_experiment_binding_context(project, worker, role_name)}"
+        f"{_interpret_evidence_context(project, role_name, worker)}"
     )
 
 

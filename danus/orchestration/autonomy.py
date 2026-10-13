@@ -66,6 +66,29 @@ def _task_spec(project_dir: Path, node_id: str) -> Dict[str, Any]:
     return {"status": "missing", "reason": "no_autonomous_task"}
 
 
+def _interpret_plan_target(project_dir: Path, source_node: str) -> str:
+    """Find one explicitly planned, direct Researcher interpreter for an experiment.
+
+    Ambiguous/missing planned interpreters retain the legacy handoff route.
+    Never infer authority from a model-provided Evidence ID or node name.
+    """
+    graph = ResearchPlanGraph(project_dir).snapshot()
+    completed = set(ProgressLedger(project_dir).completed_nodes())
+    candidates = []
+    for node_id, node in graph["nodes"].items():
+        if (node_id in completed or node.get("state") != "ACTIVE"
+            or source_node not in (node.get("depends_on") or [])):
+            continue
+        spec = _task_spec(project_dir, node_id)
+        if (spec.get("status") == "ready"
+            and spec.get("role") == "researcher"
+            and "experiment_evidence_get" in spec["task"]):
+            candidates.append(node_id)
+    if len(candidates) > 1:
+        raise ValueError("multiple planned Researcher interpreters for one experiment")
+    return candidates[0] if candidates else ""
+
+
 def _assignment_matches_current_node(
     graph: ResearchPlanGraph,
     assignment: Dict[str, Any],

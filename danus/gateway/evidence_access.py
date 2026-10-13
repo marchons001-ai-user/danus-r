@@ -50,10 +50,16 @@ def authorized_interpret_evidence(
     )
     if (
         not source or source.get("role") != "experimenter"
-        or source.get("node_id") != handoff.get("node_id")
         or source.get("state") != "DONE" or source.get("outcome") != "COMPLETE"
     ):
         raise PermissionError("INTERPRET source must be the completed Experimenter")
+    if source.get("node_id") != handoff.get("node_id"):
+        # Planned interpretation is an exact downstream Plan assignment. The
+        # original same-node handoff remains valid for legacy/unplanned routes.
+        from danus.orchestration.autonomy import _interpret_plan_target
+        target = _interpret_plan_target(root, str(source.get("node_id") or ""))
+        if not target or target != handoff.get("node_id") or target != assignment.get("node_id"):
+            raise PermissionError("INTERPRET handoff is not bound to the planned Researcher")
     store = EvidenceStore(root)
     record = store.get_record(evidence_id)
     if not record or record.get("evidence_id") != evidence_id:

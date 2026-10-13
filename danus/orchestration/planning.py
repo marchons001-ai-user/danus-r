@@ -183,7 +183,13 @@ def _bootstrap_task(pdir: Path, plan_version: int) -> str:
         "for separate Reviewer approval, so the canonical task hashes match. "
         "Do not guess a protocol ID. "
         "Arrange any dependencies needed to complete that review and do not "
-        "run planned experiments in this bootstrap task.\n\n"
+        "run planned experiments in this bootstrap task. For each experiment "
+        "requiring a downstream Researcher interpretation, make exactly one "
+        "dependent Researcher Plan node whose task explicitly uses "
+        "experiment_evidence_get on the Evidence ID supplied by the "
+        "Experimenter's INTERPRET handoff. Do not also schedule a second "
+        "interpretation task: the handoff dispatches this exact planned "
+        "Researcher task and its completion releases independent review.\n\n"
         + _proposal_instructions(_proposal_path(pdir), plan_version)
         + "\nAfter the proposal file is fully written, end this assignment with COMPLETE.\n"
     )

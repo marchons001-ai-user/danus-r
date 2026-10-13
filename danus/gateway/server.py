@@ -548,6 +548,17 @@ def handoff_request(
             "evidence_refs": existing_refs,
         }
 
+    interpret_node = ""
+    interpret_task = ""
+    if requested_kind == "INTERPRET" and refs:
+        # The planned downstream Researcher task owns interpretation when it
+        # explicitly requires the Evidence Gateway. Do not allocate an extra
+        # interpretation job on the completed Experimenter node.
+        from danus.orchestration.autonomy import _interpret_plan_target, _task_spec
+        interpret_node = _interpret_plan_target(_project(), str(source["node_id"]))
+        if interpret_node:
+            interpret_task = _task_spec(_project(), interpret_node)["task"]
+
     if requested_kind == "INTERPRET":
         evidence_block = ""
         if refs:
@@ -587,8 +598,12 @@ def handoff_request(
             "an automatic Plan, Contract, or source-Assignment disposition.\n"
         )
 
+    if interpret_node:
+        # Hash-identical to the frozen R2 task, so normal Plan auto-completion
+        # and independent downstream review still apply.
+        request = interpret_task
     plan = _pg().snapshot()
-    node_id = str(source["node_id"])
+    node_id = interpret_node or str(source["node_id"])
     node = plan["nodes"].get(node_id)
     if node is None or node.get("state") != "ACTIVE":
         raise ValueError(f"source plan node {node_id} is not ACTIVE")
