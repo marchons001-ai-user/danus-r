@@ -141,3 +141,88 @@ makes any earlier final review stale for FINISH authorization. These are
 general evidence-freshness rules, not a fixed role/task-order state machine.
 Existing historical Reviewer REVISE reports remain available; they do not
 authorize project completion.
+
+
+## V8 independent experiment Validation Gate (2026-10-13)
+
+V8 keeps **three orthogonal dimensions**:
+
+- Worker execution: task COMPLETE / BLOCKED.
+- Evidence validation: PASSED / INCOMPLETE / FAILED; created by host code,
+  not from Experimenter's textual assertion or its self-written checks.json.
+- Independent scientific review: ACCEPT / INCONCLUSIVE / REVISE / REJECT.
+  ACCEPT means the scoped scientific interpretation was reviewed, **not** that
+  the positive hypothesis was confirmed.
+
+At Researcher proposal submission, an optional JSON field \`required_checks\`
+contains a list of executable check specifications. The full check list becomes
+part of the proposal's content-addressed identity; Reviewer approval therefore
+covers the **exact** check list. Experimenter cannot modify it at runtime.
+For new experiments, **no executable check list means INCOMPLETE**, not PASS.
+
+Supported deterministic check kinds:
+
+\`\`\`json
+[
+  {"id":"integrity","kind":"asset_integrity"},
+  {"id":"row_count","kind":"csv_rows","path":"run_v2/metrics.csv","expected_rows":256},
+  {"id":"mean","kind":"csv_mean","path":"run_v2/metrics.csv",
+   "column":"mse","report_path":"run_v2/report.json",
+   "report_key":"mse","abs_tolerance":1e-9}
+]
+\`\`\`
+
+Checks execute in the trusted Danus Python process on newly registered,
+hashed files; the CSV checks read the actual bytes rather than accepting a
+model-produced PASS flag. Each \`VALIDATION\` event records the checked IDs,
+PASSED/INCOMPLETE/FAILED results and specific errors. Experimenter COMPLETE
+still records raw observations even on failure; they are **not** promoted to
+verified evidence. The generated state, V8 status JSON and existing TUI show
+the machine-derived verdict. A corrected, independently approved experiment
+may supersede an older failed run; historical evidence and failures are kept.
+
+V8 \`finish\` refuses if the latest experiment has no PASSED Validation Gate
+result. Supervisor-L/H receives the exact validation debt and may coordinate
+additional tests against frozen inputs, a new Reviewer-approved validation-only
+experiment, or a corrected experiment. This is **not** a forced R1/V1/E1 DAG.
+If a repair is impossible or budgets expire, HIGH may HALT with an explicit
+unresolved-validation reason. Do not transform incomplete validation into an
+ordinary scientific INCONCLUSIVE. An inconclusive **validated** experiment
+may finish after the normal independent final-review gate.
+
+**What PASSED does not prove:** these generic checks cannot prove causality,
+mask invariance, model alignment or domain-specific scientific correctness on
+their own. A proposal that requires bespoke checks must define a **genuine
+executable, independently approved** validator; until supported, the result
+must remain INCOMPLETE. Reviewer is responsible for checking that the stated
+scientific invariants are covered by the executable suite. The current stage
+does not accept an Experimenter-supplied checks.json as proof.
+
+### V7 Evidence reuse and boundary
+
+Optional \`v7_evidence\` check reuses
+\`danus.verify.empirical.check_empirical_evidence\` and accepts only pinned
+pre-existing \`evidence_ids\` (list of 16-hex IDs), \`protocol_id\` (16-hex ID)
+and a nonempty \`scope\`. V7 checks protocol lineage, immutable Evidence
+Record identity, artifact SHA/size, and any already-frozen metric reducer.
+This deliberately does **not** call V7's Plan DAG or scheduler.
+
+The V7 runtime has a stricter **pre-execution frozen bundle** contract.
+V8's current write-enabled Experimenter can create scripts at execution time,
+so it cannot automatically claim to have used that V7 frozen execution
+contract. Fully running newly authored experiments through V7's immutable
+bundle / execution runtime would require an explicit **implementation freeze
+and independent approval before execution**, and is not falsely represented
+as implemented by this validation gate. V7's empirical semantic fact-verifier
+and Fact Graph promotion are also separate later actions, never implied by
+Experimenter COMPLETE or Validation PASSED.
+
+Offline checks:
+
+\`\`\`bash
+python -m pytest -q danus/tests/test_v8_adaptive.py danus/tests/test_v8_validation.py
+\`\`\`
+
+Existing completed V8 projects remain auditable as historical records; the
+new validation gate does not retroactively claim their results are PASSED.
+Test the gate with a **new** project, not by reopening a finished pilot.
