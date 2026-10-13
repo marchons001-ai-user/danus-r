@@ -273,6 +273,10 @@ def _check_dispatch(state, role, purpose, proposal_id, request_id):
             raise ValueError("request is not open")
         if req["to"] not in (role, "supervisor"):
             raise PermissionError("request is directed to a different role")
+        if any(t["request_id"] == request_id and
+               t["status"] in {"READY", "RUNNING", "WAITING", "COMPLETE"}
+               for t in state["tasks"].values()):
+            raise PermissionError("request already has an active respondent")
 
 
 def apply_decision(store: Store, choice: dict, level: str):
