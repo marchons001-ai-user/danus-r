@@ -504,8 +504,9 @@ class DanusTUI(App[None]):
             running = f"    Active: {active['role']} / {active['node_id']}" if active else ""
             failures = self.snapshot.get("failed_task_count", 0)
             history = f"    Historical failed tasks: {failures}" if failures else ""
+            verification = f"    Evidence: {self.snapshot.get('validation_status', 'NOT_RUN')}"
             return (f"Project: {self.project_name}    State: {self.snapshot['project_state']}"
-                    f"    V8 Adaptive (read-only monitor){running}{history}")
+                    f"    V8 Adaptive (read-only monitor){running}{verification}{history}")
         outstanding = self.snapshot.get("pending_main_escalations") or []
         pending = f"    Main requests: {len(outstanding)}" if outstanding else ""
         return (
