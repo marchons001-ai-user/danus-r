@@ -271,6 +271,9 @@ def _check_dispatch(state, role, purpose, proposal_id, request_id):
     if purpose == "final_review":
         if role != "reviewer":
             raise PermissionError("final review must be independent Reviewer")
+        if not any(t["role"] == "researcher" and t["status"] == "COMPLETE"
+                   for t in state["tasks"].values()):
+            raise PermissionError("final scientific review requires completed Researcher work")
         if (state["last_experiment_seq"] and
                 state["last_interpret_seq"] <= state["last_experiment_seq"]):
             raise PermissionError(
