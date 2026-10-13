@@ -113,3 +113,31 @@ missing answer. First reconcile the truly stopped RUNNING assignment:
 
 A worker error within a Supervisor step no longer causes automatic
 redispatch of a second scientific worker in the same step.
+
+## Corrective-proposal recovery and scientific-review freshness (2026-10-13)
+
+V8 now accepts experiment proposals up to 32,768 characters (the original
+16,000-character limit rejected a complete 19,689-character corrective
+proposal). Completed read-only Worker responses rejected specifically by
+the historical proposal-length check can be restored **without a model call**:
+
+    python -m danus.v8 salvage v8-flycx-ring-20261013 --task-id task-38
+
+Use only once, after the run has exited and no other Worker is active.
+The source log must contain a completed model turn and valid JSON. An audit
+RECOVERY event records the source-log SHA-256. The corrected proposal enters
+PENDING review status; it is not automatically approved or executed.
+
+There are two different forms of independent review:
+- Early technical audit: Reviewer purpose=work may inspect existing experimental
+  evidence and reject its assumptions or implementation at any time.
+- Final scientific review: Reviewer purpose=final_review evaluates the
+  Researcher's interpretation of the latest completed experiment. When
+  experiments exist, Researcher purpose=interpret must complete after the
+  latest experimental result before final_review can be dispatched.
+
+Completing a later scientific task or registering new experimental artifacts
+makes any earlier final review stale for FINISH authorization. These are
+general evidence-freshness rules, not a fixed role/task-order state machine.
+Existing historical Reviewer REVISE reports remain available; they do not
+authorize project completion.
