@@ -142,3 +142,22 @@ def test_new_unverified_experiment_cannot_inherit_earlier_pass(tmp_path):
     assert s.state()["latest_validation"]["task_id"] == newest
     with pytest.raises(PermissionError):
         v8.apply_decision(s, {"action": "finish", "reason": "Reuse first validation"}, "low")
+
+
+
+def test_two_repeated_unresolved_check_sets_escalate_to_high(tmp_path, monkeypatch):
+    s = new_store(tmp_path)
+    for i in range(2):
+        s.append("VALIDATION", task_id=f"task-{i}",
+                 proposal_id=f"proposal-{i}", status="INCOMPLETE",
+                 reason="same mandatory checker missing",
+                 checks=[{"id": "causality", "status": "INCOMPLETE",
+                          "kind": "csv_rows", "detail": "not executed"}])
+    levels = []
+    def supervisor(store, level, error=""):
+        levels.append(level)
+        return {"action": "block", "reason": "No lawful executable validation route"}
+    monkeypatch.setattr(v8, "_supervisor", supervisor)
+    assert v8.step(s) == "CONTROL"
+    assert levels == ["high"]
+    assert s.state()["halt"]
