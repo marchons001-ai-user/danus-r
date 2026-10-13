@@ -184,3 +184,24 @@ def test_worker_failure_does_not_dispatch_the_role_again_in_same_step(tmp_path, 
     assert v8.step(s) == "WORKER_BLOCKED"
     assert calls == ["low"]
     assert len(s.state()["tasks"]) == 1
+
+
+
+def test_failed_v8_worker_is_historical_not_a_project_halt(tmp_path, monkeypatch):
+    from danus.tui.v8_state import load_v8_project_snapshot
+    monkeypatch.setenv("DANUS_RUNTIME", str(tmp_path))
+    s = v8.Store(v8.project_root("historical-failure"))
+    v8.initialize(s, "Explore an uncertain research hypothesis.")
+    old = dispatch(s, "researcher", "Old attempt")
+    start(s, old)
+    s.append("RESULT", task_id=old, status="BLOCKED", summary="JSONDecodeError",
+             proposal=None, review=None, verdict="")
+    new = dispatch(s, "researcher", "Recovered scientific work")
+    start(s, new)
+    v8._worker_result(s, new, {"action": "complete", "summary": "Verified negative result"})
+    snap = load_v8_project_snapshot("historical-failure")
+    assert snap["project_state"] == "RUNNING"
+    assert snap["failed_task_count"] == 1
+    assert snap["blockers"] == []
+    assert any(n["node_id"] == old and n["state"] == "BLOCKED"
+               for n in snap["nodes"])
