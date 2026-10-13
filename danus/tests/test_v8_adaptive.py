@@ -258,7 +258,7 @@ def test_final_review_must_cover_latest_science_not_just_any_old_review(tmp_path
     v8._worker_result(s, second, {"action": "complete", "summary": "New scientific finding"})
     with pytest.raises(PermissionError, match="stale"):
         v8.apply_decision(s, {"action": "finish", "reason": "Use the old review"}, "low")
-    latest = dispatch(s, "reviewer", "Review new finding", "final_review")
+    latest = dispatch(s, "reviewer", "Independent review", "final_review")
     start(s, latest)
     v8._worker_result(s, latest, {"action": "complete", "summary": "Reviewed new finding",
                                  "verdict": "INCONCLUSIVE"})
