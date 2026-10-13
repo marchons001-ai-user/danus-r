@@ -17,6 +17,7 @@ from danus.orchestration import cli as C
 from danus.orchestration import steering as S
 
 from .state import load_project_snapshot
+from .v8_state import load_v8_project_snapshot
 
 
 class GuidanceScreen(ModalScreen):
@@ -189,10 +190,12 @@ class DanusTUI(App[None]):
     Screen.-short #experiments, Screen.-short #activity { height: 5; }
     """
 
-    def __init__(self, project: str) -> None:
+    def __init__(self, project: str, *, v8: bool = False) -> None:
         super().__init__()
         self.project_name = project
-        self.snapshot = load_project_snapshot(project)
+        self.is_v8 = v8
+        self._load_snapshot = load_v8_project_snapshot if v8 else load_project_snapshot
+        self.snapshot = self._load_snapshot(project)
         self.activity_role = "all"
         self._detail_kind = "plan"
         self._detail_key = str(self.snapshot["root_id"])
@@ -492,6 +495,12 @@ class DanusTUI(App[None]):
         self.push_screen(BlockerScreen("\n\n" + ("\n\n" + "-" * 64 + "\n\n").join(sections)))
 
     def _summary_text(self) -> str:
+        if self.is_v8:
+            active = next((r for r in self.snapshot["workers"]
+                           if r["progress_state"] == "RUNNING"), None)
+            running = f"    Active: {active['role']} / {active['node_id']}" if active else ""
+            return (f"Project: {self.project_name}    State: {self.snapshot['project_state']}"
+                    f"    V8 Adaptive (read-only monitor){running}")
         outstanding = self.snapshot.get("pending_main_escalations") or []
         pending = f"    Main requests: {len(outstanding)}" if outstanding else ""
         return (
@@ -510,6 +519,9 @@ class DanusTUI(App[None]):
         self.notify(message)
 
     def action_toggle_pause(self) -> None:
+        if self.is_v8:
+            self.notify("V8 monitor is read-only; use the V8 CLI for control.", severity="warning")
+            return
         if self.snapshot["project_state"] in {"COMPLETE", "ACTION_REQUIRED"}:
             self.notify("Science is finished; outstanding Main requests need operator review.", severity="warning")
             return
@@ -526,6 +538,9 @@ class DanusTUI(App[None]):
         self._control_succeeded(message)
 
     def action_guide(self) -> None:
+        if self.is_v8:
+            self.notify("V8 guidance is not wired to V7 controls.", severity="warning")
+            return
         self.push_screen(GuidanceScreen(), self._submit_guidance)
 
     def _submit_guidance(self, text: str | None) -> None:
@@ -539,6 +554,9 @@ class DanusTUI(App[None]):
         self._control_succeeded("Human Guidance saved.")
 
     def action_interrupt(self) -> None:
+        if self.is_v8:
+            self.notify("Do not use V7 interrupt on V8; use V8 CLI.", severity="warning")
+            return
         self.push_screen(GuidanceScreen(interrupt=True), self._confirm_interrupt)
 
     def _confirm_interrupt(self, text: str | None) -> None:
@@ -615,7 +633,7 @@ class DanusTUI(App[None]):
 
     def _refresh_snapshot(self) -> None:
         old_nodes = self.snapshot["nodes"]
-        self.snapshot = load_project_snapshot(self.project_name)
+        self.snapshot = self._load_snapshot(self.project_name)
         self.query_one("#summary", Static).update(self._summary_text())
         blocker_banner = self.query_one("#blockers", Static)
         blocker_banner.display = bool(self.snapshot.get("blockers"))
