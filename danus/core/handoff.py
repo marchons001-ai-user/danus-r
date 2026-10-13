@@ -57,6 +57,7 @@ class HandoffRequests:
         subject_id = self.progress._required(subject_id, "subject_id")
         requested_by = self.progress._required(requested_by, "requested_by")
         source_role = self.progress._required(source_role, "source_role").lower()
+        original_request = str(request)
         request = self.progress._required(request, "request") + "\n"
         reason = self.progress._required(reason, "reason")
         source_assignment_id = str(source_assignment_id or "").strip()
@@ -76,6 +77,30 @@ class HandoffRequests:
             raise ValueError(f"unknown plan node: {node_id}")
         if node["state"] != "ACTIVE":
             raise ValueError(f"plan node {node_id} is not ACTIVE")
+        if kind == "INTERPRET" and subject_type == "ASSIGNMENT":
+            source = next(
+                (a for a in self.progress.assignments()
+                 if a["assignment_id"] == subject_id), None,
+            )
+            if source and node_id != source.get("node_id"):
+                # The downstream Researcher Plan task was frozen byte-for-byte.
+                # Preserve its exact trailing newlines instead of normalizing
+                # the handoff into a different task hash.
+                from danus.orchestration.autonomy import _interpret_plan_target, _task_spec
+
+                spec = _task_spec(self.root, node_id)
+                if (
+                    source.get("role") != "experimenter"
+                    or source_role != "experimenter"
+                    or source_assignment_id != subject_id
+                    or not refs
+                    or _interpret_plan_target(self.root, source["node_id"]) != node_id
+                    or spec.get("status") != "ready"
+                    or spec.get("role") != "researcher"
+                    or original_request != spec["task"]
+                ):
+                    raise ValueError("planned INTERPRET must match exact frozen Researcher task")
+                request = original_request
         if parent_handoff_id and self.get(parent_handoff_id) is None:
             raise ValueError(f"unknown parent handoff: {parent_handoff_id}")
 

@@ -30,7 +30,7 @@ def _plan(root, *, extra_interpreter=False):
     )
     graph.review_change(change, reviewer="low2", verdict="APPROVE", rationale="bounded")
     assert graph.commit_change(change, committer="supervisor") == 2
-    task = "Interpret the immutable experiment using experiment_evidence_get; write one report.\n"
+    task = "Interpret the immutable experiment using experiment_evidence_get; write one report.\n\n"
     for name in (["R2", "R3"] if extra_interpreter else ["R2"]):
         path = root / "tasks" / "v2" / "researcher" / f"{name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
