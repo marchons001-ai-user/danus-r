@@ -146,6 +146,12 @@ class Store:
                     origin["status"] = "READY"
             elif kind == "RESULT":
                 task = state["tasks"][e["task_id"]]
+                if e.get("reply_to"):
+                    req = state["requests"][e["reply_to"]]
+                    req["status"], req["answer"] = "ANSWERED", e["summary"]
+                    origin = state["tasks"][req["from_task"]]
+                    if origin["status"] == "WAITING":
+                        origin["status"] = "READY"
                 task["status"] = e["status"]
                 task["summary"] = e["summary"]
                 if e.get("proposal"):
@@ -403,12 +409,10 @@ def _worker_result(store: Store, task_id: str, result: dict):
             raise RuntimeError("assigned request was answered before worker finished")
     store.append("RESULT", task_id=task_id,
                  status="COMPLETE" if action == "complete" else "BLOCKED",
-                 summary=summary, proposal=proposal, review=review, verdict=verdict)
+                 summary=summary, proposal=proposal, review=review, verdict=verdict,
+                 reply_to=task["request_id"] if action == "complete" else "")
     for asset in assets:
         store.append("ASSET", **asset)
-    if action == "complete" and task["request_id"]:
-        store.append("REPLY", request_id=task["request_id"], by=task["role"],
-                     message=summary)
 
 
 def _extract_json(message):
@@ -444,6 +448,14 @@ def _call(model, effort, prompt, workdir, log_path, *, writable=False, timeout=1
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
             raise RuntimeError(f"model invocation timed out at {timeout}s")
+        except KeyboardInterrupt:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+            raise
     telemetry = codex_context.inspect_log(log_path)
     if code:
         raise RuntimeError(f"model exited with {code}; see {log_path}")
