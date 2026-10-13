@@ -553,6 +553,7 @@ Report generated artifacts as workspace-relative file paths.
 
 
 def _supervisor(store: Store, level, error=""):
+    print(f"[V8] Supervisor-{level}: deciding next action ...", flush=True)
     prompt = (_SUPERVISOR_POLICY + "\nLEVEL: " + level +
               "\nPrevious decision error: " + error +
               "\nTrusted project status:\n" +
@@ -581,6 +582,8 @@ def _worker(store: Store, task_id, *, timeout=1200):
         store.publish()
     state = store.state()
     task = state["tasks"][task_id]
+    print(f"[V8] {task['role']}: running {task_id} ({task['purpose']}); "
+          f"log: {store.root / 'logs'}", flush=True)
     req = state["requests"].get(task["request_id"])
     replies = [r for r in state["requests"].values()
                if r["from_task"] == task_id and r["status"] == "ANSWERED"]
@@ -651,6 +654,8 @@ def step(store: Store, *, worker_timeout=1200):
                 continue
             if isinstance(selected, str):
                 _worker(store, selected, timeout=worker_timeout)
+                print(f"[V8] {selected}: {store.state()['tasks'][selected]['status']}",
+                      flush=True)
             return selected or "CONTROL"
         except (ValueError, KeyError, PermissionError, RuntimeError,
                 json.JSONDecodeError, OSError, subprocess.SubprocessError) as exc:
