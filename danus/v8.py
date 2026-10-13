@@ -78,6 +78,19 @@ class Store:
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
 
+    @contextmanager
+    def runner_lock(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        with (self.root / ".runner.lock").open("a+") as fd:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("another V8 Supervisor process is already running") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
     def read(self):
         if not self.events.is_file():
             return []
@@ -590,7 +603,9 @@ def step(store: Store, *, worker_timeout=1200):
         if any(t["status"] == "RUNNING" for t in state["tasks"].values()):
             raise RuntimeError("interrupted worker must be reconciled before continuing")
     error = ""
-    for level in ("low", "low", "high"):
+    force_high = False
+    for attempt in range(3):
+        level = "high" if force_high or attempt == 2 else "low"
         try:
             decision = _supervisor(store, level, error)
             with store.lock():
@@ -598,6 +613,7 @@ def step(store: Store, *, worker_timeout=1200):
                 store.publish()
             if selected == "HIGH":
                 error = "Low Supervisor voluntarily escalated"
+                force_high = True
                 continue
             if isinstance(selected, str):
                 _worker(store, selected, timeout=worker_timeout)
@@ -668,12 +684,13 @@ def main(argv=None):
     if limit < 0:
         raise ValueError("negative step limit")
     iteration = 0
-    while not limit or iteration < limit:
-        outcome = step(store, worker_timeout=getattr(args, "worker_timeout", 1200))
-        print(f"V8 step {iteration + 1}: {outcome}", flush=True)
-        iteration += 1
-        if outcome in ("STOP", "HALT"):
-            break
+    with store.runner_lock():
+        while not limit or iteration < limit:
+            outcome = step(store, worker_timeout=getattr(args, "worker_timeout", 1200))
+            print(f"V8 step {iteration + 1}: {outcome}", flush=True)
+            iteration += 1
+            if outcome in ("STOP", "HALT"):
+                break
 
 
 if __name__ == "__main__":
