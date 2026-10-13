@@ -143,7 +143,7 @@ def load_v8_project_snapshot(project: str) -> dict[str, Any]:
 
     experiments = []
     for task in tasks.values():
-        if task["purpose"] not in ("experiment", "review_experiment"):
+        if task["purpose"] != "experiment":
             continue
         proposal = state["proposals"].get(task["proposal_id"], {})
         status = task["status"]
