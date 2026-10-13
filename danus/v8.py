@@ -19,7 +19,6 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from danus import codex
-from danus.execution import context as codex_context
 
 ROLES = ("researcher", "reviewer", "experimenter")
 MODES = ("work", "answer", "experiment", "review_experiment", "final_review")
@@ -357,11 +356,11 @@ def apply_decision(store: Store, choice: dict, level: str):
     raise ValueError("unsupported Supervisor action")
 
 
-def _worker_result(store: Store, task_id: str, result: dict):
+def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
     state = store.state()
     task = state["tasks"][task_id]
-    if task["status"] != "RUNNING":
-        raise ValueError("result does not belong to the running task")
+    if task["status"] != "RUNNING" and not (recovery and task["status"] == "BLOCKED"):
+        raise ValueError("result does not belong to the running or explicitly recovered task")
     action = result.get("action")
     summary = _limit_text(result.get("summary"), "worker summary", max_len=32000)
     if action == "request":
@@ -429,6 +428,32 @@ def _worker_result(store: Store, task_id: str, result: dict):
                  reply_to=task["request_id"] if action == "complete" else "")
     for asset in assets:
         store.append("ASSET", **asset)
+
+
+def recover_model_result(store: Store, task_id: str):
+    """Explicitly salvage a finished, read-only Codex reply previously misparsed."""
+    with store.lock():
+        state = store.state()
+        if any(t["status"] == "RUNNING" for t in state["tasks"].values()):
+            raise RuntimeError("wait for current Worker to finish before recovering")
+        task = state["tasks"].get(task_id)
+        if not task or task["status"] != "BLOCKED":
+            raise ValueError("only a BLOCKED task may be salvaged")
+        if task["purpose"] == "experiment":
+            raise PermissionError("cannot salvage experimental execution via model logs")
+        if "JSONDecodeError" not in task["summary"]:
+            raise PermissionError("salvage is limited to this verified JSON parsing failure")
+        logs = sorted((store.root / "logs").glob(task_id + "-*.jsonl"))
+        if len(logs) != 1:
+            raise ValueError("requires exactly one original Codex log for task")
+        reply = _completed_model_reply(logs[0])
+        verify_assets(store)
+        store.append("RECOVERY", task_id=task_id,
+                     source_log=logs[0].name,
+                     source_sha256=hashlib.sha256(logs[0].read_bytes()).hexdigest())
+        _worker_result(store, task_id, reply, recovery=True)
+        store.publish()
+        return {"task_id": task_id, "status": store.state()["tasks"][task_id]["status"]}
 
 
 def _extract_json(message):
@@ -727,7 +752,7 @@ def main(argv=None):
     new.add_argument("project")
     new.add_argument("--goal-file", type=Path, required=True)
     new.add_argument("--reference", default="")
-    for command in ("run", "step", "status", "recover", "reconcile", "unblock"):
+    for command in ("run", "step", "status", "recover", "salvage", "reconcile", "unblock"):
         sub = commands.add_parser(command)
         sub.add_argument("project")
         if command in ("unblock", "reconcile"):
@@ -737,7 +762,7 @@ def main(argv=None):
         if command == "run":
             sub.add_argument("--max-steps", type=int, default=0)
             sub.add_argument("--worker-timeout", type=int, default=1200)
-        if command == "recover":
+        if command in ("recover", "salvage"):
             sub.add_argument("--task-id", required=True)
     args = parser.parse_args(argv)
     store = Store(project_root(args.project))
@@ -755,6 +780,10 @@ def main(argv=None):
                 raise ValueError("project is not halted")
             store.append("UNHALT", reason=_limit_text(args.reason, "reason", max_len=1000))
             store.publish()
+        return
+    if args.command == "salvage":
+        with store.runner_lock():
+            print(json.dumps(recover_model_result(store, args.task_id)))
         return
     if args.command == "reconcile":
         with store.lock():
