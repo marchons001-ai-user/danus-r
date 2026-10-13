@@ -816,7 +816,7 @@ def main(argv=None):
             outcome = step(store, worker_timeout=getattr(args, "worker_timeout", 1200))
             print(f"V8 step {iteration + 1}: {outcome}", flush=True)
             iteration += 1
-            if outcome in ("STOP", "HALT"):
+            if outcome in ("STOP", "HALT", "WORKER_BLOCKED"):
                 break
 
 
