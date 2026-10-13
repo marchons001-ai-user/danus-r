@@ -76,3 +76,40 @@ If an interrupted read-only task needs replay:
 Three scenarios cover multirole follow-up communication, mandatory experiment
 review and immutable asset integrity, and low-to-high Supervisor escalation.
 Actual Codex invocation and research execution must still be verified on WSL.
+
+## V8 TUI
+
+The original Textual interface now supports a V8 read-only event/log adapter:
+
+    python -m danus.tui project-name --v8
+
+Task tree, workers, experiment turns, requests and Codex activity are visible.
+Legacy V7 pause, guidance and interrupt controls are disabled in V8 mode.
+
+## Recovery of an already completed model turn misparsed by older V8
+
+Early V8 erroneously used the generic 8K-truncated context summary as the
+machine-readable JSON worker result. If the Codex log contains a full
+turn.completed and JSON final message, a read-only worker may have been
+recorded as BLOCKED with JSONDecodeError. The fixed V8 parser reads the
+complete final agent_message.
+
+Do not rerun that research. First wait for any currently RUNNING worker to
+finish, or explicitly stop and reconcile it only after the process has exited.
+Then the original completed read-only result can be restored from its hashed
+Codex log:
+
+    python -m danus.v8 salvage project-name --task-id task-N
+
+The command requires a prior JSONDecodeError blocker, exactly one finished
+Codex log, no concurrently running worker and a non-experiment task. It
+preserves the old events and records a RECOVERY audit event. It never
+re-executes the model.
+
+If a worker was interrupted rather than completed, salvage cannot invent a
+missing answer. First reconcile the truly stopped RUNNING assignment:
+
+    python -m danus.v8 reconcile project-name --task-id task-N --reason "Operator inspected process and incomplete output"
+
+A worker error within a Supervisor step no longer causes automatic
+redispatch of a second scientific worker in the same step.
