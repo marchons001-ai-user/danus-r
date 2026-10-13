@@ -363,7 +363,7 @@ def _worker_result(store: Store, task_id: str, result: dict):
     if task["status"] != "RUNNING":
         raise ValueError("result does not belong to the running task")
     action = result.get("action")
-    summary = _limit_text(result.get("summary"), "worker summary", max_len=6000)
+    summary = _limit_text(result.get("summary"), "worker summary", max_len=32000)
     if action == "request":
         target = result.get("to", "supervisor")
         if target not in (*ROLES, "supervisor"):
@@ -444,8 +444,37 @@ def _extract_json(message):
     return value
 
 
+def _completed_model_reply(log_path: Path) -> dict:
+    """Read the FULL final Codex JSON message; context telemetry caps it at 8K.
+
+    The generic context parser intentionally truncates messages for prompts.
+    V8 needs the complete structured result, which may contain long reports.
+    """
+    final_text = None
+    completed = False
+    with log_path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "turn.completed":
+                completed = True
+            elif event.get("type") == "item.completed":
+                item = event.get("item")
+                if isinstance(item, dict) and item.get("type") == "agent_message":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        final_text = text
+    if not completed or not final_text:
+        raise ValueError("Codex ended without a completed turn and final message")
+    return _extract_json(final_text)
+
+
 def _call(model, effort, prompt, workdir, log_path, *, writable=False, timeout=1200):
-    """Reuse Danus's non-escalating Codex command and log telemetry parser."""
+    """Reuse Danus's non-escalating Codex command; parse full final JSON."""
     codex_bin = codex.resolve_bin()
     cmd = codex.exec_cmd(
         codex_bin, model, effort, "-C", str(workdir),
@@ -472,10 +501,9 @@ def _call(model, effort, prompt, workdir, log_path, *, writable=False, timeout=1
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
             raise
-    telemetry = codex_context.inspect_log(log_path)
     if code:
         raise RuntimeError(f"model exited with {code}; see {log_path}")
-    return _extract_json(telemetry.get("last_agent_message"))
+    return _completed_model_reply(log_path)
 
 
 def _brief_state(store: Store, *, last=18):
