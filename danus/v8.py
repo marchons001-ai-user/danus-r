@@ -627,7 +627,13 @@ def step(store: Store, *, worker_timeout=1200):
         if any(t["status"] == "RUNNING" for t in state["tasks"].values()):
             raise RuntimeError("interrupted worker must be reconciled before continuing")
     error = ""
-    force_high = False
+    recent_results = [e for e in store.read() if e["kind"] == "RESULT"]
+    recent_blocks = 0
+    for result in reversed(recent_results):
+        if result["status"] != "BLOCKED":
+            break
+        recent_blocks += 1
+    force_high = recent_blocks >= 2
     for attempt in range(3):
         level = "high" if force_high or attempt == 2 else "low"
         try:
@@ -675,11 +681,13 @@ def main(argv=None):
     new.add_argument("project")
     new.add_argument("--goal-file", type=Path, required=True)
     new.add_argument("--reference", default="")
-    for command in ("run", "step", "status", "recover", "unblock"):
+    for command in ("run", "step", "status", "recover", "reconcile", "unblock"):
         sub = commands.add_parser(command)
         sub.add_argument("project")
-        if command == "unblock":
+        if command in ("unblock", "reconcile"):
             sub.add_argument("--reason", required=True)
+        if command == "reconcile":
+            sub.add_argument("--task-id", required=True)
         if command == "run":
             sub.add_argument("--max-steps", type=int, default=0)
             sub.add_argument("--worker-timeout", type=int, default=1200)
@@ -700,6 +708,17 @@ def main(argv=None):
             if not store.state()["halt"]:
                 raise ValueError("project is not halted")
             store.append("UNHALT", reason=_limit_text(args.reason, "reason", max_len=1000))
+            store.publish()
+        return
+    if args.command == "reconcile":
+        with store.lock():
+            task = store.state()["tasks"].get(args.task_id)
+            if not task or task["status"] != "RUNNING":
+                raise ValueError("only interrupted RUNNING tasks can be reconciled")
+            store.append("RESULT", task_id=args.task_id, status="BLOCKED",
+                         summary="Operator recorded interrupted work as incomplete: " +
+                                 _limit_text(args.reason, "reason", max_len=1000),
+                         proposal=None, review=None, verdict="")
             store.publish()
         return
     if args.command == "recover":
