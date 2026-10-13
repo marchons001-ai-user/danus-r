@@ -131,6 +131,22 @@ approved and committed, the designated Researcher submission node must call
 contract APPROVE remains mandatory before Experimenter execution. Do not
 substitute a hand-authored approximation for the canonical text.
 
+**Committed Plan nodes intentionally contain only coarse route information.**
+The Experimenter's approved full task is materialized separately under
+`tasks/v<plan_version>/experimenter/<node_id>.md` in the Danus control project,
+not embedded in `RESEARCH_PLAN.json` or `plan/current.json`. The downstream
+Researcher need not independently read this control-plane file before submitting
+the already frozen four contract fields. The authorized
+`implementation_submit_contract(node_id=..., plan_version=..., ...)` Gateway
+performs the actual exact-task hash check against the materialized Experimenter
+task, including dependency and dispatch guards. The absence of verbatim task
+text in a Plan snapshot alone is **not** a prerequisite failure and must not
+trigger BLOCKED, ESCALATE, or a Plan revision. Reuse the original, reviewed
+canonical fields unchanged, submit them once, and let the Gateway decide.
+If the Gateway actually reports a missing task, a hash mismatch, or denied
+authorization, preserve that exact error and escalate; never bypass or edit
+the frozen task, its hash, the Plan, or the contract approval gate.
+
 ## Make the proposed Experimenter task scientifically executable
 
 When preparing the four fields for `implementation_render_task` and the
