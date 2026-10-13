@@ -63,7 +63,8 @@ def test_review_required_and_artifacts_immutable(tmp_path):
     v8._worker_result(s, r, {"action": "complete",
         "summary": "Test memory on controlled synthetic headings",
         "proposal": "Use 8-unit recurrent and feedforward models; 1 seed, 2 minutes max."
-                    " Compare heading MSE, including negative outcomes."})
+                    " Compare heading MSE, including negative outcomes.",
+        "required_checks": [{"id": "assets", "kind": "asset_integrity"}]})
     pid = next(iter(s.state()["proposals"]))
     with pytest.raises(PermissionError, match="approved"):
         dispatch(s, "experimenter", "Run experiment", "experiment", proposal_id=pid)
