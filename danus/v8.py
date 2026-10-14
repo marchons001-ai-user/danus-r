@@ -876,6 +876,9 @@ def _brief_state(store: Store, *, last=12):
             "reason": validation["reason"][:500],
         } if validation else None),
         "review_issues": issues, "open_review_issue_count": len(issues),
+        "latest_experiment_needs_interpretation": bool(
+            state["last_experiment_seq"]
+            and state["last_interpret_seq"] <= state["last_experiment_seq"]),
         "inputs": ({
             "dataset_label": inputs["dataset_label"],
             "manifest_path": inputs["manifest_path"],
@@ -939,7 +942,9 @@ For an experiment, Researcher must first return a proposal, then Reviewer
 reviews its exact proposal_id, only then dispatch experimenter with
 purpose=experiment and same proposal_id. After a successful experiment assign
 Researcher purpose=interpret to analyze actual evidence, then request a
-purpose=final_review from Reviewer. Reviewer purpose=work may inspect code
+purpose=final_review from Reviewer. If latest_experiment_needs_interpretation
+is true, final_review is illegal: route Researcher purpose=interpret first.
+Reviewer purpose=work may inspect code
 and raw evidence earlier to catch faults; this is an early technical audit,
 NOT a final scientific conclusion review. A final_review must cover the latest
 interpretation and evidence. Never conclude from pre-interpretation review.
@@ -1155,17 +1160,18 @@ def step(store: Store, *, worker_timeout=1200):
     for attempt in range(3):
         level = "high" if force_high or attempt == 2 else "low"
         try:
-            decision = _supervisor(store, level, error)
+            try:
+                decision = _supervisor(store, level, error)
+            except OSError as exc:
+                # Only model invocation failures are launch errors.
+                # PermissionError from apply_decision is a legal route denial.
+                with store.lock():
+                    store.append("HALT", reason=f"SUPERVISOR_LAUNCH_ERROR: {type(exc).__name__}: {exc}")
+                    store.publish()
+                return "HALT"
             with store.lock():
                 selected = apply_decision(store, decision, level)
                 store.publish()
-        except OSError as exc:
-            # A failed OS process launch is not a scientific routing decision.
-            # Do not retry the same unlaunchable command three times.
-            with store.lock():
-                store.append("HALT", reason=f"SUPERVISOR_LAUNCH_ERROR: {type(exc).__name__}: {exc}")
-                store.publish()
-            return "HALT"
         except (ValueError, KeyError, PermissionError, RuntimeError,
                 json.JSONDecodeError, subprocess.SubprocessError) as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -1173,6 +1179,12 @@ def step(store: Store, *, worker_timeout=1200):
                 store.append("DENIED", level=level, error=error)
                 store.publish()
             continue
+        except OSError as exc:
+            # File-system errors applying decisions are not launch errors.
+            with store.lock():
+                store.append("HALT", reason=f"SUPERVISOR_DECISION_IO_ERROR: {type(exc).__name__}: {exc}")
+                store.publish()
+            return "HALT"
         if selected == "HIGH":
             error = "Low Supervisor voluntarily escalated"
             force_high = True
