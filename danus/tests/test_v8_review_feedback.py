@@ -143,3 +143,70 @@ def test_valid_scientific_inconclusive_and_no_silent_waiver(tmp_path):
         "verdict": "INCONCLUSIVE"})
     v8.apply_decision(store, {"action": "finish", "reason": "Valid null finding"}, "low")
     assert store.state()["done"]
+
+
+
+def test_budget_guide_and_precise_reviewer_schema_failures():
+    limits = v8.OUTPUT_TEXT_LIMITS
+    guide = v8._output_budget_guide()
+    for field, maximum in limits.items():
+        assert f"{field} | {maximum} | {maximum * 7 // 10}" in guide
+    assert "ALL" not in guide or "five keys" in guide
+    assert "MUST contain all" in guide
+    assert "Never invent evidence" in guide
+    for invalid, reason in ((None, "missing or non-string"),
+                            ("   ", "whitespace-only"),
+                            ("X" * 1501, "actual length 1501")):
+        with pytest.raises(ValueError, match=reason):
+            v8._limit_text(invalid, "issue evidence", max_len=1500)
+
+
+def test_blocked_reviewer_bad_evidence_can_be_reassigned_without_new_experiment(tmp_path):
+    store = init(tmp_path)
+    pid = approved(store, "schema-retry")
+    review = perform(store, pid, "science.csv")
+    store.append("RUNNING", task_id=review)
+    invalid = {"action": "complete", "summary": "Evidence-based revision",
+               "verdict": "REVISE", "issues": [{
+                   "problem": "Missing directional audit",
+                   "impact": "Could reverse the sign",
+                   "required_action": "Recompute direction using raw data",
+                   "target_role": "researcher",
+                   "evidence": "",
+               }]}
+    with pytest.raises(ValueError, match="issue evidence.*whitespace-only"):
+        v8._worker_result(store, review, invalid)
+    store.append("RESULT", task_id=review, status="BLOCKED",
+                 summary="execution/validation error: ValueError: empty issue evidence",
+                 proposal=None, review=None, verdict="")
+    original_experiments = [
+        t["id"] for t in store.state()["tasks"].values()
+        if t["purpose"] == "experiment"]
+    next_review = dispatch(store, "reviewer", "final_review")
+    assert next_review != review
+    complete(store, next_review, verdict="REVISE", issues=[{
+        **invalid["issues"][0],
+        "evidence": "Original report lacks a directional audit record"
+    }])
+    assert len(store.state()["review_issues"]) == 1
+    assert [t["id"] for t in store.state()["tasks"].values()
+            if t["purpose"] == "experiment"] == original_experiments
+
+
+def test_supervisor_and_worker_both_receive_budget_table(tmp_path, monkeypatch):
+    store = init(tmp_path)
+    captured = []
+    def fake_call(model, effort, prompt, workdir, log_path, *, writable=False, timeout=1200):
+        captured.append(prompt)
+        if "Current assignment:\n" in prompt:
+            return {"action": "complete", "summary": "Small valid response"}
+        return {"action": "escalate", "reason": "Require a researcher first"}
+    monkeypatch.setattr(v8, "_call", fake_call)
+    v8._supervisor(store, "low")
+    researcher = dispatch(store, "researcher")
+    v8._worker(store, researcher, timeout=40)
+    assert len(captured) == 2
+    for text in captured:
+        assert "Response length budget" in text
+        assert "review issue field (each) | 1500 | 1050" in text
+        assert "ALL" not in text or "five keys" in text
