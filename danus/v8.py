@@ -1022,7 +1022,16 @@ corrections still require an exact Researcher experiment proposal and
 independent Reviewer experiment approval. Only Reviewer may later mark
 issues RESOLVED, WAIVED or DUPLICATE with evidence.
 After a final_review REVISE, follow its structured OPEN review_issues and
-route fixes to their target roles. Before a costly corrective experiment,
+route fixes to their target roles. If the SAME concrete defect survives two
+completed corrective attempts, first route a Researcher scope/necessity
+reassessment (or a read-only Reviewer audit), not another larger omnibus
+protocol. Ask what evidence is actually needed for the fixed scientific goal,
+which prior independent checks can be reused, and what smallest repair would
+address the remaining risk. Count distinct failure modes, not repeated issue
+IDs. This is a change of strategy, NOT automatic issue closure or a numerical
+deadline for science. A pending proposal still requires ordinary independent
+Reviewer review; Reviewer may REVISE an overbroad proposal before execution.
+Before a costly corrective experiment,
 prefer Researcher issue grouping when multiple findings clearly overlap;
 an already approved independent scientific need need not be deferred. Treat repeated findings as the same IDs;
 do not multiply repair tasks for an unchanged unresolved defect. Experimenter corrective execution still
@@ -1083,6 +1092,22 @@ The operator, not any Worker, staged the inputs. This does not independently
 authenticate the upstream dataset or scientific interpretation; disclose
 those limitations, but do not demand that this manifest prove more than it does.
 Researcher may propose a specific small experiment but must not execute it.
+Start from the FIXED scientific question and the narrowest defensible conclusion,
+including a negative or inconclusive result. Before EVERY corrective proposal,
+perform a concise minimum-sufficient-evidence audit BY DISTINCT FAILURE MODE,
+not by every repeated issue ID: (a) what wrong conclusion or unreproducible
+result could this defect cause, (b) what independent existing evidence already
+excludes that failure, (c) choose REUSE, NARROW, REPAIR or OMIT, and (d) for
+REPAIR, what is the smallest executable check or change that closes the gap.
+For an omitted or replaced check, cite the actual independent evidence and
+its scope; shared code or self-reported PASS is not independent evidence.
+Include only a SHORT audit summary in the proposal, not another exhaustive
+checklist. If no new experiment is scientifically needed, report that finding
+and seek independent Reviewer adjudication of still-OPEN issues instead of
+proposing a redundant rerun. Never silently delete prior approved obligations:
+a narrower replacement proposal needs its own Reviewer approval, and original
+issues stay OPEN until the Reviewer explicitly resolves, waives or deduplicates
+them with evidence.
 If several OPEN Reviewer issues overlap, check whether the same repair or
 evidence would satisfy them. If so, propose ONE shared work item preserving
 each original issue and any distinct obligation. For researcher purpose=work,
@@ -1099,8 +1124,9 @@ Experimenter only executes the exact Reviewer-approved experimental plan.
 Output budgets (CHARACTERS, not words, bytes or tokens; count text inside JSON
 string values, excluding JSON punctuation):
 - proposal: target at most 10,000 characters. Give a COMPLETE reproducible
-  protocol (question, data, controls, metrics, bounds and negative criteria);
-  remove repetition rather than dropping required conditions.
+  MINIMUM SUFFICIENT protocol (question, data, controls, metrics, bounds and
+  negative criteria). Reuse pinned prior evidence rather than restating its
+  full inventory. Exclude unsupported extras; never omit decisive evidence.
 - summary (including review findings): target at most 5,000 characters.
   Put detailed scientific evidence in registered assets when authorized,
   then cite the existing asset paths in the summary; never hide critical errors.
@@ -1138,7 +1164,16 @@ Do not falsely claim that these generic checks establish causal validity.
 Experimenter must deliver the exact approved artifact paths without
 changing required_checks. Model-declared VALID/PASS is not authority.
 For Reviewer purpose=review_experiment, use verdict APPROVE/REVISE/REJECT.
-Judge omissions by effect on the scoped conclusion. Distinguish (1) a
+Actively challenge unnecessary requirements BEFORE approving their execution.
+For each costly or repeated check, ask what concrete failure it detects, whether
+that failure can change the FIXED scientific conclusion or its reproducibility,
+and whether existing independent evidence already covers it. Require a minimal
+sufficient set of checks; REVISE an overbroad proposal to remove, reuse or
+narrow unjustified work, even when every requested step is technically valid.
+Conversely, do not approve a cheap but inadequate plan that omits decisive
+evidence or relies on an Experimenter's claimed checker success. Revisions
+must be newly proposed and independently approved; do not silently change the
+pending exact proposal. Judge omissions by effect on the scoped conclusion. Distinguish (1) a
 scientific defect that can change the result, (2) an engineering defect
 that prevents independent reproduction, and (3) redundant checks already
 covered by independent evidence. For each demanded check, explain which
@@ -1148,7 +1183,12 @@ For Researcher purpose=interpret, analyze the already recorded experimental
 outputs, including negative findings; do not produce a new experiment unless
 you have a separate scientific reason. For Reviewer purpose=final_review,
 assess the Researcher's interpretation against underlying evidence and the
-COMPLETE approved protocol supplied in your assignment. Distinguish
+COMPLETE approved protocol supplied in your assignment. Apply a scoped
+necessity test to missing auxiliary steps: what distinct failure could they
+have caught, whether it affects the conclusion, and whether existing
+independent observations already exclude it. Prefer evidence-backed
+accepted_deviations, DUPLICATE or WAIVED as appropriate over new procedural
+work; do not claim a missing verification executed. Distinguish
 conclusion-changing scientific defects, reproducibility gaps and already
 independently covered repeated checks. For each blocking finding explain
 its scientific impact and the minimum justified correction. Missing an
