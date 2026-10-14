@@ -430,3 +430,37 @@ open issues and verified experimental artifacts"`, then invoke the normal
 V8 run command with a bounded step count and **append** to existing logs.
 The system must route outstanding Reviewer scientific corrections rather
 than waive them silently.
+
+
+## V8 post-experiment permission denial must not HALT as launch error (2026-10-14)
+
+A PFL3 real-science run successfully completed Reviewer approval task-45 and
+corrective Experimenter task-49, then Supervisor tried `final_review` before
+a NEW Researcher `interpret`. The deterministic `_check_dispatch` correctly
+raised `PermissionError`, but `step()` caught it as `OSError` (the Python
+base class of PermissionError) and incorrectly wrote
+`SUPERVISOR_LAUNCH_ERROR` + HALT.
+
+This is an orchestration error, NOT a model launch failure and NOT scientific
+rejection. Fix: scope `OSError` handling to the `_supervisor()` invocation,
+so `PermissionError` from `apply_decision()` creates the usual `DENIED`
+event and allows a bounded retry of a different legal action. Similarly,
+a genuine model timeout or nonzero exit (RuntimeError) is now recorded as
+`SUPERVISOR_MODEL_ERROR` rather than consuming further attempts as if the
+model returned illegal decisions. Actual decision-stage filesystem I/O
+failures record `SUPERVISOR_DECISION_IO_ERROR`, distinct from launch errors.
+Existing authority gates and the requirement to interpret a newly completed
+experiment remain unchanged.
+
+The condensed Supervisor state now exposes the authoritative boolean
+`latest_experiment_needs_interpretation`; the existing dynamic policy tells
+the model to route Researcher purpose=interpret before final_review when true.
+
+Offline focused regressions:
+
+    python -m pytest -q danus/tests/test_v8_supervisor_errors.py danus/tests/test_v8_transport_and_evidence.py danus/tests/test_v8_review_feedback.py danus/tests/test_v8_adaptive.py danus/tests/test_v8_validation.py danus/tests/test_v8_inputs.py
+
+After the tests pass, explicitly `danus.v8 unblock` the EXISTING PFL3 project,
+preserve task-49's registered scientific outputs and the five open Reviewer
+issues, then continue with `run` and append to the autonomous-run log. Never
+restart the corrective experiment just to fix the routing classifier.
