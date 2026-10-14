@@ -94,11 +94,18 @@ def test_final_reviewer_receives_exact_proposal_and_structured_repair_loop(tmp_p
     approval = dispatch(store, "reviewer", "review_experiment", proposal_id=new_pid)
     complete(store, approval, verdict="APPROVE")
     latest = perform(store, new_pid, "corrected.csv")
-    complete(store, latest, verdict="ACCEPT", resolved_issues=[{
+    # A plain ACCEPT cannot silently drop a prior blocking finding.
+    store.append("RUNNING", task_id=latest)
+    with pytest.raises(ValueError, match="unresolved Reviewer issues"):
+        v8._worker_result(store, latest, {
+            "action": "complete", "summary": "Implicitly accept", "verdict": "ACCEPT"})
+    v8._worker_result(store, latest, {
+        "action": "complete", "summary": "Independently verified correction",
+        "verdict": "ACCEPT", "resolved_issues": [{
         "id": issue_id, "status": "RESOLVED",
         "reason": "Corrected experiment independently checked direction",
         "evidence": "Corrected result verified against source pairs",
-    }])
+    }]})
     assert store.state()["review_issues"][issue_id]["status"] == "RESOLVED"
     v8.apply_decision(store, {"action": "finish", "reason": "Reviewed repair"}, "low")
     assert store.state()["done"]
