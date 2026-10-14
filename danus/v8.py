@@ -581,12 +581,13 @@ def apply_decision(store: Store, choice: dict, level: str):
         group = state["issue_merges"].get(merge_id)
         if not group or group["status"] != "PENDING":
             raise ValueError("issue merge review requires a PENDING merge ID")
-        if any(state["review_issues"].get(x, {}).get("status") != "OPEN"
-               for x in group["issue_ids"]):
-            raise ValueError("issue merge review has stale OPEN issue IDs")
         verdict = choice.get("verdict")
         if verdict not in ("APPROVE", "REJECT"):
             raise ValueError("issue merge verdict requires APPROVE or REJECT")
+        if verdict == "APPROVE" and any(
+                state["review_issues"].get(x, {}).get("status") != "OPEN"
+                for x in group["issue_ids"]):
+            raise ValueError("issue merge approval has stale OPEN issue IDs")
         store.append("DECISION", level=level, action=action, reason=reason)
         store.append("ISSUE_MERGE_REVIEW", id=merge_id, verdict=verdict,
                      level=level, reason=reason)
@@ -1005,7 +1006,17 @@ Never claim a
 scientific result is verified without actual evidence and independent review.
 Negative and inconclusive findings are acceptable; don't chase positive results.
 The runtime, not you, enforces authority.
-Reviewer owns scientific and protocol adequacy; Supervisor only ROUTES.
+Reviewer owns scientific and protocol adequacy. You may approve a Researcher's
+issue grouping as a shared WORK PLAN, not scientific resolution: all original
+Reviewer issues stay OPEN. Inspect the listed issue IDs, common remedy and
+reason. REJECT a grouping that would lose distinct scientific or reproducibility
+obligations. Decide pending groupings before work relying on them.
+Use {"action":"review_issue_merge","merge_id":"task-N/merge",
+"verdict":"APPROVE|REJECT","reason":"specific decision"}.
+Approval only permits planning; it is NOT Reviewer resolution. Grouped
+corrections still require an exact Researcher experiment proposal and
+independent Reviewer experiment approval. Only Reviewer may later mark
+issues RESOLVED, WAIVED or DUPLICATE with evidence.
 After a final_review REVISE, follow its structured OPEN review_issues and
 route fixes to their target roles. Treat repeated findings as the same IDs;
 do not multiply repair tasks for an unchanged unresolved defect. Experimenter corrective execution still
@@ -1066,6 +1077,17 @@ The operator, not any Worker, staged the inputs. This does not independently
 authenticate the upstream dataset or scientific interpretation; disclose
 those limitations, but do not demand that this manifest prove more than it does.
 Researcher may propose a specific small experiment but must not execute it.
+If several OPEN Reviewer issues overlap, check whether the same repair or
+evidence would satisfy them. If so, propose ONE shared work item preserving
+each original issue and any distinct obligation. For researcher purpose=work,
+optionally return "issue_merge":{"issue_ids":["task-N/issue-1",
+"task-M/issue-2"],"summary":"shared corrective work",
+"reason":"why one repair addresses each issue"}. Do NOT send a new experiment
+proposal in the same response: Supervisor must APPROVE/REJECT first.
+Approval groups work only; it does not close Reviewer findings. If APPROVED,
+a later corrective proposal referring to that grouping must include
+"issue_merge_id":"task-N/merge". If not approved, address distinct issues
+independently. Do not manufacture overlapping groups for unrelated defects.
 Reviewer independently checks proposed experiment and scientific conclusions.
 Experimenter only executes the exact Reviewer-approved experimental plan.
 Output budgets (CHARACTERS, not words, bytes or tokens; count text inside JSON
@@ -1110,11 +1132,22 @@ Do not falsely claim that these generic checks establish causal validity.
 Experimenter must deliver the exact approved artifact paths without
 changing required_checks. Model-declared VALID/PASS is not authority.
 For Reviewer purpose=review_experiment, use verdict APPROVE/REVISE/REJECT.
+Judge omissions by effect on the scoped conclusion. Distinguish (1) a
+scientific defect that can change the result, (2) an engineering defect
+that prevents independent reproduction, and (3) redundant checks already
+covered by independent evidence. For each demanded check, explain which
+error it would detect and why current evidence does not exclude it. The
+goal is a defensible conclusion, not completing every procedural detail.
 For Researcher purpose=interpret, analyze the already recorded experimental
 outputs, including negative findings; do not produce a new experiment unless
 you have a separate scientific reason. For Reviewer purpose=final_review,
 assess the Researcher's interpretation against underlying evidence and the
-COMPLETE approved protocol supplied in your assignment. Verdict is
+COMPLETE approved protocol supplied in your assignment. Distinguish
+conclusion-changing scientific defects, reproducibility gaps and already
+independently covered repeated checks. For each blocking finding explain
+its scientific impact and the minimum justified correction. Missing an
+auxiliary procedure alone does not invalidate a conclusion; missing
+decisive evidence cannot be waived. Verdict is
 ACCEPT/INCONCLUSIVE/REVISE/REJECT. INCONCLUSIVE means scientifically uncertain
 results from acceptable evidence, not incomplete required work. REVISE can
 return issues: [] when earlier OPEN issues still need correction; name their
