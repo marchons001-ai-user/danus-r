@@ -134,7 +134,8 @@ def test_valid_scientific_inconclusive_and_no_silent_waiver(tmp_path):
     store = init(tmp_path)
     pid = approved(store, "null")
     first = perform(store, pid, "null.csv")
-    with pytest.raises(ValueError, match="actionable issues"):
+    # With no prior OPEN issues, a bare REVISE still needs a concrete new defect.
+    with pytest.raises(ValueError, match="new issues or existing unresolved OPEN issues"):
         complete(store, first, verdict="REVISE")
     # Still running: bad review responses cannot be silently accepted.
     assert store.state()["tasks"][first]["status"] == "RUNNING"
