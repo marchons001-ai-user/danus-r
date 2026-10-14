@@ -877,8 +877,8 @@ def _brief_state(store: Store, *, last=12):
         } if validation else None),
         "review_issues": issues, "open_review_issue_count": len(issues),
         "latest_experiment_needs_interpretation": bool(
-            state["last_experiment_seq"]
-            and state["last_interpret_seq"] <= state["last_experiment_seq"]),
+            state.get("last_experiment_seq", 0)
+            and state.get("last_interpret_seq", 0) <= state["last_experiment_seq"]),
         "inputs": ({
             "dataset_label": inputs["dataset_label"],
             "manifest_path": inputs["manifest_path"],
