@@ -63,6 +63,9 @@ def _output_budget_guide():
           '"required_action":"Register a new log of an authorized rerun",'
           '"target_role":"experimenter",'
           '"evidence":"Inspected run.log: exit code present, executed command absent"}. '
+          "Evidence may be one nonblank string OR a list of 1-8 nonblank "
+          "strings (e.g. cited file paths); total combined limit is 1500 "
+          "characters, aim <= 1050. No fabricated evidence. "
           "For resolved_issues, give id, status, reason AND evidence. "
           "For accepted_deviations, give item, reason AND evidence. "
           "If no defensible evidence exists, investigate first or ask a focused question.\n"
@@ -780,16 +783,19 @@ def _call(model, effort, prompt, workdir, log_path, *, writable=False, timeout=1
     cmd = codex.exec_cmd(
         codex_bin, model, effort, "-C", str(workdir),
         "--skip-git-repo-check", "--sandbox",
-        "workspace-write" if writable else "read-only", "--json", prompt,
+        "workspace-write" if writable else "read-only", "--json", "-",
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log:
-        proc = subprocess.Popen(cmd, cwd=str(workdir), stdin=subprocess.DEVNULL,
+        # Codex (and bin/codex-dsh) read a lone '-' prompt from stdin. The
+        # full text must NOT occupy one Linux argv argument (MAX_ARG_STRLEN).
+        proc = subprocess.Popen(cmd, cwd=str(workdir), stdin=subprocess.PIPE,
                                 stdout=log, stderr=subprocess.STDOUT,
                                 env=codex.subprocess_env(codex_bin),
-                                start_new_session=True)
+                                start_new_session=True, text=True, encoding="utf-8")
         try:
-            code = proc.wait(timeout=timeout)
+            proc.communicate(input=prompt, timeout=timeout)
+            code = proc.returncode
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
@@ -807,19 +813,75 @@ def _call(model, effort, prompt, workdir, log_path, *, writable=False, timeout=1
     return _completed_model_reply(log_path)
 
 
-def _brief_state(store: Store, *, last=18):
+def _brief_state(store: Store, *, last=12):
+    """Bounded *routing* context; the full proposal and evidence stay in Store.
+
+    Researcher/Reviewer/Experimenter still receive the complete approved
+    protocol and open corrections in their own assignments. Supervisor routes
+    by stable IDs and short summaries, never certifies scientific adequacy.
+    """
     state = store.state()
-    recent = [{k: v for k, v in e.items()
-               if k not in ("instruction", "content")}
-              for e in store.read()[-last:] if e["kind"] != "INIT"]
-    return {"goal": state["goal"], "reference": state["reference"],
-            "tasks": list(state["tasks"].values()),
-            "requests": list(state["requests"].values()),
-            "proposals": list(state["proposals"].values()),
-            "assets": list(state["assets"].values()), "final_review": state["final_review"],
-            "latest_validation": state["latest_validation"],
-            "review_issues": list(state["review_issues"].values()),
-            "inputs": state["inputs"], "recent_events": recent}
+    all_tasks = list(state["tasks"].values())
+    tasks = [t for i, t in enumerate(all_tasks)
+             if i >= len(all_tasks) - 10 or t["status"] in ("READY", "RUNNING", "WAITING")]
+    selected = [{
+        "id": t["id"], "role": t["role"], "purpose": t["purpose"],
+        "status": t["status"], "proposal_id": t["proposal_id"],
+        "request_id": t["request_id"], "instruction": t["instruction"][:320],
+        "summary": t["summary"][:400],
+    } for t in tasks]
+    all_proposals = list(state["proposals"].values())
+    proposals = [{
+        "id": p["id"], "status": p["status"], "by": p["by"],
+        "required_check_ids": [x["id"] for x in p["required_checks"]],
+    } for i, p in enumerate(all_proposals)
+       if i >= len(all_proposals) - 6 or p["status"] == "PENDING"]
+    requests = [{
+        "id": r["id"], "from_task": r["from_task"], "to": r["to"],
+        "status": r["status"], "question": r["question"][:350],
+        "answer": r["answer"][:350],
+    } for r in state["requests"].values() if r["status"] == "OPEN"]
+    recent = []
+    for event in store.read()[-last:]:
+        if event["kind"] == "INIT":
+            continue
+        recent.append({
+            k: (v[:400] if isinstance(v, str) else v)
+            for k, v in event.items()
+            if k in ("seq", "kind", "task_id", "level", "action",
+                     "status", "verdict", "reason", "error", "summary")
+        })
+    final = state["final_review"]
+    validation = state["latest_validation"]
+    inputs = state["inputs"]
+    issues = [{
+        "id": i["id"], "status": i["status"], "target_role": i["target_role"],
+        "problem": i["problem"][:300], "impact": i["impact"][:250],
+        "required_action": i["required_action"][:450],
+    } for i in state["review_issues"].values() if i["status"] == "OPEN"]
+    return {
+        "goal": state["goal"], "reference": state["reference"][:1000],
+        "tasks": selected, "task_count": len(all_tasks),
+        "requests": requests, "open_request_count": len(requests),
+        "proposals": proposals, "proposal_count": len(all_proposals),
+        "assets": [{"path": a["path"], "task_id": a["task_id"]}
+                   for a in list(state["assets"].values())[-24:]],
+        "asset_count": len(state["assets"]),
+        "final_review": ({
+            "verdict": final["verdict"], "task_id": final["task_id"],
+            "basis_seq": final["basis_seq"], "summary": final["summary"][:900],
+        } if final else None),
+        "latest_validation": ({
+            "status": validation["status"], "task_id": validation["task_id"],
+            "reason": validation["reason"][:500],
+        } if validation else None),
+        "review_issues": issues, "open_review_issue_count": len(issues),
+        "inputs": ({
+            "dataset_label": inputs["dataset_label"],
+            "manifest_path": inputs["manifest_path"],
+        } if inputs else None),
+        "recent_events": recent,
+    }
 
 
 _SUPERVISOR_POLICY = """
@@ -948,7 +1010,9 @@ assess the Researcher's interpretation against underlying evidence and the
 COMPLETE approved protocol supplied in your assignment. Verdict is
 ACCEPT/INCONCLUSIVE/REVISE/REJECT. INCONCLUSIVE means scientifically uncertain
 results from acceptable evidence, not incomplete required work. REVISE requires
-issues: [{problem,impact,required_action,target_role,evidence}]; the runtime
+issues: [{problem,impact,required_action,target_role,evidence}]; evidence
+may be a nonblank string or a list of 1-8 nonblank citation strings, within
+a combined 1500-character limit (target <= 1050). The runtime
 assigns stable IDs. Review each prior OPEN issue; resolve by returning
 resolved_issues: [{id,status:"RESOLVED"|"WAIVED",reason,evidence}].
 WAIVED requires logical ablation: what failure was the test designed to catch
@@ -1095,8 +1159,15 @@ def step(store: Store, *, worker_timeout=1200):
             with store.lock():
                 selected = apply_decision(store, decision, level)
                 store.publish()
+        except OSError as exc:
+            # A failed OS process launch is not a scientific routing decision.
+            # Do not retry the same unlaunchable command three times.
+            with store.lock():
+                store.append("HALT", reason=f"SUPERVISOR_LAUNCH_ERROR: {type(exc).__name__}: {exc}")
+                store.publish()
+            return "HALT"
         except (ValueError, KeyError, PermissionError, RuntimeError,
-                json.JSONDecodeError, OSError, subprocess.SubprocessError) as exc:
+                json.JSONDecodeError, subprocess.SubprocessError) as exc:
             error = f"{type(exc).__name__}: {exc}"
             with store.lock():
                 store.append("DENIED", level=level, error=error)
