@@ -744,9 +744,7 @@ def _brief_state(store: Store, *, last=18):
             "assets": list(state["assets"].values()), "final_review": state["final_review"],
             "latest_validation": state["latest_validation"],
             "review_issues": list(state["review_issues"].values()),
-            "inputs": state["inputs"],
-            "review_issues": list(state["review_issues"].values()),
-            "recent_events": recent}
+            "inputs": state["inputs"], "recent_events": recent}
 
 
 _SUPERVISOR_POLICY = """
