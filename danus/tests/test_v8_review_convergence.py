@@ -254,3 +254,37 @@ def test_grouping_rejected_or_unapproved_cannot_enter_corrective_proposal(tmp_pa
                            issue_merge_id=merge_id, proposal="Unauthorized grouped work",
                            required_checks=[{"id": "integrity", "kind": "asset_integrity"}])
     assert not store.state()["proposals"]
+
+
+def test_minimum_evidence_policy_and_pending_proposal_revision(tmp_path):
+    # The policy is the behavior change; the existing approval gate must stay firm.
+    assert "minimum-sufficient-evidence audit" in v8._WORKER_POLICY
+    assert "REVISE an overbroad proposal" in v8._WORKER_POLICY
+    assert "SAME concrete defect survives two" in v8._SUPERVISOR_POLICY
+
+    store, issue_ids = _group_store(tmp_path)
+    _research_complete(
+        store, "Propose unnecessarily large correction",
+        proposal="Correct recovery output and repeat every unrelated historical check",
+        required_checks=[{"id": "integrity", "kind": "asset_integrity"}],
+    )
+    proposal_id = next(reversed(store.state()["proposals"]))
+    task = v8.apply_decision(store, {
+        "action": "dispatch", "role": "reviewer", "purpose": "review_experiment",
+        "proposal_id": proposal_id, "reason": "Assess necessity",
+        "task": "Challenge redundant scope before execution",
+    }, "low")
+    store.append("RUNNING", task_id=task)
+    v8._worker_result(store, task, {
+        "action": "complete", "summary": "REVISE: reuse independent evidence",
+        "verdict": "REVISE",
+    })
+    state = store.state()
+    assert state["proposals"][proposal_id]["status"] == "REVISE"
+    assert all(state["review_issues"][i]["status"] == "OPEN" for i in issue_ids)
+    with pytest.raises(PermissionError, match="independent approved exact proposal"):
+        v8.apply_decision(store, {
+            "action": "dispatch", "role": "experimenter", "purpose": "experiment",
+            "proposal_id": proposal_id, "reason": "Do not bypass rejected scope",
+            "task": "Execute oversized plan",
+        }, "low")
