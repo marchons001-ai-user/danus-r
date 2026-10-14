@@ -614,10 +614,14 @@ def apply_decision(store: Store, choice: dict, level: str):
         _check_dispatch(state, role, purpose, proposal_id, request_id)
         if purpose == "experiment":
             instruction = (
-                "Execute ONLY the independently approved experiment proposal "
-                + proposal_id + ". Use the approved design, controls and metrics "
-                "without modification. Record exact runtime, negative results and "
-                "workspace-relative output files. Do not alter external repositories."
+                "Implement and execute ONLY the independently approved experiment proposal "
+                + proposal_id + ". Create missing NEW implementation scripts and "
+                "entrypoints inside the authorized workspace before running them; "
+                "their absence is not a missing prerequisite. Keep the approved "
+                "design, controls, metrics, paths and required checks unchanged. "
+                "Do not alter staged inputs, frozen artifacts or external repositories. "
+                "If the protocol explicitly requires a pre-existing frozen script, "
+                "do not recreate it. Record actual commands, exits and negative results."
             )
         elif purpose == "review_experiment":
             instruction = (
@@ -1120,7 +1124,15 @@ a later corrective proposal referring to that grouping must include
 "issue_merge_id":"task-N/merge". If not approved, address distinct issues
 independently. Do not manufacture overlapping groups for unrelated defects.
 Reviewer independently checks proposed experiment and scientific conclusions.
-Experimenter only executes the exact Reviewer-approved experimental plan.
+Experimenter IMPLEMENTS and executes the exact Reviewer-approved experimental
+plan. In an approved writable experiment turn, create missing NEW scripts,
+entrypoints and outputs inside the authorized workspace when the protocol
+requires them; a planned script being absent is not a blocker. This is
+implementation, not permission to change scientific parameters, approved
+checks, frozen artifacts or staged inputs. Respect any explicit requirement
+for a pre-existing frozen implementation. Report actual execution and failures;
+block only when a prerequisite or faithful implementation is genuinely
+unavailable. Do not pretend a new script or checker ran if it did not.
 Output budgets (CHARACTERS, not words, bytes or tokens; count text inside JSON
 string values, excluding JSON punctuation):
 - proposal: target at most 10,000 characters. Give a COMPLETE reproducible
