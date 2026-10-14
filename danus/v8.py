@@ -419,10 +419,13 @@ def _review_feedback(task_id, verdict, result, state):
             raise ValueError("Existing OPEN issue restated as new; use its original ID")
         action = _limit_text(item.get("required_action"), "issue required_action",
                              max_len=OUTPUT_TEXT_LIMITS["review issue field (each)"])
-        if any(old["status"] == "OPEN" and old["problem"].casefold() == problem.casefold()
-               and old["required_action"].casefold() == action.casefold()
-               for old in state["review_issues"].values()):
-            raise ValueError("Identical OPEN issue restated as new; use its original ID")
+        if (any(old["status"] == "OPEN" and old["problem"].casefold() == problem.casefold()
+                and old["required_action"].casefold() == action.casefold()
+                for old in state["review_issues"].values())
+                or any(old["problem"].casefold() == problem.casefold()
+                       and old["required_action"].casefold() == action.casefold()
+                       for old in issues)):
+            raise ValueError("Identical issue restated as new; reuse the original issue ID")
         issues.append({
             "id": f"{task_id}/issue-{i}", "target_role": role,
             "problem": problem, "required_action": action,
