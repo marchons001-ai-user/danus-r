@@ -70,6 +70,85 @@ def normalize_checks(raw):
     return checks
 
 
+def _checker_receipt(store, task_id, proposal, owned, source):
+    """Corroborate an approved --check run using HOST-owned Codex tool events.
+
+    A worker-authored run_log can disprove success, but cannot prove execution.
+    This gate confirms the entrypoint was actually invoked and exited zero;
+    scientific independence and checker semantics still require Reviewer audit.
+    """
+    plan = proposal.get("content", "")
+    if "--check" not in plan or "run_log.json" not in plan:
+        return None
+    result = {"id": "checker_execution", "kind": "checker_execution"}
+    def outcome(status, detail):
+        return {**result, "status": status, "detail": detail}
+
+    match = re.search(r"\\bpython(?:3)?\\s+(?:-B\\s+)?([\\w./-]+/run\\.py)\\b", plan)
+    if not match:
+        return outcome("INCOMPLETE", "checker protocol has no identifiable Python entrypoint")
+    script = match.group(1)
+    logs = [p for p in owned if p.endswith("/run_log.json")]
+    if len(logs) != 1:
+        return outcome("INCOMPLETE", "checker protocol requires one fresh registered run_log.json")
+    try:
+        runlog = json.loads(source(logs[0]).read_text(encoding="utf-8"))
+    except (ValueError, OSError, UnicodeError) as exc:
+        return outcome("FAILED", f"run_log.json cannot be read: {exc}"[:1000])
+
+    exit_markers, failures = [], []
+    def scan(obj, context=""):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                name = str(key).lower()
+                full = context + "." + name
+                if (any(part in full for part in ("check", "replay", "parent"))
+                        and ("exit" in name or "returncode" in name
+                             or "return_code" in name)):
+                    exit_markers.append(full)
+                    if type(value) is not int or value != 0:
+                        failures.append(f"{full}={value!r}")
+                if (any(part in full for part in ("check", "replay", "parent"))
+                        and "status" in name and isinstance(value, str)
+                        and value.upper() in ("FAILED", "INCOMPLETE", "ERROR")):
+                    failures.append(f"{full}={value!r}")
+                scan(value, full)
+        elif isinstance(obj, list):
+            for value in obj:
+                scan(value, context)
+    scan(runlog)
+    if failures:
+        return outcome("FAILED", "checker/parent reported non-success: " + ", ".join(failures)[:800])
+    if not exit_markers:
+        return outcome("INCOMPLETE", "run_log.json lacks numeric checker/parent exit evidence")
+
+    # Codex --json output belongs to the host log directory, NOT to the
+    # Experimenter's writable workspace. Do not accept claimed counts alone.
+    traces = sorted((store.root / "logs").glob(task_id + "-*.jsonl"))
+    if len(traces) != 1:
+        return outcome("INCOMPLETE", "missing or ambiguous host-owned Codex execution trace")
+    observed = []
+    with traces[0].open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item = event.get("item") if event.get("type") == "item.completed" else None
+            if not isinstance(item, dict) or item.get("type") != "command_execution":
+                continue
+            cmd = item.get("command", "")
+            if (isinstance(cmd, str) and script in cmd
+                    and re.search(r"\\bpython(?:3)?\\b", cmd)):
+                observed.append(item.get("exit_code"))
+    if not observed or any(type(code) is not int for code in observed):
+        return outcome("INCOMPLETE", "host trace has no completed entrypoint command with exit code")
+    if any(code != 0 for code in observed):
+        return outcome("FAILED", f"host-observed entrypoint exit codes: {observed}")
+    return outcome("PASSED", "host observed approved entrypoint exit 0; "
+                   "run log reports checker/parent exit 0; semantics require Reviewer")
+
+
 def run_gate(store, task_id, proposal, assets):
     """Read only frozen approved checks and freshly registered output bytes."""
     checks = proposal.get("required_checks") or []
@@ -147,6 +226,9 @@ def run_gate(store, task_id, proposal, assets):
         except Exception as exc:
             results.append({"id": name, "kind": kind, "status": "FAILED",
                             "detail": f"{type(exc).__name__}: {exc}"[:1000]})
+    receipt = _checker_receipt(store, task_id, proposal, owned, source)
+    if receipt is not None:
+        results.append(receipt)
     if any(r["status"] == "FAILED" for r in results):
         status = "FAILED"
     elif any(r["status"] == "INCOMPLETE" for r in results):
