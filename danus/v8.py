@@ -604,7 +604,8 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
                              max_len=OUTPUT_TEXT_LIMITS["worker request reason"])
         refs = result.get("refs", [])
         if not isinstance(refs, list) or len(refs) > 12 or any(
-                not isinstance(x, str) or len(x) > 256 for x in refs):
+                not isinstance(x, str) or
+                len(x) > OUTPUT_TEXT_LIMITS["request reference (each)"] for x in refs):
             raise ValueError("invalid asset references")
         rid = _req_id(store)
         store.append("REQUEST", id=rid, from_task=task_id, from_role=task["role"],
@@ -660,7 +661,8 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
                 + item + "; only approved Experimenter runs register new files")
         assets.append({"path": item, "sha256": digest, "bytes": len(raw),
                        "task_id": task_id,
-                       "description": str(result.get("artifact_description") or "")[:500]})
+                       "description": str(result.get("artifact_description") or "")[
+                           :OUTPUT_TEXT_LIMITS["artifact description"]]})
     if action == "complete" and task["request_id"]:
         req = state["requests"][task["request_id"]]
         if req["status"] != "OPEN":
@@ -955,7 +957,8 @@ Report newly generated experimental artifacts as workspace-relative paths.
 
 def _supervisor(store: Store, level, error=""):
     print(f"[V8] Supervisor-{level}: deciding next action ...", flush=True)
-    prompt = (_SUPERVISOR_POLICY + "\nLEVEL: " + level +
+    prompt = (_SUPERVISOR_POLICY + _output_budget_guide() +
+              "\nLEVEL: " + level +
               "\nPrevious decision error: " + error +
               "\nTrusted project status:\n" +
               json.dumps(_brief_state(store), ensure_ascii=False, indent=2))
@@ -1010,7 +1013,7 @@ def _worker(store: Store, task_id, *, timeout=1200):
             for t in state["tasks"].values() if t["status"] == "COMPLETE"
         ][-10:],
     }
-    prompt = _WORKER_POLICY + "\nCurrent assignment:\n" + json.dumps(
+    prompt = _WORKER_POLICY + _output_budget_guide() + "\nCurrent assignment:\n" + json.dumps(
         payload, ensure_ascii=False, indent=2)
     role = task["role"]
     model, effort = DEFAULT_MODELS[role]
