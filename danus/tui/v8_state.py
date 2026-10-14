@@ -220,6 +220,8 @@ def load_v8_project_snapshot(project: str) -> dict[str, Any]:
     return {
         "project": project,
         "validation_status": (state.get("latest_validation") or {}).get("status", "NOT_RUN"),
+        "review_verdict": (state.get("final_review") or {}).get("verdict", "NOT_REVIEWED"),
+        "open_review_issues": sum(i["status"] == "OPEN" for i in state["review_issues"].values()),
         "input_count": len((state.get("inputs") or {}).get("files", [])),
         "failed_task_count": historical_failures,
         "project_state": "COMPLETE" if state["done"] else
