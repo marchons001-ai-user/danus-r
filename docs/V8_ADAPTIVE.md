@@ -273,3 +273,49 @@ Previously completed projects are not retrospectively certified.
 Offline targeted tests:
 
     python -m pytest -q danus/tests/test_v8_inputs.py danus/tests/test_v8_validation.py danus/tests/test_v8_adaptive.py
+
+
+## V8 Reviewer feedback loop (2026-10-14)
+
+The final Reviewer now receives the **full currently approved experiment
+proposal** (including the proposed executable validation checks), not merely
+Experimenter's last 3000-character summary. Reviewer, rather than Supervisor,
+decides scientific adequacy. Supervisor only routes to a useful role.
+
+After interpreting the latest evidence, Reviewer uses the existing verdicts:
+- ACCEPT: a scoped claim is adequately supported; not synonymous with a
+  positive hypothesis or flawless code.
+- INCONCLUSIVE: evidence is adequate, but scientific outcome uncertain.
+- REVISE: **blocking defect** requiring actionable correction; must provide
+  one or more structured issues.
+- REJECT: rejects the scientific claim/protocol.
+
+A REVISE result includes `issues` with:
+`problem, impact, required_action, target_role (researcher/experimenter),
+evidence`. Runtime assigns each issue a stable ID; it is recorded in
+the immutable event log and passed directly to next Worker tasks and the
+Supervisor. Corrective experiment execution still requires an independently
+approved (possibly revised) proposal and must not overwrite previous assets.
+Reviewer must reassess fixes, and in a later final review explicitly record
+`resolved_issues` with each issue ID, `status=RESOLVED|WAIVED`,
+`reason`, and `evidence`. The runner does not let an ACCEPT silently dismiss
+outstanding issues, or FINISH while any blocking Reviewer issue remains OPEN.
+
+For an optional/redundant protocol procedure, Reviewer may report
+`accepted_deviations` with `item, reason, evidence`. A prior blocking issue
+may be explicitly WAIVED if Reviewer documents a bounded logical ablation:
+which possible error that procedure was meant to reveal, which existing
+**independent evidence** already excludes it, and the scope. Neither a waiver
+nor prose changes the host Validation Gate's PASSED/FAILED state. Missing
+machine-mandatory checks still require actual host verification. This avoids
+adding generic tests merely to maximize check counts.
+
+The existing read-only TUI shows latest review verdict and number of open
+Reviewer issues; the generated PROJECT_STATE.md lists each pending correction.
+Only three small offline scenarios are needed before another real research
+pilot:
+
+    python -m pytest -q danus/tests/test_v8_review_feedback.py danus/tests/test_v8_adaptive.py danus/tests/test_v8_validation.py danus/tests/test_v8_inputs.py
+
+Historic V8 projects retain their original recorded decisions; feedback
+fields are backward-compatible and do not retroactively change past results.
