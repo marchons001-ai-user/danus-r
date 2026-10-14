@@ -375,3 +375,13 @@ def test_tui_highlights_current_blocker_but_not_older_failures(tmp_path, monkeyp
     snap = load_v8_project_snapshot("blocker")
     assert snap["blockers"] == []
     assert snap["failed_task_count"] == 2
+
+
+def test_v8_default_model_assignments():
+    assert (v8.LOW_MODEL, v8.LOW_EFFORT) == ("gpt-5.6-luna", "low")
+    assert (v8.HIGH_MODEL, v8.HIGH_EFFORT) == ("gpt-6.1-sol", "medium")
+    assert v8.DEFAULT_MODELS == {
+        "researcher": ("gpt-6.1-sol", "high"),
+        "reviewer": ("gpt-6.1-sol", "medium"),
+        "experimenter": ("gpt-6.1-sol", "medium"),
+    }
