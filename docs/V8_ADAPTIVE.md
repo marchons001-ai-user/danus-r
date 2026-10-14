@@ -595,3 +595,53 @@ Focused local check:
 Continue the SAME PFL3 project only after this test passes. Use small run
 windows and audit whether genuinely unresolved failure modes and repeated
 corrections decrease; do not optimize only for fewer OPEN issue IDs.
+
+
+## V8 approved-implementation ownership and checker execution receipt (2026-10-15)
+
+Real PFL3 task-237 incorrectly BLOCKED because a new `validation_7/run.py`
+was absent, despite the approved plan requiring a new implementation. An
+Experimenter experiment turn is workspace-write and **owns implementing** its
+Reviewer-approved plan, including creating NEW scripts and entrypoints in the
+authorized workspace. Missing planned outputs are not missing prerequisites.
+This does not permit changing scientific conditions, frozen/staged files,
+required checks, or a protocol explicitly requiring a pre-existing frozen script.
+A BLOCKED experiment remains in the historical ledger; no rerun is implied.
+
+The prior PFL3 correction_6 Checker accurately returned exit 1/INCOMPLETE,
+but the Host Validation Gate returned PASSED on approved CSV/mean checks alone.
+A narrow **implicit checker_execution receipt** now applies to newly completed
+experiments whose approved protocol explicitly describes a `--check` command
+and `run_log.json`. The Host requires:
+- one freshly registered `run_log.json` and unique fresh `run.py` entrypoint
+  appearing in the approved Python command;
+- no nonzero or incomplete checker/replay/parent exit in the registered run log;
+- a completed execution of that exact new entrypoint with exit code zero,
+  observed in the Host-owned Codex JSON `command_execution` log (outside the
+  writable experiment workspace).
+
+Missing receipts, unrecognized exit fields or missing fresh artifacts cause
+`INCOMPLETE`; observed nonzero exits cause `FAILED`. Those outcomes are
+added to the ordinary host `VALIDATION` event as `checker_execution`. This
+does not mutate approved `required_checks`, launch arbitrary worker code in
+the trusted host process, or retroactively rewrite historical PASSED events.
+It catches known false positives while retaining the existing scientific
+authority boundaries.
+
+**Scope:** This corroborates actual wrapper invocation and exit status,
+not independent correctness of the scientific checker. The worker-authored
+run log can reveal failure but cannot, by itself, prove successful execution.
+Reviewer must still inspect independent replay, schema and numerical logic.
+If a backend does not emit completed `command_execution` entries into Codex
+JSON, the safety gate fails closed with `INCOMPLETE` rather than fabricating
+execution. Protocols without an explicit `--check` plus `run_log.json`
+retain their existing generic gate behavior.
+
+Focused WSL tests (no model calls):
+
+    python -m pytest -q danus/tests/test_v8_adaptive.py danus/tests/test_v8_validation.py danus/tests/test_v8_review_convergence.py
+
+The existing PFL3 project has a newer PENDING replacement proposal following
+blocked task-237. It remains PENDING; normal Supervisor/Reviewer decisions
+are required. Do not delete the old blocked task, rerun it blindly, restage
+inputs, or manually edit `EVENTS.jsonl`.
