@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from danus import codex
 from danus import v8_validation
+from danus import v8_inputs
 
 ROLES = ("researcher", "reviewer", "experimenter")
 MODES = ("work", "answer", "experiment", "interpret", "review_experiment", "final_review")
@@ -122,7 +123,7 @@ class Store:
                  "assets": {}, "last": events[-1], "done": False, "halt": "",
                  "final_review": None, "material_seq": 0,
                  "last_experiment_seq": 0, "last_interpret_seq": 0,
-                 "validations": {}, "latest_validation": None}
+                 "validations": {}, "latest_validation": None, "inputs": None}
         for e in events[1:]:
             kind = e["kind"]
             if kind == "TASK":
@@ -181,6 +182,16 @@ class Store:
                 state["material_seq"] = e["seq"]
                 state["assets"][e["path"]] = {k: e[k] for k in
                     ("path", "sha256", "bytes", "task_id", "description")}
+            elif kind == "INPUT_STAGE":
+                if state["inputs"] is not None:
+                    raise ValueError("V8 input manifest cannot be staged twice")
+                state["inputs"] = {
+                    "manifest_path": e["manifest_path"],
+                    "manifest_sha256": e["manifest_sha256"],
+                    "dataset_label": e["dataset_label"],
+                    "files": e["files"],
+                }
+                state["material_seq"] = e["seq"]
             elif kind == "VALIDATION":
                 report = {"task_id": e["task_id"], "proposal_id": e["proposal_id"],
                           "status": e["status"], "checks": e["checks"],
@@ -225,6 +236,16 @@ class Store:
         lines += ["", "## Experiment approvals"]
         for p in state["proposals"].values():
             lines.append(f"- {p['id']}: {p['status']}")
+        lines += ["", "## Input provenance"]
+        inp = state["inputs"]
+        if inp:
+            lines.append(f"Staged {inp['dataset_label']}: {inp['manifest_path']} "
+                         f"sha256={inp['manifest_sha256']}")
+            for entry in inp["files"]:
+                lines.append(f"- {entry['path']} sha256={entry['sha256']} "
+                             f"source={entry['source_path']}")
+        else:
+            lines.append("No operator-staged provenance; do not infer input origin")
         lines += ["", "## Assets"]
         for asset in state["assets"].values():
             lines.append(f"- {asset['path']} sha256={asset['sha256']} "
@@ -397,6 +418,7 @@ def apply_decision(store: Store, choice: dict, level: str):
         store.append("REPLY", request_id=request_id, by="supervisor", message=message)
         return None
     if action == "finish":
+        v8_inputs.verify_inputs(store, state)
         if any(r["status"] == "OPEN" for r in state["requests"].values()):
             raise PermissionError("cannot finish while requests remain open")
         if not state["final_review"] or state["final_review"]["verdict"] not in (
@@ -482,6 +504,8 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
         path = _asset_path(store, item)
         raw = path.read_bytes()
         known = state["assets"].get(item)
+        if state["inputs"] and item.startswith("input/") and not known:
+            raise PermissionError("staged input files cannot be registered as new experiment outputs")
         digest = hashlib.sha256(raw).hexdigest()
         if known:
             if known["sha256"] != digest or known["bytes"] != len(raw):
@@ -637,7 +661,7 @@ def _brief_state(store: Store, *, last=18):
             "proposals": list(state["proposals"].values()),
             "assets": list(state["assets"].values()), "final_review": state["final_review"],
             "latest_validation": state["latest_validation"],
-            "recent_events": recent}
+            "inputs": state["inputs"], "recent_events": recent}
 
 
 _SUPERVISOR_POLICY = """
@@ -648,7 +672,12 @@ Research Plan is high-level and stable; the goal is immutable.
 Workers may ask any one role or Supervisor one question at a time, and continue
 after a reply. Resolve the oldest material open question before making new work.
 Prefer existing verified asset records and reports to re-reading raw data.
-Never guess asset IDs or bypass Reviewer experiment approval. Never claim a
+Never guess asset IDs or bypass Reviewer experiment approval. A staged
+input's recorded SHA and local source path establish only byte identity with
+that local file at staging time; they do NOT independently authenticate upstream
+dataset release, extraction correctness, or biological function. Do not ignore
+a valid provenance manifest located at workspace/input/PROVENANCE.json.
+Never claim a
 scientific result is verified without actual evidence and independent review.
 Negative and inconclusive findings are acceptable; don't chase positive results.
 The runtime, not you, enforces authority.
@@ -697,6 +726,11 @@ Do not modify the fixed research goal. A negative scientific result is valid.
 Keep experiment costs small. Never modify external reference repositories or
 previously frozen artifacts. Prefer summaries to full raw-data re-interpretation.
 Never fabricate successful tool calls, citations or file artifacts.
+When staged input files exist, read workspace/input/PROVENANCE.json and
+use its byte-for-byte local source comparison as provenance evidence.
+The operator, not any Worker, staged the inputs. This does not independently
+authenticate the upstream dataset or scientific interpretation; disclose
+those limitations, but do not demand that this manifest prove more than it does.
 Researcher may propose a specific small experiment but must not execute it.
 Reviewer independently checks proposed experiment and scientific conclusions.
 Experimenter only executes the exact Reviewer-approved experimental plan.
@@ -775,6 +809,7 @@ def _supervisor(store: Store, level, error=""):
 def _worker(store: Store, task_id, *, timeout=1200):
     with store.lock():
         verify_assets(store)
+        v8_inputs.verify_inputs(store)
         state = store.state()
         task = state["tasks"][task_id]
         if task["status"] != "READY":
@@ -800,6 +835,7 @@ def _worker(store: Store, task_id, *, timeout=1200):
         "approved_experiment_proposal": state["proposals"].get(task["proposal_id"]),
         "known_assets": list(state["assets"].values()),
         "latest_validation": state["latest_validation"],
+        "input_provenance": state["inputs"],
         "recent_completed_work": [
             {"role": t["role"], "purpose": t["purpose"],
              "summary": t["summary"][:3000]}
@@ -818,8 +854,10 @@ def _worker(store: Store, task_id, *, timeout=1200):
                       writable=role == "experimenter" and task["purpose"] == "experiment",
                       timeout=timeout)
         with store.lock():
+            v8_inputs.verify_inputs(store)
             _worker_result(store, task_id, reply)
             verify_assets(store)
+            v8_inputs.verify_inputs(store)
             store.publish()
     except Exception as exc:
         with store.lock():
@@ -835,6 +873,7 @@ def _worker(store: Store, task_id, *, timeout=1200):
 def step(store: Store, *, worker_timeout=1200):
     with store.lock():
         verify_assets(store)
+        v8_inputs.verify_inputs(store)
         state = store.state()
         if state["done"] or state["halt"]:
             return "STOP"
@@ -906,6 +945,7 @@ def status(store: Store):
         "proposals": [{k: v for k, v in p.items() if k != "content"}
                       for p in state["proposals"].values()],
         "asset_count": len(state["assets"]), "final_review": state["final_review"],
+        "input_provenance": state["inputs"],
         "latest_validation": state["latest_validation"],
     }, ensure_ascii=False, indent=2))
 
@@ -917,6 +957,13 @@ def main(argv=None):
     new.add_argument("project")
     new.add_argument("--goal-file", type=Path, required=True)
     new.add_argument("--reference", default="")
+    stage = commands.add_parser("stage-inputs")
+    stage.add_argument("project")
+    stage.add_argument("--source-dir", type=Path, required=True)
+    stage.add_argument("--dataset-label", required=True)
+    stage.add_argument("--files", nargs="+", required=True)
+    stage.add_argument("--extraction-script", type=Path)
+    stage.add_argument("--extraction-summary", type=Path)
     for command in ("run", "step", "status", "recover", "salvage", "reconcile", "unblock"):
         sub = commands.add_parser(command)
         sub.add_argument("project")
@@ -938,6 +985,15 @@ def main(argv=None):
         return
     if args.command == "status":
         status(store)
+        return
+    if args.command == "stage-inputs":
+        with store.runner_lock():
+            with store.lock():
+                info = v8_inputs.stage_inputs(
+                    store, args.source_dir, args.files, args.dataset_label,
+                    extraction_script=args.extraction_script,
+                    extraction_summary=args.extraction_summary)
+        print(json.dumps(info, ensure_ascii=False, indent=2))
         return
     if args.command == "unblock":
         with store.lock():
