@@ -100,8 +100,8 @@ def test_input_mutation_prevents_next_supervisor_decision(tmp_path, monkeypatch)
     def must_not_run(*args, **kwargs):
         pytest.fail("No model call allowed after input integrity failure")
     monkeypatch.setattr(v8, "_supervisor", must_not_run)
-    with pytest.raises(PermissionError, match="staged input modified"):
-        v8.step(store)
+    assert v8.step(store) == "HALT"
+    assert "INPUT_INTEGRITY" in store.state()["halt"]
     assert not store.state()["done"]
 
 
