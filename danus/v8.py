@@ -1169,6 +1169,12 @@ def step(store: Store, *, worker_timeout=1200):
                     store.append("HALT", reason=f"SUPERVISOR_LAUNCH_ERROR: {type(exc).__name__}: {exc}")
                     store.publish()
                 return "HALT"
+            except (RuntimeError, subprocess.SubprocessError) as exc:
+                # A failed Codex execution is not an illegal scientific route.
+                with store.lock():
+                    store.append("HALT", reason=f"SUPERVISOR_MODEL_ERROR: {type(exc).__name__}: {exc}")
+                    store.publish()
+                return "HALT"
             with store.lock():
                 selected = apply_decision(store, decision, level)
                 store.publish()
