@@ -504,7 +504,8 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
         path = _asset_path(store, item)
         raw = path.read_bytes()
         known = state["assets"].get(item)
-        if state["inputs"] and item.startswith("input/") and not known:
+        if (state["inputs"] and not known and
+                path.is_relative_to((store.root / "workspace" / "input").resolve())):
             raise PermissionError("staged input files cannot be registered as new experiment outputs")
         digest = hashlib.sha256(raw).hexdigest()
         if known:
