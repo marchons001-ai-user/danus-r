@@ -174,6 +174,8 @@ def load_v8_project_snapshot(project: str) -> dict[str, Any]:
             "REPLY": lambda: f"{event['request_id']} reply: {event['message']}",
             "RESULT": lambda: f"{event['task_id']} {event['status']}: {event['summary']}",
             "ASSET": lambda: f"registered {event['path']}",
+            "INPUT_STAGE": lambda: f"staged {len(event['files'])} immutable inputs "
+                                   f"from {event['dataset_label']}",
             "VALIDATION": lambda: f"{event['task_id']} validation {event['status']}: "
                                   f"{event.get('reason') or 'approved checks executed'}",
             "DENIED": lambda: f"denied: {event.get('error', '')}",
@@ -218,6 +220,7 @@ def load_v8_project_snapshot(project: str) -> dict[str, Any]:
     return {
         "project": project,
         "validation_status": (state.get("latest_validation") or {}).get("status", "NOT_RUN"),
+        "input_count": len((state.get("inputs") or {}).get("files", [])),
         "failed_task_count": historical_failures,
         "project_state": "COMPLETE" if state["done"] else
                          "ACTION_REQUIRED" if state["halt"] else "RUNNING",
