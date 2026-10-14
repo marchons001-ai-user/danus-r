@@ -123,7 +123,8 @@ class Store:
                  "assets": {}, "last": events[-1], "done": False, "halt": "",
                  "final_review": None, "material_seq": 0,
                  "last_experiment_seq": 0, "last_interpret_seq": 0,
-                 "validations": {}, "latest_validation": None, "inputs": None}
+                 "validations": {}, "latest_validation": None, "inputs": None,
+                 "review_issues": {}}
         for e in events[1:]:
             kind = e["kind"]
             if kind == "TASK":
@@ -175,9 +176,18 @@ class Store:
                     review = e["review"]
                     state["proposals"][review["proposal_id"]]["status"] = review["verdict"]
                 if task["purpose"] == "final_review":
+                    feedback = e.get("review_feedback") or {}
+                    for item in feedback.get("resolutions", []):
+                        state["review_issues"][item["id"]].update(
+                            status=item["status"], resolution=item["reason"],
+                            evidence=item["evidence"], resolved_by=e["task_id"])
+                    for item in feedback.get("issues", []):
+                        state["review_issues"][item["id"]] = {
+                            **item, "status": "OPEN", "created_by": e["task_id"]}
                     state["final_review"] = {"verdict": e.get("verdict", ""),
                                              "summary": e["summary"], "task_id": e["task_id"],
-                                             "basis_seq": task["review_basis_seq"]}
+                                             "basis_seq": task["review_basis_seq"],
+                                             "feedback": feedback}
             elif kind == "ASSET":
                 state["material_seq"] = e["seq"]
                 state["assets"][e["path"]] = {k: e[k] for k in
@@ -246,6 +256,14 @@ class Store:
                              f"source={entry['source_path']}")
         else:
             lines.append("No operator-staged provenance; do not infer input origin")
+        lines += ["", "## Open Reviewer corrections"]
+        open_issues = [x for x in state["review_issues"].values()
+                       if x["status"] == "OPEN"]
+        for issue in open_issues:
+            lines.append(f"- {issue['id']} -> {issue['target_role']}: "
+                         f"{issue['problem']} | fix: {issue['required_action']}")
+        if not open_issues:
+            lines.append("None")
         lines += ["", "## Assets"]
         for asset in state["assets"].values():
             lines.append(f"- {asset['path']} sha256={asset['sha256']} "
@@ -304,6 +322,62 @@ def _proposal(proposal, required_checks=None):
         identity["required_checks"] = checks
     return {"id": _hash(identity)[:16], "content": text,
             "required_checks": checks}
+
+
+def _review_feedback(task_id, verdict, result, state):
+    """Bounded Reviewer-owned correction and reasoned-waiver records."""
+    raw_issues = result.get("issues") or []
+    raw_resolutions = result.get("resolved_issues") or []
+    raw_deviations = result.get("accepted_deviations") or []
+    if any(not isinstance(items, list) or len(items) > 12
+           for items in (raw_issues, raw_resolutions, raw_deviations)):
+        raise ValueError("Reviewer feedback must contain lists of at most 12 entries")
+    if verdict == "REVISE" and not raw_issues:
+        raise ValueError("REVISE requires explicit actionable issues")
+    if verdict != "REVISE" and raw_issues:
+        raise ValueError("new blocking issues require REVISE")
+    issues, resolutions, deviations, handled = [], [], [], set()
+    for i, item in enumerate(raw_issues, 1):
+        if not isinstance(item, dict):
+            raise ValueError("review issue must be an object")
+        role = item.get("target_role")
+        if role not in ("researcher", "experimenter"):
+            raise ValueError("review issue requires researcher/experimenter target_role")
+        issues.append({
+            "id": f"{task_id}/issue-{i}", "target_role": role,
+            **{field: _limit_text(item.get(field), f"issue {field}", max_len=1500)
+               for field in ("problem", "impact", "required_action", "evidence")},
+        })
+    for item in raw_resolutions:
+        if not isinstance(item, dict):
+            raise ValueError("resolution must be an object")
+        issue_id = item.get("id")
+        if (not isinstance(issue_id, str) or issue_id in handled
+                or state["review_issues"].get(issue_id, {}).get("status") != "OPEN"):
+            raise ValueError("can only resolve each existing OPEN review issue once")
+        handled.add(issue_id)
+        disposition = item.get("status")
+        if disposition not in ("RESOLVED", "WAIVED"):
+            raise ValueError("review resolution needs RESOLVED or WAIVED")
+        resolutions.append({
+            "id": issue_id, "status": disposition,
+            "reason": _limit_text(item.get("reason"), "resolution reason", max_len=1500),
+            "evidence": _limit_text(item.get("evidence"), "resolution evidence", max_len=1500),
+        })
+    for item in raw_deviations:
+        if not isinstance(item, dict):
+            raise ValueError("accepted deviation must be an object")
+        deviations.append({
+            field: _limit_text(item.get(field), f"deviation {field}", max_len=1500)
+            for field in ("item", "reason", "evidence")
+        })
+    if verdict in ("ACCEPT", "INCONCLUSIVE"):
+        unresolved = [x for x in state["review_issues"].values()
+                      if x["status"] == "OPEN" and x["id"] not in handled]
+        if unresolved:
+            raise ValueError("ACCEPT/INCONCLUSIVE cannot ignore unresolved Reviewer issues")
+    return {"issues": issues, "resolutions": resolutions,
+            "accepted_deviations": deviations}
 
 
 def _task_id(store):
@@ -426,6 +500,11 @@ def apply_decision(store: Store, choice: dict, level: str):
             raise PermissionError("independent final review required before finish")
         if state["final_review"]["basis_seq"] < state["material_seq"]:
             raise PermissionError("final review is stale; later scientific work requires new review")
+        open_issues = [item["id"] for item in state["review_issues"].values()
+                       if item["status"] == "OPEN"]
+        if open_issues:
+            raise PermissionError("REVIEW_DEBT: unresolved Reviewer issues: "
+                                  + ", ".join(open_issues))
         if any(t["purpose"] == "experiment" for t in state["tasks"].values()):
             check = state["latest_validation"]
             if (not check or check["status"] != "PASSED"
@@ -473,7 +552,7 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
         return
     if action not in ("complete", "blocked"):
         raise ValueError("worker must complete, request or block")
-    proposal, review, verdict = None, None, ""
+    proposal, review, verdict, review_feedback = None, None, "", None
     if action == "complete":
         if result.get("proposal") is not None:
             if task["role"] != "researcher":
@@ -495,6 +574,7 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
             verdict = result.get("verdict")
             if verdict not in ("ACCEPT", "INCONCLUSIVE", "REVISE", "REJECT"):
                 raise ValueError("final review requires a reviewer verdict")
+            review_feedback = _review_feedback(task_id, verdict, result, state)
     paths = result.get("artifacts", [])
     if not isinstance(paths, list) or len(paths) > 24 or not all(
             isinstance(x, str) and x for x in paths):
@@ -528,6 +608,7 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
     store.append("RESULT", task_id=task_id,
                  status="COMPLETE" if action == "complete" else "BLOCKED",
                  summary=summary, proposal=proposal, review=review, verdict=verdict,
+                 review_feedback=review_feedback,
                  reply_to=task["request_id"] if action == "complete" else "")
     for asset in assets:
         store.append("ASSET", **asset)
