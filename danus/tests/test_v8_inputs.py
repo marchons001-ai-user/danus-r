@@ -132,3 +132,9 @@ def test_experimenter_cannot_claim_input_as_output(tmp_path):
             "action": "complete", "summary": "Invalid output registration",
             "artifacts": ["input/neurons.csv"]})
     assert not store.state()["assets"]
+    alias = store.root / "workspace" / "input_alias.csv"
+    alias.symlink_to(store.root / "workspace" / "input/neurons.csv")
+    with pytest.raises(PermissionError, match="staged input files"):
+        v8._worker_result(store, exp, {
+            "action": "complete", "summary": "Alias must not bypass origin freeze",
+            "artifacts": ["input_alias.csv"]})
