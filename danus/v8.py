@@ -417,12 +417,17 @@ def _review_feedback(task_id, verdict, result, state):
                for old_id, old in state["review_issues"].items()
                if old["status"] == "OPEN"):
             raise ValueError("Existing OPEN issue restated as new; use its original ID")
+        action = _limit_text(item.get("required_action"), "issue required_action",
+                             max_len=OUTPUT_TEXT_LIMITS["review issue field (each)"])
+        if any(old["status"] == "OPEN" and old["problem"].casefold() == problem.casefold()
+               and old["required_action"].casefold() == action.casefold()
+               for old in state["review_issues"].values()):
+            raise ValueError("Identical OPEN issue restated as new; use its original ID")
         issues.append({
             "id": f"{task_id}/issue-{i}", "target_role": role,
-            "problem": problem,
-            **{field: _limit_text(item.get(field), f"issue {field}",
-                                    max_len=OUTPUT_TEXT_LIMITS["review issue field (each)"])
-               for field in ("impact", "required_action")},
+            "problem": problem, "required_action": action,
+            "impact": _limit_text(item.get("impact"), "issue impact",
+                                   max_len=OUTPUT_TEXT_LIMITS["review issue field (each)"]),
             "evidence": _review_evidence(item.get("evidence"), "issue evidence"),
         })
     for item in raw_resolutions:
@@ -451,6 +456,9 @@ def _review_feedback(task_id, verdict, result, state):
                                   max_len=OUTPUT_TEXT_LIMITS["review resolution field (each)"]),
             "evidence": _review_evidence(item.get("evidence"), "resolution evidence"),
         })
+    if any(item["status"] == "DUPLICATE" and item["canonical_id"] in handled
+           for item in resolutions):
+        raise ValueError("DUPLICATE canonical issue must remain OPEN after this review")
     for item in raw_deviations:
         if not isinstance(item, dict):
             raise ValueError("accepted deviation must be an object")
@@ -925,7 +933,8 @@ Negative and inconclusive findings are acceptable; don't chase positive results.
 The runtime, not you, enforces authority.
 Reviewer owns scientific and protocol adequacy; Supervisor only ROUTES.
 After a final_review REVISE, follow its structured OPEN review_issues and
-route fixes to their target roles. Experimenter corrective execution still
+route fixes to their target roles. Treat repeated findings as the same IDs;
+do not multiply repair tasks for an unchanged unresolved defect. Experimenter corrective execution still
 needs an independently approved proposal; don't overwrite frozen outputs.
 Do not FINISH with unresolved Reviewer issues. Reviewer may explicitly WAIVE
 a redundant check only by recording the failure it could detect and which
@@ -1033,14 +1042,21 @@ you have a separate scientific reason. For Reviewer purpose=final_review,
 assess the Researcher's interpretation against underlying evidence and the
 COMPLETE approved protocol supplied in your assignment. Verdict is
 ACCEPT/INCONCLUSIVE/REVISE/REJECT. INCONCLUSIVE means scientifically uncertain
-results from acceptable evidence, not incomplete required work. REVISE requires
-issues: [{problem,impact,required_action,target_role,evidence}]; evidence
-may be a nonblank string or a list of 1-8 nonblank citation strings, within
-a combined 1500-character limit (target <= 1050). The runtime
-assigns stable IDs. Review each prior OPEN issue; resolve by returning
-resolved_issues: [{id,status:"RESOLVED"|"WAIVED",reason,evidence}].
-WAIVED requires logical ablation: what failure was the test designed to catch
-and which existing independent evidence already excludes it, within what scope.
+results from acceptable evidence, not incomplete required work. REVISE can
+return issues: [] when earlier OPEN issues still need correction; name their
+EXISTING IDs in the summary instead of creating new IDs. Only add issues
+[{problem,impact,required_action,target_role,evidence}] for genuinely NEW,
+distinct defects. A repeated finding, even with new evidence, is NOT new.
+Evidence may be a nonblank string or a list of 1-8 nonblank citation
+strings, combined <= 1500 characters (target <= 1050). The runtime assigns
+IDs to truly new issues. Review each previous OPEN issue; use
+resolved_issues: [{id,status:"RESOLVED"|"WAIVED"|"DUPLICATE",reason,evidence}].
+For DUPLICATE also give canonical_id identifying a DIFFERENT existing OPEN
+issue that remains active; explain why both findings impose the same
+requirement, not just similar wording. This is not a scientific waiver.
+WAIVED requires logical ablation: what failure the test was designed to
+catch and which independent evidence already excludes it, within what scope.
+Never mark an unfinished check RESOLVED or WAIVED merely to reduce counts.
 For non-blocking protocol omissions with independently adequate evidence, use
 accepted_deviations: [{item,reason,evidence}]. Do not claim omitted tests ran.
 Do not waive a failed host Validation Gate in prose.
