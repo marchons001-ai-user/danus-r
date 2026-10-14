@@ -37,7 +37,7 @@ def test_original_five_reviewer_evidence_lists_are_kept_verbatim_and_bounded():
         assert issue["id"] == f"task-28/issue-{index}"
         assert issue["evidence"].splitlines() == refs
 
-    open_issue = {"task-28/issue-1": {"status": "OPEN"}}
+    open_issue = {"task-28/issue-1": {"id": "task-28/issue-1", "status": "OPEN"}}
     resolved = v8._review_feedback("task-40", "ACCEPT", {
         "resolved_issues": [{"id": "task-28/issue-1", "status": "RESOLVED",
                               "reason": "Independently checked",
