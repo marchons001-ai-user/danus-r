@@ -376,6 +376,17 @@ def _proposal(proposal, required_checks=None):
             "required_checks": checks}
 
 
+def _review_evidence(value, label):
+    """Accept a citation string or a small list of literal citation strings."""
+    limit = OUTPUT_TEXT_LIMITS["review issue field (each)"]
+    if isinstance(value, list):
+        if not 1 <= len(value) <= 8:
+            raise ValueError(f"{label} must list 1-8 nonempty evidence strings")
+        value = "\n".join(_limit_text(part, f"{label}[{i}]", max_len=limit)
+                          for i, part in enumerate(value, 1))
+    return _limit_text(value, label, max_len=limit)
+
+
 def _review_feedback(task_id, verdict, result, state):
     """Bounded Reviewer-owned correction and reasoned-waiver records."""
     raw_issues = result.get("issues") or []
@@ -399,7 +410,8 @@ def _review_feedback(task_id, verdict, result, state):
             "id": f"{task_id}/issue-{i}", "target_role": role,
             **{field: _limit_text(item.get(field), f"issue {field}",
                                     max_len=OUTPUT_TEXT_LIMITS["review issue field (each)"])
-               for field in ("problem", "impact", "required_action", "evidence")},
+               for field in ("problem", "impact", "required_action")},
+            "evidence": _review_evidence(item.get("evidence"), "issue evidence"),
         })
     for item in raw_resolutions:
         if not isinstance(item, dict):
@@ -416,16 +428,17 @@ def _review_feedback(task_id, verdict, result, state):
             "id": issue_id, "status": disposition,
             "reason": _limit_text(item.get("reason"), "resolution reason",
                                   max_len=OUTPUT_TEXT_LIMITS["review resolution field (each)"]),
-            "evidence": _limit_text(item.get("evidence"), "resolution evidence",
-                                    max_len=OUTPUT_TEXT_LIMITS["review resolution field (each)"]),
+            "evidence": _review_evidence(item.get("evidence"), "resolution evidence"),
         })
     for item in raw_deviations:
         if not isinstance(item, dict):
             raise ValueError("accepted deviation must be an object")
         deviations.append({
-            field: _limit_text(item.get(field), f"deviation {field}",
-                               max_len=OUTPUT_TEXT_LIMITS["review accepted deviation field (each)"])
-            for field in ("item", "reason", "evidence")
+            "item": _limit_text(item.get("item"), "deviation item",
+                                max_len=OUTPUT_TEXT_LIMITS["review accepted deviation field (each)"]),
+            "reason": _limit_text(item.get("reason"), "deviation reason",
+                                  max_len=OUTPUT_TEXT_LIMITS["review accepted deviation field (each)"]),
+            "evidence": _review_evidence(item.get("evidence"), "deviation evidence"),
         })
     if verdict in ("ACCEPT", "INCONCLUSIVE"):
         unresolved = [x for x in state["review_issues"].values()
