@@ -184,11 +184,11 @@ def test_checker_receipt_uses_host_owned_tool_exit(
                     "experiment", proposal_id=pid)
     out = s.root / "workspace" / name
     out.mkdir(parents=True)
-    (out / "metrics.csv").write_text("mse\\n1\\n3\\n")
+    (out / "metrics.csv").write_text("mse\n1\n3\n")
     (out / "report.json").write_text('{"mse": 2}')
     (out / "run_log.json").write_text(
         json.dumps({"checker_exit_code": checker_exit, "parent_exit_code": 0}))
-    (out / "run.py").write_text("print('check pilot')\\n")
+    (out / "run.py").write_text("print('check pilot')\n")
     s.append("RUNNING", task_id=task)
     if tool_exit is not None:
         logs = s.root / "logs"
@@ -198,7 +198,7 @@ def test_checker_receipt_uses_host_owned_tool_exit(
             "item": {"type": "command_execution",
                      "command": f"python -B {name}/run.py",
                      "exit_code": tool_exit},
-        }) + "\\n")
+        }) + "\n")
     v8._worker_result(s, task, {
         "action": "complete", "summary": "Checker executed or failed",
         "artifacts": [f"{name}/metrics.csv", f"{name}/report.json",
