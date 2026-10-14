@@ -26,6 +26,51 @@ ROLES = ("researcher", "reviewer", "experimenter")
 MODES = ("work", "answer", "experiment", "interpret", "review_experiment", "final_review")
 PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,80}$")
 MAX_TEXT = 12000
+# Centralized HARD field limits. The prompt is generated with 70% headroom.
+OUTPUT_TEXT_LIMITS = {
+    "supervisor task / reply": MAX_TEXT,
+    "supervisor decision reason": 1800,
+    "researcher experiment proposal": 32768,
+    "worker summary": 32000,
+    "worker question": 3000,
+    "worker request reason": 1800,
+    "review issue field (each)": 1500,
+    "review resolution field (each)": 1500,
+    "review accepted deviation field (each)": 1500,
+    "artifact description": 500,
+    "request reference (each)": 256,
+}
+
+def _output_budget_guide():
+    rows = ["Field (each string) | HARD characters | aim <= 70%",
+            "--- | ---: | ---:"]
+    for field, hard in OUTPUT_TEXT_LIMITS.items():
+        rows.append(f"{field} | {hard} | {hard * 7 // 10}")
+    return (
+        "\nResponse length budget (Python len, Unicode characters, not tokens):\n"
+        + "\n".join(rows)
+        + "\nThe 70% figures are ceilings, NOT quotas. Be much shorter when possible; "
+          "keep the earlier conservative preferred summary/proposal sizes. "
+          "Required strings must contain substantive non-whitespace text. "
+          "Never invent evidence to satisfy a required field.\n"
+        + "Reviewer final_review REVISE: EVERY item in issues MUST contain all "
+          "five keys: problem, impact, required_action, target_role, evidence. "
+          "Each of the FOUR text fields must be nonempty; target_role is "
+          "researcher or experimenter. Evidence should cite an actual file, "
+          "observed output, or concrete missing record; an unsupported suspicion "
+          "is not evidence. Example: "
+          '{"problem":"Command omitted from run.log","impact":"Cannot reproduce invocation",'
+          '"required_action":"Register a new log of an authorized rerun",'
+          '"target_role":"experimenter",'
+          '"evidence":"Inspected run.log: exit code present, executed command absent"}. '
+          "For resolved_issues, give id, status, reason AND evidence. "
+          "For accepted_deviations, give item, reason AND evidence. "
+          "If no defensible evidence exists, investigate first or ask a focused question.\n"
+        + "At most 12 issues/resolutions/deviations per list (prefer <= 8), "
+          "16 required_checks (prefer <= 11), 12 refs (prefer <= 8), "
+          "24 output artifact paths (prefer <= 16).\n"
+    )
+
 LOW_MODEL = "gpt-5.6-luna"
 HIGH_MODEL = "gpt-6.1-sol"
 LOW_EFFORT = "low"
@@ -280,9 +325,15 @@ class Store:
 
 
 def _limit_text(value, label, *, max_len=MAX_TEXT):
-    if not isinstance(value, str) or not value.strip() or len(value) > max_len:
-        raise ValueError(f"{label} must be nonempty text <= {max_len} characters")
-    return value.strip()
+    if not isinstance(value, str):
+        detail = "missing or non-string value"
+    elif not value.strip():
+        detail = "blank or whitespace-only value"
+    elif len(value) > max_len:
+        detail = f"actual length {len(value)} exceeds {max_len}"
+    else:
+        return value.strip()
+    raise ValueError(f"{label} must be nonempty text <= {max_len} characters ({detail})")
 
 
 def _asset_path(store, path):
@@ -315,7 +366,8 @@ def initialize(store: Store, goal: str, reference=""):
 
 
 def _proposal(proposal, required_checks=None):
-    text = _limit_text(proposal, "proposal", max_len=32768)
+    text = _limit_text(proposal, "proposal",
+                       max_len=OUTPUT_TEXT_LIMITS["researcher experiment proposal"])
     checks = v8_validation.normalize_checks(required_checks)
     identity = {"proposal": text}
     if checks:
@@ -345,7 +397,8 @@ def _review_feedback(task_id, verdict, result, state):
             raise ValueError("review issue requires researcher/experimenter target_role")
         issues.append({
             "id": f"{task_id}/issue-{i}", "target_role": role,
-            **{field: _limit_text(item.get(field), f"issue {field}", max_len=1500)
+            **{field: _limit_text(item.get(field), f"issue {field}",
+                                    max_len=OUTPUT_TEXT_LIMITS["review issue field (each)"])
                for field in ("problem", "impact", "required_action", "evidence")},
         })
     for item in raw_resolutions:
@@ -361,14 +414,17 @@ def _review_feedback(task_id, verdict, result, state):
             raise ValueError("review resolution needs RESOLVED or WAIVED")
         resolutions.append({
             "id": issue_id, "status": disposition,
-            "reason": _limit_text(item.get("reason"), "resolution reason", max_len=1500),
-            "evidence": _limit_text(item.get("evidence"), "resolution evidence", max_len=1500),
+            "reason": _limit_text(item.get("reason"), "resolution reason",
+                                  max_len=OUTPUT_TEXT_LIMITS["review resolution field (each)"]),
+            "evidence": _limit_text(item.get("evidence"), "resolution evidence",
+                                    max_len=OUTPUT_TEXT_LIMITS["review resolution field (each)"]),
         })
     for item in raw_deviations:
         if not isinstance(item, dict):
             raise ValueError("accepted deviation must be an object")
         deviations.append({
-            field: _limit_text(item.get(field), f"deviation {field}", max_len=1500)
+            field: _limit_text(item.get(field), f"deviation {field}",
+                               max_len=OUTPUT_TEXT_LIMITS["review accepted deviation field (each)"])
             for field in ("item", "reason", "evidence")
         })
     if verdict in ("ACCEPT", "INCONCLUSIVE"):
@@ -437,7 +493,8 @@ def apply_decision(store: Store, choice: dict, level: str):
     if any(t["status"] == "RUNNING" for t in state["tasks"].values()):
         raise RuntimeError("a worker is running; reconcile before re-dispatch")
     action = choice.get("action")
-    reason = _limit_text(choice.get("reason"), "reason", max_len=1800)
+    reason = _limit_text(choice.get("reason"), "reason",
+                         max_len=OUTPUT_TEXT_LIMITS["supervisor decision reason"])
     if action == "dispatch":
         role = choice.get("role")
         purpose = choice.get("purpose", "work")
@@ -535,13 +592,16 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
     if task["status"] != "RUNNING" and not (recovery and task["status"] == "BLOCKED"):
         raise ValueError("result does not belong to the running or explicitly recovered task")
     action = result.get("action")
-    summary = _limit_text(result.get("summary"), "worker summary", max_len=32000)
+    summary = _limit_text(result.get("summary"), "worker summary",
+                          max_len=OUTPUT_TEXT_LIMITS["worker summary"])
     if action == "request":
         target = result.get("to", "supervisor")
         if target not in (*ROLES, "supervisor"):
             raise ValueError("invalid recipient")
-        question = _limit_text(result.get("question"), "question", max_len=3000)
-        reason = _limit_text(result.get("reason"), "request reason", max_len=1800)
+        question = _limit_text(result.get("question"), "question",
+                               max_len=OUTPUT_TEXT_LIMITS["worker question"])
+        reason = _limit_text(result.get("reason"), "request reason",
+                             max_len=OUTPUT_TEXT_LIMITS["worker request reason"])
         refs = result.get("refs", [])
         if not isinstance(refs, list) or len(refs) > 12 or any(
                 not isinstance(x, str) or len(x) > 256 for x in refs):
