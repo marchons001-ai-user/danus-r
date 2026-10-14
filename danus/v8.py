@@ -578,6 +578,8 @@ def apply_decision(store: Store, choice: dict, level: str):
                          max_len=OUTPUT_TEXT_LIMITS["supervisor decision reason"])
     if action == "review_issue_merge":
         merge_id = choice.get("merge_id")
+        if not isinstance(merge_id, str):
+            raise ValueError("issue merge ID must be text")
         group = state["issue_merges"].get(merge_id)
         if not group or group["status"] != "PENDING":
             raise ValueError("issue merge review requires a PENDING merge ID")
@@ -722,6 +724,8 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
             if task["role"] != "researcher":
                 raise PermissionError("only Researcher may propose an experiment")
             merge_id = result.get("issue_merge_id") or ""
+            if not isinstance(merge_id, str):
+                raise ValueError("issue_merge_id must be text")
             if merge_id:
                 group = state["issue_merges"].get(merge_id)
                 if (not group or group["status"] != "APPROVE"
@@ -1018,7 +1022,9 @@ corrections still require an exact Researcher experiment proposal and
 independent Reviewer experiment approval. Only Reviewer may later mark
 issues RESOLVED, WAIVED or DUPLICATE with evidence.
 After a final_review REVISE, follow its structured OPEN review_issues and
-route fixes to their target roles. Treat repeated findings as the same IDs;
+route fixes to their target roles. Before a costly corrective experiment,
+prefer Researcher issue grouping when multiple findings clearly overlap;
+an already approved independent scientific need need not be deferred. Treat repeated findings as the same IDs;
 do not multiply repair tasks for an unchanged unresolved defect. Experimenter corrective execution still
 needs an independently approved proposal; don't overwrite frozen outputs.
 Do not FINISH with unresolved Reviewer issues. Reviewer may explicitly WAIVE
@@ -1167,7 +1173,7 @@ Never mark an unfinished check RESOLVED or WAIVED merely to reduce counts.
 For non-blocking protocol omissions with independently adequate evidence, use
 accepted_deviations: [{item,reason,evidence}]. Do not claim omitted tests ran.
 Do not waive a failed host Validation Gate in prose.
-Reviewer decides adequacy; Supervisor only routes.
+Reviewer decides scientific adequacy; Supervisor only coordinates work.
 Experimenter may write files only for purpose=experiment, inside this workspace.
 The artifacts array registers NEW output files only for approved Experimenter
 experiment tasks. Researcher and Reviewer should normally set artifacts=[]
