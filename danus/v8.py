@@ -229,6 +229,8 @@ class Store:
                         state["review_issues"][item["id"]].update(
                             status=item["status"], resolution=item["reason"],
                             evidence=item["evidence"], resolved_by=e["task_id"])
+                        if item.get("canonical_id"):
+                            state["review_issues"][item["id"]]["canonical_id"] = item["canonical_id"]
                     for item in feedback.get("issues", []):
                         state["review_issues"][item["id"]] = {
                             **item, "status": "OPEN", "created_by": e["task_id"]}
@@ -398,8 +400,6 @@ def _review_feedback(task_id, verdict, result, state):
     if any(not isinstance(items, list) or len(items) > 12
            for items in (raw_issues, raw_resolutions, raw_deviations)):
         raise ValueError("Reviewer feedback must contain lists of at most 12 entries")
-    if verdict == "REVISE" and not raw_issues:
-        raise ValueError("REVISE requires explicit actionable issues")
     if verdict != "REVISE" and raw_issues:
         raise ValueError("new blocking issues require REVISE")
     issues, resolutions, deviations, handled = [], [], [], set()
@@ -409,11 +409,20 @@ def _review_feedback(task_id, verdict, result, state):
         role = item.get("target_role")
         if role not in ("researcher", "experimenter"):
             raise ValueError("review issue requires researcher/experimenter target_role")
+        problem = _limit_text(item.get("problem"), "issue problem",
+                              max_len=OUTPUT_TEXT_LIMITS["review issue field (each)"])
+        # A repeated 'old issue remains OPEN' finding is not a new issue.
+        if any(re.match(r"^\s*(?:OPEN:\s*)?" + re.escape(old_id) +
+                        r"\s+remains\s+OPEN\b", problem, re.IGNORECASE)
+               for old_id, old in state["review_issues"].items()
+               if old["status"] == "OPEN"):
+            raise ValueError("Existing OPEN issue restated as new; use its original ID")
         issues.append({
             "id": f"{task_id}/issue-{i}", "target_role": role,
+            "problem": problem,
             **{field: _limit_text(item.get(field), f"issue {field}",
                                     max_len=OUTPUT_TEXT_LIMITS["review issue field (each)"])
-               for field in ("problem", "impact", "required_action")},
+               for field in ("impact", "required_action")},
             "evidence": _review_evidence(item.get("evidence"), "issue evidence"),
         })
     for item in raw_resolutions:
@@ -425,10 +434,19 @@ def _review_feedback(task_id, verdict, result, state):
             raise ValueError("can only resolve each existing OPEN review issue once")
         handled.add(issue_id)
         disposition = item.get("status")
-        if disposition not in ("RESOLVED", "WAIVED"):
-            raise ValueError("review resolution needs RESOLVED or WAIVED")
+        if disposition not in ("RESOLVED", "WAIVED", "DUPLICATE"):
+            raise ValueError("review resolution needs RESOLVED, WAIVED or DUPLICATE")
+        canonical_id = item.get("canonical_id")
+        if disposition == "DUPLICATE":
+            if (not isinstance(canonical_id, str) or canonical_id == issue_id
+                    or canonical_id in handled
+                    or state["review_issues"].get(canonical_id, {}).get("status") != "OPEN"):
+                raise ValueError("DUPLICATE requires a different existing OPEN canonical_id")
+        elif canonical_id is not None:
+            raise ValueError("canonical_id is only valid for DUPLICATE")
         resolutions.append({
             "id": issue_id, "status": disposition,
+            **({"canonical_id": canonical_id} if disposition == "DUPLICATE" else {}),
             "reason": _limit_text(item.get("reason"), "resolution reason",
                                   max_len=OUTPUT_TEXT_LIMITS["review resolution field (each)"]),
             "evidence": _review_evidence(item.get("evidence"), "resolution evidence"),
@@ -443,11 +461,12 @@ def _review_feedback(task_id, verdict, result, state):
                                   max_len=OUTPUT_TEXT_LIMITS["review accepted deviation field (each)"]),
             "evidence": _review_evidence(item.get("evidence"), "deviation evidence"),
         })
-    if verdict in ("ACCEPT", "INCONCLUSIVE"):
-        unresolved = [x for x in state["review_issues"].values()
-                      if x["status"] == "OPEN" and x["id"] not in handled]
-        if unresolved:
-            raise ValueError("ACCEPT/INCONCLUSIVE cannot ignore unresolved Reviewer issues")
+    remaining = [x["id"] for x in state["review_issues"].values()
+                 if x["status"] == "OPEN" and x["id"] not in handled]
+    if verdict == "REVISE" and not (raw_issues or remaining):
+        raise ValueError("REVISE requires new issues or existing unresolved OPEN issues")
+    if verdict in ("ACCEPT", "INCONCLUSIVE") and remaining:
+        raise ValueError("ACCEPT/INCONCLUSIVE cannot ignore unresolved Reviewer issues")
     return {"issues": issues, "resolutions": resolutions,
             "accepted_deviations": deviations}
 
