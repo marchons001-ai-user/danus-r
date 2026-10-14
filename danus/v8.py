@@ -873,10 +873,17 @@ def _worker(store: Store, task_id, *, timeout=1200):
 def step(store: Store, *, worker_timeout=1200):
     with store.lock():
         verify_assets(store)
-        v8_inputs.verify_inputs(store)
         state = store.state()
         if state["done"] or state["halt"]:
             return "STOP"
+        try:
+            v8_inputs.verify_inputs(store, state)
+        except (PermissionError, FileNotFoundError, ValueError, OSError) as exc:
+            # This is a project integrity blocker, not a scientific hypothesis
+            # failure. Show the exact reason in the existing TUI HALT channel.
+            store.append("HALT", reason=f"INPUT_INTEGRITY: {type(exc).__name__}: {exc}")
+            store.publish()
+            return "HALT"
         if any(t["status"] == "RUNNING" for t in state["tasks"].values()):
             raise RuntimeError("interrupted worker must be reconciled before continuing")
     error = ""
