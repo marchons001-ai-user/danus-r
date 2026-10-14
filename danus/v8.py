@@ -172,7 +172,7 @@ class Store:
                  "final_review": None, "material_seq": 0,
                  "last_experiment_seq": 0, "last_interpret_seq": 0,
                  "validations": {}, "latest_validation": None, "inputs": None,
-                 "review_issues": {}}
+                 "review_issues": {}, "issue_merges": {}}
         for e in events[1:]:
             kind = e["kind"]
             if kind == "TASK":
@@ -215,11 +215,16 @@ class Store:
                         state["last_experiment_seq"] = e["seq"]
                     if task["purpose"] == "interpret":
                         state["last_interpret_seq"] = e["seq"]
+                if e.get("issue_merge"):
+                    group = e["issue_merge"]
+                    state["issue_merges"][group["id"]] = {
+                        **group, "status": "PENDING", "by": e["task_id"]}
                 if e.get("proposal"):
                     pid = e["proposal"]["id"]
                     state["proposals"][pid] = {"id": pid, "content": e["proposal"]["content"],
                                                "required_checks": e["proposal"].get("required_checks", []),
-                                               "status": "PENDING", "by": e["task_id"]}
+                                               "status": "PENDING", "by": e["task_id"],
+                                               "issue_merge_id": e["proposal"].get("issue_merge_id", "")}
                 if e.get("review"):
                     review = e["review"]
                     state["proposals"][review["proposal_id"]]["status"] = review["verdict"]
@@ -238,6 +243,8 @@ class Store:
                                              "summary": e["summary"], "task_id": e["task_id"],
                                              "basis_seq": task["review_basis_seq"],
                                              "feedback": feedback}
+            elif kind == "ISSUE_MERGE_REVIEW":
+                state["issue_merges"][e["id"]]["status"] = e["verdict"]
             elif kind == "ASSET":
                 state["material_seq"] = e["seq"]
                 state["assets"][e["path"]] = {k: e[k] for k in
@@ -370,15 +377,17 @@ def initialize(store: Store, goal: str, reference=""):
         store.publish()
 
 
-def _proposal(proposal, required_checks=None):
+def _proposal(proposal, required_checks=None, issue_merge_id=""):
     text = _limit_text(proposal, "proposal",
                        max_len=OUTPUT_TEXT_LIMITS["researcher experiment proposal"])
     checks = v8_validation.normalize_checks(required_checks)
     identity = {"proposal": text}
     if checks:
         identity["required_checks"] = checks
+    if issue_merge_id:
+        identity["issue_merge_id"] = issue_merge_id
     return {"id": _hash(identity)[:16], "content": text,
-            "required_checks": checks}
+            "required_checks": checks, "issue_merge_id": issue_merge_id}
 
 
 def _review_evidence(value, label):
@@ -390,6 +399,28 @@ def _review_evidence(value, label):
         value = "\n".join(_limit_text(part, f"{label}[{i}]", max_len=limit)
                           for i, part in enumerate(value, 1))
     return _limit_text(value, label, max_len=limit)
+
+
+def _issue_merge(task_id, value, state):
+    """Researcher grouping request; does not change Reviewer issue status."""
+    if not isinstance(value, dict):
+        raise ValueError("issue_merge must be an object")
+    ids = value.get("issue_ids")
+    if (not isinstance(ids, list) or not 2 <= len(ids) <= 12
+            or any(not isinstance(x, str) for x in ids)
+            or len(set(ids)) != len(ids)
+            or any(state["review_issues"].get(x, {}).get("status") != "OPEN"
+                   for x in ids)):
+        raise ValueError("issue_merge requires 2-12 distinct existing OPEN issue IDs")
+    for old in state["issue_merges"].values():
+        if old["status"] in ("PENDING", "APPROVE") and set(old["issue_ids"]) == set(ids):
+            raise ValueError("same active issue grouping already proposed")
+    return {
+        "id": f"{task_id}/merge",
+        "issue_ids": ids,
+        "summary": _limit_text(value.get("summary"), "merge summary", max_len=1500),
+        "reason": _limit_text(value.get("reason"), "merge reason", max_len=1500),
+    }
 
 
 def _review_feedback(task_id, verdict, result, state):
@@ -541,6 +572,21 @@ def apply_decision(store: Store, choice: dict, level: str):
     action = choice.get("action")
     reason = _limit_text(choice.get("reason"), "reason",
                          max_len=OUTPUT_TEXT_LIMITS["supervisor decision reason"])
+    if action == "review_issue_merge":
+        merge_id = choice.get("merge_id")
+        group = state["issue_merges"].get(merge_id)
+        if not group or group["status"] != "PENDING":
+            raise ValueError("issue merge review requires a PENDING merge ID")
+        if any(state["review_issues"].get(x, {}).get("status") != "OPEN"
+               for x in group["issue_ids"]):
+            raise ValueError("issue merge review has stale OPEN issue IDs")
+        verdict = choice.get("verdict")
+        if verdict not in ("APPROVE", "REJECT"):
+            raise ValueError("issue merge verdict requires APPROVE or REJECT")
+        store.append("DECISION", level=level, action=action, reason=reason)
+        store.append("ISSUE_MERGE_REVIEW", id=merge_id, verdict=verdict,
+                     level=level, reason=reason)
+        return None
     if action == "dispatch":
         role = choice.get("role")
         purpose = choice.get("purpose", "work")
