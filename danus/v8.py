@@ -81,7 +81,7 @@ HIGH_EFFORT = "medium"
 DEFAULT_MODELS = {
     "researcher": ("gpt-6.1-sol", "high"),
     "reviewer": ("gpt-6.1-sol", "medium"),
-    "experimenter": ("gpt-5.6-luna", "medium"),
+    "experimenter": ("gpt-6.1-sol", "medium"),
 }
 
 
