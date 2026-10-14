@@ -522,3 +522,32 @@ Do not run an additional synthetic scientific task in this repair cycle.
 After local tests, resume the existing unhalted PFL3 project only if the
 operator accepts its already approved correction_5 proposal and resulting
 scientific scope. Otherwise audit the existing outstanding issues first.
+
+
+## V8 scientific relevance and Researcher correction grouping (2026-10-14)
+
+Reviewer should distinguish evidence flaws that may change the scoped scientific
+conclusion, engineering omissions that limit reproducibility, and repeat checks
+already covered by independent evidence. Each blocking request should identify
+the concrete failure it detects and the smallest justified remedy. An omitted
+auxiliary procedure alone does not invalidate an otherwise supported narrow
+scientific conclusion; missing decisive evidence is not silently waived.
+
+To avoid one experiment for each repeated finding, Researcher purpose=work may
+return `issue_merge: {issue_ids:[...], summary, reason}` referencing 2-12
+distinct existing OPEN Reviewer findings. The event remains PENDING until
+Supervisor decides `review_issue_merge` with APPROVE or REJECT and a reason.
+This is **work grouping**, never scientific resolution: all original Reviewer
+findings remain OPEN and only Reviewer can mark RESOLVED, WAIVED or DUPLICATE
+with evidence. The complete event history is retained.
+
+A subsequent Researcher corrective proposal may include `issue_merge_id`
+only if that grouping is approved and its source findings remain OPEN. The
+proposal still requires separate independent Reviewer approval before
+Experimenter execution. Historical approved experiment proposals remain valid;
+no old Reviewer findings, scientific inputs or experiments are deleted.
+
+Focused local regression: `python -m pytest -q
+danus/tests/test_v8_review_convergence.py danus/tests/test_v8_review_feedback.py
+danus/tests/test_v8_adaptive.py danus/tests/test_v8_validation.py
+danus/tests/test_v8_inputs.py` (one shell line).
