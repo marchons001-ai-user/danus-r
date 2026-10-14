@@ -379,3 +379,54 @@ using `tee -a`; the Supervisor may schedule a *new final review* using
 existing evidence. Do **not** salvage an invalid original Reviewer JSON
 or rerun the experiment just to fix a review output field. Older BLOCKED
 Reviewer attempts remain in the event history.
+
+
+## V8 verified PFL3 review-evidence and long-context transport fixes (2026-10-14)
+
+Real incident diagnosis:
+- task-28 Reviewer returned a valid REVISE with five substantive issues.
+  Every `evidence` value was a **list of 2-3 strings** (e.g. source file
+  locations), while V8 required a single string. The failure was **not**
+  caused by character count or absent evidence.
+- Later task-32 completed REVISE, recording five issues; task-36 Researcher
+  completed work on those issues. Next, Supervisor Popen failed with Linux
+  `E2BIG`: measured V8 prompt = **134,583 UTF-8 bytes** versus Linux
+  per-argument cap **131,072 bytes**. Repeating Low/High cannot fix E2BIG.
+  That historical HALT is an execution transport failure, not a scientific
+  rejection, and must be explicitly unblocked after updating the code.
+
+Minimal fixes in `danus/v8.py`:
+
+1. Reviewer evidence (new issues, resolutions, accepted deviations) can be
+   either one nonblank string or 1-8 nonblank strings. V8 validates each
+   list entry and the full joined value against the existing **1,500
+   character hard ceiling**, joining in order with newline. The source
+   citations are not truncated or fabricated; malformed objects, blanks,
+   oversized evidence and empty/oversized lists still fail.
+2. V8 `_call` invokes `codex exec ... --json -` and sends the full UTF-8
+   prompt using `Popen.communicate(input=..., timeout=...)`. Both bundled
+   `bin/codex` and `bin/codex-dsh` accept the stdin `-` sentinel, so
+   neither Supervisor nor Worker embeds the prompt in a single argv entry.
+   Existing process-group timeout and sandbox flags are preserved.
+3. The Supervisor gets a compact routing view: bounded recent task
+   summaries, proposal IDs/status/check names rather than full proposal
+   contents, current open issue IDs/fix requests, and bounded recent
+   event excerpts. The full proposals and evidence remain immutable in the
+   event log and available to scientific Workers in their assignments.
+   This reduces token duplication without hiding essential review debt.
+4. A future OS-level Supervisor launch error records a precise
+   `SUPERVISOR_LAUNCH_ERROR` HALT **once**, rather than generating repeated
+   denied scientific decisions.
+
+Offline regression:
+
+    python -m pytest -q danus/tests/test_v8_transport_and_evidence.py danus/tests/test_v8_review_feedback.py danus/tests/test_v8_adaptive.py danus/tests/test_v8_validation.py danus/tests/test_v8_inputs.py
+
+Do not restage data, recover task-28, or rerun task-11 merely to resume
+`v8-pfl3-steering-20261014`. After locally verifying the new branch,
+execute `python -m danus.v8 unblock v8-pfl3-steering-20261014 --reason
+"Fixed supervisor argv E2BIG and Reviewer evidence schema; preserve all five
+open issues and verified experimental artifacts"`, then invoke the normal
+V8 run command with a bounded step count and **append** to existing logs.
+The system must route outstanding Reviewer scientific corrections rather
+than waive them silently.
