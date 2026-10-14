@@ -321,6 +321,10 @@ class Store:
                          f"{issue['problem']} | fix: {issue['required_action']}")
         if not open_issues:
             lines.append("None")
+        lines += ["", "## Correction work grouping (not Reviewer resolution)"]
+        for group in state["issue_merges"].values():
+            lines.append(f"- {group['id']} {group['status']}: "
+                         f"{', '.join(group['issue_ids'])} | {group['summary']}")
         lines += ["", "## Assets"]
         for asset in state["assets"].values():
             lines.append(f"- {asset['path']} sha256={asset['sha256']} "
@@ -705,12 +709,25 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
         return
     if action not in ("complete", "blocked"):
         raise ValueError("worker must complete, request or block")
-    proposal, review, verdict, review_feedback = None, None, "", None
+    proposal, review, verdict, review_feedback, issue_merge = None, None, "", None, None
     if action == "complete":
+        if result.get("issue_merge") is not None:
+            if task["role"] != "researcher" or task["purpose"] != "work":
+                raise PermissionError("only Researcher work may request issue grouping")
+            if result.get("proposal") is not None:
+                raise ValueError("grouping must be approved before corrective proposal")
+            issue_merge = _issue_merge(task_id, result["issue_merge"], state)
         if result.get("proposal") is not None:
             if task["role"] != "researcher":
                 raise PermissionError("only Researcher may propose an experiment")
-            proposal = _proposal(result["proposal"], result.get("required_checks"))
+            merge_id = result.get("issue_merge_id") or ""
+            if merge_id:
+                group = state["issue_merges"].get(merge_id)
+                if (not group or group["status"] != "APPROVE"
+                        or any(state["review_issues"].get(x, {}).get("status") != "OPEN"
+                               for x in group["issue_ids"])):
+                    raise PermissionError("corrective proposal references an unapproved or stale merge")
+            proposal = _proposal(result["proposal"], result.get("required_checks"), merge_id)
             if proposal["id"] in state["proposals"]:
                 raise ValueError("experiment proposal was already submitted")
         if task["purpose"] == "review_experiment":
@@ -762,7 +779,7 @@ def _worker_result(store: Store, task_id: str, result: dict, *, recovery=False):
     store.append("RESULT", task_id=task_id,
                  status="COMPLETE" if action == "complete" else "BLOCKED",
                  summary=summary, proposal=proposal, review=review, verdict=verdict,
-                 review_feedback=review_feedback,
+                 issue_merge=issue_merge, review_feedback=review_feedback,
                  reply_to=task["request_id"] if action == "complete" else "")
     for asset in assets:
         store.append("ASSET", **asset)
@@ -952,6 +969,14 @@ def _brief_state(store: Store, *, last=12):
             "reason": validation["reason"][:500],
         } if validation else None),
         "review_issues": issues, "open_review_issue_count": len(issues),
+        "issue_merge_proposals": [{
+            "id": g["id"], "status": g["status"], "issue_ids": g["issue_ids"],
+            "summary": g["summary"][:400], "reason": g["reason"][:300],
+        } for g in state["issue_merges"].values()
+          if g["status"] == "PENDING" or
+          (g["status"] == "APPROVE" and all(
+              state["review_issues"].get(x, {}).get("status") == "OPEN"
+              for x in g["issue_ids"]))][-8:],
         "latest_experiment_needs_interpretation": bool(
             state.get("last_experiment_seq", 0)
             and state.get("last_interpret_seq", 0) <= state["last_experiment_seq"]),
@@ -1169,6 +1194,10 @@ def _worker(store: Store, task_id, *, timeout=1200):
         "approved_experiment_proposal": state["proposals"].get(related_proposal_id),
         "open_review_issues": [i for i in state["review_issues"].values()
                                if i["status"] == "OPEN"],
+        "issue_merge_proposals": [g for g in state["issue_merges"].values()
+                                  if g["status"] in ("PENDING", "APPROVE")
+                                  and all(state["review_issues"].get(x, {}).get("status") == "OPEN"
+                                          for x in g["issue_ids"])][-8:],
         "previous_final_review": state["final_review"],
         "known_assets": list(state["assets"].values()),
         "latest_validation": state["latest_validation"],
@@ -1312,6 +1341,7 @@ def status(store: Store):
         "input_provenance": state["inputs"],
         "latest_validation": state["latest_validation"],
         "review_issues": list(state["review_issues"].values()),
+        "issue_merges": list(state["issue_merges"].values()),
     }, ensure_ascii=False, indent=2))
 
 
