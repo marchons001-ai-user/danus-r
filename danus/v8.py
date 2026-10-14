@@ -977,7 +977,7 @@ def _brief_state(store: Store, *, last=12):
         "issue_merge_proposals": [{
             "id": g["id"], "status": g["status"], "issue_ids": g["issue_ids"],
             "summary": g["summary"][:400], "reason": g["reason"][:300],
-        } for g in state["issue_merges"].values()
+        } for g in state.get("issue_merges", {}).values()
           if g["status"] == "PENDING" or
           (g["status"] == "APPROVE" and all(
               state["review_issues"].get(x, {}).get("status") == "OPEN"
