@@ -319,3 +319,63 @@ pilot:
 
 Historic V8 projects retain their original recorded decisions; feedback
 fields are backward-compatible and do not retroactively change past results.
+
+
+## V8 JSON response length budgets and actionable diagnostics (2026-10-14)
+
+An observed real-science PFL3 pilot stopped at final Reviewer with
+`ValueError: issue evidence must be nonempty text <= 1500 characters`.
+That error was ambiguous: evidence could be absent, blank, wrong type or
+too long; from the TUI alone it is **not** correct to infer overlength.
+A Reviewer model turn was executed, but its result was rejected before
+becoming an accepted final review. Earlier input provenance, approved
+experiment assets and `VALIDATION: PASSED` remain recorded.
+
+V8 now derives one **soft 70% ceiling table** from the existing hard text
+limits and includes it in **every Supervisor and Worker prompt**. Lengths
+are Python Unicode string lengths, not tokens or UTF-8 bytes:
+
+| Model-output field | Enforced max (characters) | Suggested ceiling (70%) |
+|---|---:|---:|
+| Supervisor new task / answer text | 12000 | 8400 |
+| Supervisor decision reason | 1800 | 1260 |
+| Researcher proposal text | 32768 | 22937 |
+| Worker summary, including Reviewer summary | 32000 | 22400 |
+| Worker request question | 3000 | 2100 |
+| Worker request reason | 1800 | 1260 |
+| Each Reviewer issue field: problem, impact, required_action, evidence | 1500 | 1050 |
+| Each Reviewer resolution reason / evidence | 1500 | 1050 |
+| Each Reviewer accepted deviation item / reason / evidence | 1500 | 1050 |
+| Artifact description (truncated at hard limit) | 500 | 350 |
+| Each request reference string | 256 | 179 |
+
+These are **ceilings, not targets to fill**. Prefer the existing shorter
+model writing guidance: a typical protocol around <=10000 characters,
+summary <=5000, request question <=1500, request reason <=800. No
+information relevant to scientific soundness should be removed only to
+satisfy the soft guide; substantive evidence can be cited from registered
+artifacts. List counts are separate constraints: at most 12
+Reviewer issues/resolutions/deviations, 16 required checks, 12 request
+references and 24 registered artifacts.
+
+Structured Reviewer `REVISE` items require all five keys:
+`problem, impact, required_action, target_role, evidence`; all four text
+fields must be **nonblank**, while `target_role` is either researcher or
+experimenter. Missing information is **not** remedied by inserting a
+fabricated evidence claim. Use a concrete observation or cite where the
+reported artifact omits a required item. `resolved_issues` require
+`id,status,reason,evidence`, and `accepted_deviations` require
+`item,reason,evidence`.
+
+The host validator now reports **missing/non-string**, **blank**, or
+**actual length N > cap** distinctly. Neither the limits nor scientific
+review authority are loosened. There is no blind string truncation and
+no silent auto-waiver of a required field.
+
+To recover after a schema-rejected **read-only Reviewer task**, keep all
+completed Experimenter outputs and original logs. Update the code, then
+continue the SAME V8 project with `danus.v8 run` and append the run log
+using `tee -a`; the Supervisor may schedule a *new final review* using
+existing evidence. Do **not** salvage an invalid original Reviewer JSON
+or rerun the experiment just to fix a review output field. Older BLOCKED
+Reviewer attempts remain in the event history.
