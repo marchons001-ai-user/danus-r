@@ -133,3 +133,124 @@ def test_obvious_repeat_is_rejected_but_new_distinct_finding_is_allowed():
     with pytest.raises(ValueError, match="Identical issue restated"):
         v8._review_feedback("task-143", "REVISE",
                            {"issues": [genuinely_new, genuinely_new]}, state)
+
+
+def _group_store(tmp_path):
+    store = v8.Store(tmp_path / "group")
+    v8.initialize(store, "Test a narrow scientific claim")
+    research = v8.apply_decision(store, {
+        "action": "dispatch", "role": "researcher", "purpose": "work",
+        "task": "Analyze the available evidence", "reason": "Initial analysis",
+    }, "low")
+    store.append("RUNNING", task_id=research)
+    v8._worker_result(store, research, {
+        "action": "complete", "summary": "Two open evidence questions",
+    })
+    review = v8.apply_decision(store, {
+        "action": "dispatch", "role": "reviewer", "purpose": "final_review",
+        "task": "Independently assess evidence", "reason": "Scientific review",
+    }, "low")
+    store.append("RUNNING", task_id=review)
+    v8._worker_result(store, review, {
+        "action": "complete", "summary": "Two separate findings", "verdict": "REVISE",
+        "issues": [
+            issue("Recovery flags absent", "Recompute verified recovery records"),
+            issue("Recovery timestamps absent", "Recompute verified recovery records"),
+        ],
+    })
+    return store, list(store.state()["review_issues"])
+
+
+def _research_complete(store, task_text, **result):
+    task = v8.apply_decision(store, {
+        "action": "dispatch", "role": "researcher", "purpose": "work",
+        "task": task_text, "reason": "Address Reviewer findings",
+    }, "low")
+    store.append("RUNNING", task_id=task)
+    v8._worker_result(store, task, {
+        "action": "complete", "summary": "Evidence-based correction",
+        **result,
+    })
+    return task
+
+
+def test_researcher_group_requires_supervisor_approval_then_reviewer_approval(tmp_path):
+    store, issue_ids = _group_store(tmp_path)
+    task = _research_complete(store, "Propose shared repair", issue_merge={
+        "issue_ids": issue_ids,
+        "summary": "Recompute one pulse-level recovery table",
+        "reason": "One independently reconstructed table supplies both missing fields",
+    })
+    merge_id = f"{task}/merge"
+    assert store.state()["issue_merges"][merge_id]["status"] == "PENDING"
+    assert v8._brief_state(store)["issue_merge_proposals"][0]["id"] == merge_id
+    assert all(x["status"] == "OPEN" for x in store.state()["review_issues"].values())
+
+    assert v8.apply_decision(store, {
+        "action": "review_issue_merge", "merge_id": merge_id,
+        "verdict": "APPROVE", "reason": "One table covers both independent requirements",
+    }, "low") is None
+    assert store.state()["issue_merges"][merge_id]["status"] == "APPROVE"
+    assert all(x["status"] == "OPEN" for x in store.state()["review_issues"].values())
+
+    _research_complete(store, "Write approved grouped experiment", issue_merge_id=merge_id,
+                       proposal="Recompute pulse flags and timestamps with independent check",
+                       required_checks=[{"id": "integrity", "kind": "asset_integrity"}])
+    proposal_id = next(reversed(store.state()["proposals"]))
+    assert store.state()["proposals"][proposal_id]["issue_merge_id"] == merge_id
+    with pytest.raises(PermissionError, match="independent approved exact proposal"):
+        v8.apply_decision(store, {
+            "action": "dispatch", "role": "experimenter", "purpose": "experiment",
+            "proposal_id": proposal_id, "reason": "Not independently approved",
+            "task": "Run grouped repair",
+        }, "low")
+    approval = v8.apply_decision(store, {
+        "action": "dispatch", "role": "reviewer", "purpose": "review_experiment",
+        "proposal_id": proposal_id, "reason": "Independent approval",
+        "task": "Review grouped corrective proposal",
+    }, "low")
+    store.append("RUNNING", task_id=approval)
+    v8._worker_result(store, approval, {
+        "action": "complete", "summary": "Adequate limited repair", "verdict": "APPROVE",
+    })
+    dispatched = v8.apply_decision(store, {
+        "action": "dispatch", "role": "experimenter", "purpose": "experiment",
+        "proposal_id": proposal_id, "reason": "Approved grouped repair",
+        "task": "Run exact approved work",
+    }, "low")
+    assert store.state()["tasks"][dispatched]["purpose"] == "experiment"
+    with pytest.raises(PermissionError, match="independent final review required|REVIEW_DEBT"):
+        v8.apply_decision(store, {
+            "action": "finish", "reason": "Grouping is not resolution",
+        }, "low")
+
+
+def test_grouping_rejected_or_unapproved_cannot_enter_corrective_proposal(tmp_path):
+    store, issue_ids = _group_store(tmp_path)
+    with pytest.raises(ValueError, match="distinct existing OPEN"):
+        v8._issue_merge("task-x", {"issue_ids": [issue_ids[0], issue_ids[0]],
+                                   "summary": "Same", "reason": "Same"}, store.state())
+    task = _research_complete(store, "Request grouping", issue_merge={
+        "issue_ids": issue_ids, "summary": "Combine", "reason": "One repair",
+    })
+    merge_id = f"{task}/merge"
+    with pytest.raises(ValueError, match="same active"):
+        v8._issue_merge("task-z", {
+            "issue_ids": list(reversed(issue_ids)), "summary": "Repeat",
+            "reason": "Same request",
+        }, store.state())
+    with pytest.raises(ValueError, match="APPROVE or REJECT"):
+        v8.apply_decision(store, {
+            "action": "review_issue_merge", "merge_id": merge_id,
+            "verdict": "WAIVED", "reason": "Cannot waive review",
+        }, "low")
+    v8.apply_decision(store, {
+        "action": "review_issue_merge", "merge_id": merge_id,
+        "verdict": "REJECT", "reason": "Different evidence requirements",
+    }, "low")
+    assert store.state()["issue_merges"][merge_id]["status"] == "REJECT"
+    with pytest.raises(PermissionError, match="unapproved or stale merge"):
+        _research_complete(store, "Attempt rejected grouped plan",
+                           issue_merge_id=merge_id, proposal="Unauthorized grouped work",
+                           required_checks=[{"id": "integrity", "kind": "asset_integrity"}])
+    assert not store.state()["proposals"]
