@@ -551,3 +551,47 @@ Focused local regression: `python -m pytest -q
 danus/tests/test_v8_review_convergence.py danus/tests/test_v8_review_feedback.py
 danus/tests/test_v8_adaptive.py danus/tests/test_v8_validation.py
 danus/tests/test_v8_inputs.py` (one shell line).
+
+
+## V8 goal-first logical ablation (2026-10-14)
+
+The PFL3 pilot repeatedly produced full correction protocols despite a stable
+negative/inconclusive scientific interpretation. The same omitted independent
+checker/replay requirements survived successive revisions. Merging issue IDs
+alone does not shrink the actual work. V8 therefore changes **worker and
+Supervisor policies**, not the event schema, role ownership or finish gates:
+
+- Researcher starts from the fixed hypothesis and defensible claim, then audits
+  **distinct failure modes** before proposing corrections: what failure matters,
+  which genuinely independent existing evidence covers it, whether to REUSE,
+  NARROW, REPAIR or OMIT, and the smallest required remaining repair. Keep this
+  assessment brief; do not copy entire prior protocols or inventories.
+- Reviewer challenges costly, repeated or nonessential checks during
+  `review_experiment`. A full but needlessly broad proposal can be REVISE
+  before any Experimenter runs. Never approve an inadequate plan merely
+  because it is cheap. In final_review, use existing RESOLVED/WAIVED/DUPLICATE
+  and accepted_deviations with concrete evidence where appropriate.
+- Supervisor, on observing the **same defect surviving two actual corrective
+  attempts**, prioritizes a Researcher necessity/scope reassessment or an
+  independent Reviewer audit instead of repackaging another larger plan.
+
+This is **not** permission to erase old Reviewer OPEN findings, waive host
+Validation Gate failures, claim that a missing independent replay happened, or
+silently alter an already approved experiment. A replacement plan still needs
+its own Reviewer approval and the normal experiment validation / final scientific
+review. A negative result is valid only insofar as its supporting evidence is
+credible; incomplete scientific verification remains visible.
+
+An existing PENDING proposal (including the PFL3 correction_6) remains PENDING.
+New Reviewer instructions apply when its independent approval turn is actually
+run. Reviewer can APPROVE, REVISE or REJECT based on minimum sufficient evidence;
+the code does not retroactively withdraw it or automatically restart an
+experiment. The event history and frozen artifacts are untouched.
+
+Focused local check:
+
+    python -m pytest -q danus/tests/test_v8_review_convergence.py danus/tests/test_v8_review_feedback.py danus/tests/test_v8_adaptive.py danus/tests/test_v8_validation.py danus/tests/test_v8_inputs.py
+
+Continue the SAME PFL3 project only after this test passes. Use small run
+windows and audit whether genuinely unresolved failure modes and repeated
+corrections decrease; do not optimize only for fewer OPEN issue IDs.
