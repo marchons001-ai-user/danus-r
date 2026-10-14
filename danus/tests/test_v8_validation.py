@@ -161,3 +161,52 @@ def test_two_repeated_unresolved_check_sets_escalate_to_high(tmp_path, monkeypat
     assert v8.step(s) == "CONTROL"
     assert levels == ["high"]
     assert s.state()["halt"]
+
+
+@pytest.mark.parametrize(
+    "checker_exit, tool_exit, expected",
+    [(1, 0, "FAILED"), (0, 1, "FAILED"),
+     (0, 0, "PASSED"), (0, None, "INCOMPLETE")],
+)
+def test_checker_receipt_uses_host_owned_tool_exit(
+        tmp_path, checker_exit, tool_exit, expected):
+    s = new_store(tmp_path)
+    name = "check_pilot"
+    proposal = (f"Run from workspace: python -B {name}/run.py. "
+                f"The parent runs --check and writes {name}/run_log.json.")
+    research = dispatch(s, "researcher", "Propose check contract")
+    complete(s, research, proposal=proposal, required_checks=checks(name))
+    pid = list(s.state()["proposals"])[-1]
+    reviewer = dispatch(s, "reviewer", "Review check contract",
+                        "review_experiment", proposal_id=pid)
+    complete(s, reviewer, verdict="APPROVE")
+    task = dispatch(s, "experimenter", "Execute check contract",
+                    "experiment", proposal_id=pid)
+    out = s.root / "workspace" / name
+    out.mkdir(parents=True)
+    (out / "metrics.csv").write_text("mse\\n1\\n3\\n")
+    (out / "report.json").write_text('{"mse": 2}')
+    (out / "run_log.json").write_text(
+        json.dumps({"checker_exit_code": checker_exit, "parent_exit_code": 0}))
+    (out / "run.py").write_text("print('check pilot')\\n")
+    s.append("RUNNING", task_id=task)
+    if tool_exit is not None:
+        logs = s.root / "logs"
+        logs.mkdir()
+        (logs / f"{task}-mock.jsonl").write_text(json.dumps({
+            "type": "item.completed",
+            "item": {"type": "command_execution",
+                     "command": f"python -B {name}/run.py",
+                     "exit_code": tool_exit},
+        }) + "\\n")
+    v8._worker_result(s, task, {
+        "action": "complete", "summary": "Checker executed or failed",
+        "artifacts": [f"{name}/metrics.csv", f"{name}/report.json",
+                      f"{name}/run_log.json", f"{name}/run.py"],
+    })
+    validation = s.state()["latest_validation"]
+    assert validation["status"] == expected
+    receipt = next(r for r in validation["checks"]
+                   if r["id"] == "checker_execution")
+    assert receipt["status"] == expected
+    assert s.state()["tasks"][task]["status"] == "COMPLETE"
