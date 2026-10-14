@@ -464,3 +464,61 @@ After the tests pass, explicitly `danus.v8 unblock` the EXISTING PFL3 project,
 preserve task-49's registered scientific outputs and the five open Reviewer
 issues, then continue with `run` and append to the autonomous-run log. Never
 restart the corrective experiment just to fix the routing classifier.
+
+
+## V8 Reviewer issue convergence: preserve distinct defects, stop duplicate debt (2026-10-14)
+
+In the real PFL3 pilot, the 16-step correction sequence expanded from
+5 OPEN Reviewer findings to 12 OPEN (2 earlier findings were RESOLVED).
+The original V8 rule `REVISE requires explicit actionable issues` forced
+each review with unchanged old debt to **register new findings**. Some new
+records expressly repeated a previous issue ID. This is bookkeeping
+inflation, not evidence of 12 distinct scientific failures.
+
+In final_review, Reviewer now:
+
+- May return `verdict: "REVISE", issues: []` when at least one PREVIOUSLY
+  registered Reviewer finding is still OPEN after explicitly recorded
+  resolutions. Quote its **existing stable ID** in the review summary.
+  No new issue ID is created; earlier evidence and repair instructions remain
+  authoritative. REVISE without either new problems or unresolved old
+  problems remains invalid.
+- Adds a new issue only for a **genuinely distinct** scientific defect,
+  with concrete evidence and a new actionable remedy. The validator
+  rejects an exact repeat of an OPEN issue's problem+required_action
+  and explicit `task-N/issue-M remains OPEN` restatements masquerading
+  as new issues. It does NOT use fuzzy semantic similarity to decide that
+  two different scientific concerns are equivalent.
+- May resolve a *historical duplicated record* with
+  `resolved_issues: [{id, status:"DUPLICATE", canonical_id,
+  reason, evidence}]`. Only Reviewer makes this scientific/procedural
+  equivalence judgment. The `canonical_id` must identify a **different
+  still-OPEN original issue**, with a documented reason and evidence.
+  The canonical issue must remain OPEN after the review, so the required
+  work is not accidentally waived; a DUPLICATE is not scientific
+  RESOLVED or WAIVED. Existing event history is untouched. The resulting
+  DUPLICATE link is visible in the persisted state.
+- Continues to use `RESOLVED` for an actually verified repair and
+  `WAIVED` for a scientifically justified logical ablation. Machine
+  Validation Gate failures cannot be waived in prose. Supervisor
+  continues routing, not deciding which science findings are equivalent.
+
+No global numerical convergence targets, forced reduction in issue count,
+review-round ceilings, heuristic embeddings, or special Supervisor-H
+stagnation alarms are introduced here. An increase in genuinely distinct
+scientific findings is still allowed. The loop can remain INCONCLUSIVE
+when the scientific evidence itself is insufficient.
+
+The previous PFL3 runtime keeps its immutable history including the 12
+historical OPEN entries. Only a subsequent properly evidence-backed
+Reviewer resolution may mark a duplicated record DUPLICATE. It is NOT
+safe to delete or auto-merge old review events.
+
+Focused offline tests:
+
+    python -m pytest -q danus/tests/test_v8_review_convergence.py danus/tests/test_v8_review_feedback.py danus/tests/test_v8_adaptive.py
+
+Do not run an additional synthetic scientific task in this repair cycle.
+After local tests, resume the existing unhalted PFL3 project only if the
+operator accepts its already approved correction_5 proposal and resulting
+scientific scope. Otherwise audit the existing outstanding issues first.
