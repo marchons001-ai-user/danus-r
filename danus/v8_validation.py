@@ -84,10 +84,11 @@ def _checker_receipt(store, task_id, proposal, owned, source):
     def outcome(status, detail):
         return {**result, "status": status, "detail": detail}
 
-    match = re.search(r"\bpython(?:3)?\s+(?:-B\s+)?([\w./-]+/run\.py)\b", plan)
-    if not match:
-        return outcome("INCOMPLETE", "checker protocol has no identifiable Python entrypoint")
-    script = match.group(1)
+    candidates = re.findall(r"\bpython(?:3)?\s+(?:-B\s+)?([\w./-]+/run\.py)\b", plan)
+    scripts = {p for p in candidates if p in owned}
+    if len(scripts) != 1:
+        return outcome("INCOMPLETE", "checker contract has no unique registered new entrypoint")
+    script = scripts.pop()
     logs = [p for p in owned if p.endswith("/run_log.json")]
     if len(logs) != 1:
         return outcome("INCOMPLETE", "checker protocol requires one fresh registered run_log.json")
