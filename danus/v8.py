@@ -743,7 +743,10 @@ def _brief_state(store: Store, *, last=18):
             "proposals": list(state["proposals"].values()),
             "assets": list(state["assets"].values()), "final_review": state["final_review"],
             "latest_validation": state["latest_validation"],
-            "inputs": state["inputs"], "recent_events": recent}
+            "review_issues": list(state["review_issues"].values()),
+            "inputs": state["inputs"],
+            "review_issues": list(state["review_issues"].values()),
+            "recent_events": recent}
 
 
 _SUPERVISOR_POLICY = """
@@ -763,6 +766,13 @@ Never claim a
 scientific result is verified without actual evidence and independent review.
 Negative and inconclusive findings are acceptable; don't chase positive results.
 The runtime, not you, enforces authority.
+Reviewer owns scientific and protocol adequacy; Supervisor only ROUTES.
+After a final_review REVISE, follow its structured OPEN review_issues and
+route fixes to their target roles. Experimenter corrective execution still
+needs an independently approved proposal; don't overwrite frozen outputs.
+Do not FINISH with unresolved Reviewer issues. Reviewer may explicitly WAIVE
+a redundant check only by recording the failure it could detect and which
+independent evidence already rules it out (logical ablation).
 A Worker COMPLETE records execution only; it does not certify scientific
 validity. Independent host-side checks from the exact approved proposal
 produce VALIDATION PASSED, INCOMPLETE or FAILED. FINISH is forbidden while
@@ -861,8 +871,19 @@ For Reviewer purpose=review_experiment, use verdict APPROVE/REVISE/REJECT.
 For Researcher purpose=interpret, analyze the already recorded experimental
 outputs, including negative findings; do not produce a new experiment unless
 you have a separate scientific reason. For Reviewer purpose=final_review,
-assess the Researcher's interpretation against the underlying evidence,
-using verdict ACCEPT/INCONCLUSIVE/REVISE/REJECT.
+assess the Researcher's interpretation against underlying evidence and the
+COMPLETE approved protocol supplied in your assignment. Verdict is
+ACCEPT/INCONCLUSIVE/REVISE/REJECT. INCONCLUSIVE means scientifically uncertain
+results from acceptable evidence, not incomplete required work. REVISE requires
+issues: [{problem,impact,required_action,target_role,evidence}]; the runtime
+assigns stable IDs. Review each prior OPEN issue; resolve by returning
+resolved_issues: [{id,status:"RESOLVED"|"WAIVED",reason,evidence}].
+WAIVED requires logical ablation: what failure was the test designed to catch
+and which existing independent evidence already excludes it, within what scope.
+For non-blocking protocol omissions with independently adequate evidence, use
+accepted_deviations: [{item,reason,evidence}]. Do not claim omitted tests ran.
+Do not waive a failed host Validation Gate in prose.
+Reviewer decides adequacy; Supervisor only routes.
 Experimenter may write files only for purpose=experiment, inside this workspace.
 The artifacts array registers NEW output files only for approved Experimenter
 experiment tasks. Researcher and Reviewer should normally set artifacts=[]
@@ -910,11 +931,18 @@ def _worker(store: Store, task_id, *, timeout=1200):
     req = state["requests"].get(task["request_id"])
     replies = [r for r in state["requests"].values()
                if r["from_task"] == task_id and r["status"] == "ANSWERED"]
+    latest_experiment = next((t for t in reversed(list(state["tasks"].values()))
+                              if t["purpose"] == "experiment"), None)
+    related_proposal_id = task["proposal_id"] or (
+        latest_experiment["proposal_id"] if latest_experiment else "")
     payload = {
         "goal": state["goal"], "reference": state["reference"], "task": task,
         "request_to_answer": req,
         "replies_to_your_previous_questions": replies,
-        "approved_experiment_proposal": state["proposals"].get(task["proposal_id"]),
+        "approved_experiment_proposal": state["proposals"].get(related_proposal_id),
+        "open_review_issues": [i for i in state["review_issues"].values()
+                               if i["status"] == "OPEN"],
+        "previous_final_review": state["final_review"],
         "known_assets": list(state["assets"].values()),
         "latest_validation": state["latest_validation"],
         "input_provenance": state["inputs"],
@@ -1036,6 +1064,7 @@ def status(store: Store):
         "asset_count": len(state["assets"]), "final_review": state["final_review"],
         "input_provenance": state["inputs"],
         "latest_validation": state["latest_validation"],
+        "review_issues": list(state["review_issues"].values()),
     }, ensure_ascii=False, indent=2))
 
 
