@@ -385,3 +385,31 @@ def test_v8_default_model_assignments():
         "reviewer": ("gpt-6.1-sol", "medium"),
         "experimenter": ("gpt-6.1-sol", "medium"),
     }
+
+
+def test_experimenter_can_implement_approved_missing_entrypoint(tmp_path):
+    s = new_store(tmp_path)
+    researcher = dispatch(s, "researcher", "Propose one check")
+    start(s, researcher)
+    v8._worker_result(s, researcher, {
+        "action": "complete", "summary": "New script required",
+        "proposal": "Implement and run a NEW validation/run.py in the workspace",
+        "required_checks": [{"id": "integrity", "kind": "asset_integrity"}],
+    })
+    proposal_id = next(iter(s.state()["proposals"]))
+    with pytest.raises(PermissionError, match="independent approved"):
+        dispatch(s, "experimenter", "Not approved", "experiment",
+                 proposal_id=proposal_id)
+    reviewer = dispatch(s, "reviewer", "Review the exact new script",
+                        "review_experiment", proposal_id=proposal_id)
+    start(s, reviewer)
+    v8._worker_result(s, reviewer, {
+        "action": "complete", "summary": "Approved", "verdict": "APPROVE",
+    })
+    experimenter = dispatch(s, "experimenter", "Run", "experiment",
+                            proposal_id=proposal_id)
+    task = s.state()["tasks"][experimenter]
+    assert task["status"] == "READY"
+    assert "Create missing NEW implementation scripts" in task["instruction"]
+    assert not (s.root / "workspace" / "validation" / "run.py").exists()
+    assert "planned script being absent is not a blocker" in v8._WORKER_POLICY
