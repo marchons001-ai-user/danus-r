@@ -84,7 +84,7 @@ def _checker_receipt(store, task_id, proposal, owned, source):
     def outcome(status, detail):
         return {**result, "status": status, "detail": detail}
 
-    match = re.search(r"\\bpython(?:3)?\\s+(?:-B\\s+)?([\\w./-]+/run\\.py)\\b", plan)
+    match = re.search(r"\bpython(?:3)?\s+(?:-B\s+)?([\w./-]+/run\.py)\b", plan)
     if not match:
         return outcome("INCOMPLETE", "checker protocol has no identifiable Python entrypoint")
     script = match.group(1)
@@ -139,7 +139,7 @@ def _checker_receipt(store, task_id, proposal, owned, source):
                 continue
             cmd = item.get("command", "")
             if (isinstance(cmd, str) and script in cmd
-                    and re.search(r"\\bpython(?:3)?\\b", cmd)):
+                    and re.search(r"\bpython(?:3)?\b", cmd)):
                 observed.append(item.get("exit_code"))
     if not observed or any(type(code) is not int for code in observed):
         return outcome("INCOMPLETE", "host trace has no completed entrypoint command with exit code")
