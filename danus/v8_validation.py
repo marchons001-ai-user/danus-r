@@ -183,12 +183,18 @@ def _checker_receipt(store, task_id, proposal, owned, source):
 
     def scan(obj, context=""):
         if isinstance(obj, dict):
-            argv = obj.get("argv")
-            if isinstance(argv, list):
-                script_names = {Path(part).name for part in argv
+            argv, args = obj.get("argv"), obj.get("args")
+            if isinstance(argv, list) and isinstance(args, list) and argv != args:
+                failures.append(context + ".conflicting_argv_args")
+            command = argv if isinstance(argv, list) else args
+            if isinstance(command, list):
+                if not command or any(not isinstance(part, str) for part in command):
+                    missing.append(context + ".invalid_child_command")
+                    command = []
+                script_names = {Path(part).name for part in command
                                 if isinstance(part, str) and part.endswith(".py")}
                 roles = []
-                if "--replay" in argv:
+                if "--replay" in command:
                     roles.append("replay")
                 if checker_path:
                     check_match = any(
@@ -196,7 +202,7 @@ def _checker_receipt(store, task_id, proposal, owned, source):
                         and (Path(part) == Path(checker_path)
                              or (Path(part).is_absolute()
                                  and Path(part).resolve() == checker_abs))
-                        for part in argv)
+                        for part in command)
                 else:
                     check_match = ("--check" in argv
                                    or bool(script_names & {"check.py", "checker.py"}))
