@@ -744,7 +744,13 @@ completed cited tasks; any additional IDs are disclosed in
 record rather than treating previews as complete or reconstructing their
 missing endings.
 
-Only the referenced **completed summary** is exposed, not all task history,
+In addition, three normal role transitions receive **one** latest relevant
+full summary even when the Supervisor instruction omits its ID: Researcher
+work to early Reviewer work; completed Experimenter experiment to Researcher
+interpretation; Researcher interpretation to final Reviewer review. This
+avoids making ID wording a prerequisite for the ordinary review workflow.
+
+Only the selected **completed summary** is exposed, not all task history,
 raw artifacts or a universal workspace read permission. Supervisor routing
 continues to use its short previews. The event ledger and previous projects
 are not modified. This does not certify the summary's scientific claims:
