@@ -11,9 +11,10 @@ import hashlib
 import json
 import math
 import re
+import shlex
 from pathlib import Path
 
-KINDS = {"asset_integrity", "csv_rows", "csv_mean", "v7_evidence"}
+KINDS = {"asset_integrity", "csv_rows", "csv_mean", "v7_evidence", "checker_execution"}
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
@@ -32,6 +33,7 @@ def normalize_checks(raw):
         names.add(name)
         allowed = {
             "asset_integrity": {"id", "kind"},
+            "checker_execution": {"id", "kind", "path", "log_path"},
             "csv_rows": {"id", "kind", "path", "expected_rows"},
             "csv_mean": {"id", "kind", "path", "column", "report_path",
                          "report_key", "abs_tolerance"},
@@ -56,7 +58,7 @@ def normalize_checks(raw):
                     or not isinstance(item["scope"], dict) or not item["scope"]
                     or not re.fullmatch(r"[0-9a-f]{16}", str(item["protocol_id"]))):
                 raise ValueError("v7_evidence requires pinned record IDs, scope and protocol ID")
-        for field in ("path", "report_path"):
+        for field in ("path", "report_path", "log_path"):
             if field in item and (not isinstance(item[field], str)
                                   or not item[field].strip()
                                   or Path(item[field]).is_absolute()
@@ -67,7 +69,39 @@ def normalize_checks(raw):
                                   or not item[field].strip()):
                 raise ValueError("csv_mean needs column and report_key")
         checks.append(dict(item))
+    if sum(c["kind"] == "checker_execution" for c in checks) > 1:
+        raise ValueError("only one checker_execution receipt is allowed")
     return checks
+
+
+def _direct_python_entrypoint(command, script, workspace):
+    """Accept only a directly executed Python script, never text mentioning one."""
+    if not isinstance(command, str):
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return False
+    if len(words) >= 4 and words[0] == "cd" and words[2] == "&&":
+        if (workspace / words[1]).resolve() != workspace.resolve():
+            return False
+        words = words[3:]
+    if not words or any(x in {";", "&&", "||", "|", "&", ">", ">>", "<", "<<", "(", ")"} for x in words):
+        return False
+    if not re.fullmatch(r"python(?:3(?:\\.\\d+)?)?", Path(words[0]).name):
+        return False
+    args = words[1:]
+    while args and args[0] in {"-B", "-u", "-I", "-E", "-s"}:
+        args = args[1:]
+    if not args:
+        return False
+    supplied = args[0]
+    if supplied in {script, "./" + script}:
+        return True
+    return (Path(supplied).is_absolute()
+            and Path(supplied) == (workspace / script).resolve())
 
 
 def _checker_receipt(store, task_id, proposal, owned, source):
@@ -77,23 +111,39 @@ def _checker_receipt(store, task_id, proposal, owned, source):
     This gate confirms the entrypoint was actually invoked and exited zero;
     scientific independence and checker semantics still require Reviewer audit.
     """
-    plan = proposal.get("content", "")
-    if "--check" not in plan or "run_log.json" not in plan:
-        return None
-    result = {"id": "checker_execution", "kind": "checker_execution"}
+    explicit = [c for c in proposal.get("required_checks", [])
+                if c["kind"] == "checker_execution"]
+    if explicit:
+        check = explicit[0]
+        script = check["path"]
+        log_path = check["log_path"]
+        result = {"id": check["id"], "kind": "checker_execution"}
+    elif proposal.get("check_contract") == "explicit_v1":
+        return None  # New proposals never trigger a checker from prose.
+    else:
+        # Backward compatibility: immutable proposals approved before this schema.
+        plan = proposal.get("content", "")
+        if "--check" not in plan or "run_log.json" not in plan:
+            return None
+        result = {"id": "checker_execution", "kind": "checker_execution"}
+        candidates = re.findall(r"\bpython(?:3)?\s+(?:-B\s+)?([\w./-]+/run\.py)\b", plan)
+        scripts = {p for p in candidates if p in owned}
+        if len(scripts) != 1:
+            return {**result, "status": "INCOMPLETE",
+                    "detail": "legacy checker has no unique registered entrypoint"}
+        script = scripts.pop()
+        logs = [p for p in owned if p.endswith("/run_log.json")]
+        if len(logs) != 1:
+            return {**result, "status": "INCOMPLETE",
+                    "detail": "legacy checker requires one fresh run_log.json"}
+        log_path = logs[0]
     def outcome(status, detail):
         return {**result, "status": status, "detail": detail}
 
-    candidates = re.findall(r"\bpython(?:3)?\s+(?:-B\s+)?([\w./-]+/run\.py)\b", plan)
-    scripts = {p for p in candidates if p in owned}
-    if len(scripts) != 1:
-        return outcome("INCOMPLETE", "checker contract has no unique registered new entrypoint")
-    script = scripts.pop()
-    logs = [p for p in owned if p.endswith("/run_log.json")]
-    if len(logs) != 1:
-        return outcome("INCOMPLETE", "checker protocol requires one fresh registered run_log.json")
+    if script not in owned or log_path not in owned:
+        return outcome("INCOMPLETE", "approved checker entrypoint or run log is not registered")
     try:
-        runlog = json.loads(source(logs[0]).read_text(encoding="utf-8"))
+        runlog = json.loads(source(log_path).read_text(encoding="utf-8"))
     except (ValueError, OSError, UnicodeError) as exc:
         return outcome("FAILED", f"run_log.json cannot be read: {exc}"[:1000])
 
@@ -154,9 +204,8 @@ def _checker_receipt(store, task_id, proposal, owned, source):
             item = event.get("item") if event.get("type") == "item.completed" else None
             if not isinstance(item, dict) or item.get("type") != "command_execution":
                 continue
-            cmd = item.get("command", "")
-            if (isinstance(cmd, str) and script in cmd
-                    and re.search(r"\bpython(?:3)?\b", cmd)):
+            if _direct_python_entrypoint(
+                    item.get("command", ""), script, store.root / "workspace"):
                 observed.append(item.get("exit_code"))
     if not observed or any(type(code) is not int for code in observed):
         return outcome("INCOMPLETE", "host trace has no completed entrypoint command with exit code")
@@ -194,6 +243,8 @@ def run_gate(store, task_id, proposal, assets):
 
     for check in checks:
         name, kind = check["id"], check["kind"]
+        if kind == "checker_execution":
+            continue  # Process once against the host-owned execution trace below.
         try:
             if kind == "asset_integrity":
                 # Every newly registered output must still match the executor
