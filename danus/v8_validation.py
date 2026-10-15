@@ -98,8 +98,15 @@ def _checker_receipt(store, task_id, proposal, owned, source):
         return outcome("FAILED", f"run_log.json cannot be read: {exc}"[:1000])
 
     exit_markers, failures = [], []
+    child_roles = set()
     def scan(obj, context=""):
         if isinstance(obj, dict):
+            argv = obj.get("argv")
+            if isinstance(argv, list):
+                for flag, role in (("--replay", "replay"), ("--check", "check")):
+                    if flag in argv:
+                        child_roles.add(role)
+                        context += "." + role
             for key, value in obj.items():
                 name = str(key).lower()
                 full = context + "." + name
@@ -120,6 +127,8 @@ def _checker_receipt(store, task_id, proposal, owned, source):
     scan(runlog)
     if failures:
         return outcome("FAILED", "checker/parent reported non-success: " + ", ".join(failures)[:800])
+    if isinstance(runlog.get("children"), list) and not {"replay", "check"} <= child_roles:
+        return outcome("INCOMPLETE", "run log lacks a --replay or --check child")
     if not exit_markers:
         return outcome("INCOMPLETE", "run_log.json lacks numeric checker/parent exit evidence")
 
