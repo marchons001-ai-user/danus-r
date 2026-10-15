@@ -9,22 +9,23 @@ This is a checkable list, not a claim that the checks have already passed.
       copyright notices; confirm any copied assets/third-party components
       carry the relevant notices. Danus-R is an independently developed
       *derivative*, not a new authorship claim over the upstream Danus paper.
-- [ ] Verify README, CITATION.cff, pyproject.toml and descriptions distinguish
-      upstream mathematical facts from Danus-R V8 exploratory pilot outcomes.
-- [ ] Do not call three local case studies general benchmarks, scientific
-      discoveries or peer-reviewed validation.
-- [ ] Decide the permanent public owner/account once; avoid duplicate canonical
-      repos. A second GitHub personal account may collaborate, contribute
-      visibly and pin a public repository after a qualifying contribution,
-      or link it in that account's profile README.
+- [x] README, architecture intro, CITATION.cff and pyproject.toml now
+      distinguish upstream Danus from the derivative Danus-R software.
+      The public maintainer identity is collective until account transfer.
+- [x] The three local studies are labeled exploratory, not general
+      benchmarks or peer-reviewed scientific discoveries.
+- [ ] Account plan chosen: **transfer the single canonical repository to
+      the showcase account** before public release; obtain its exact GitHub
+      login and accept the transfer. Current account will remain collaborator.
+      No duplicate project clone/repo.
 
 ## B. Security and privacy: hard stop before toggling Public
 
-- [ ] Fetch all branches, tags and relevant PR refs in the private local clone.
-- [ ] Run a recent official [Gitleaks](https://github.com/gitleaks/gitleaks)
-      scanner across ALL REACHABLE GIT HISTORY, not only current files.
-      The local script scripts/prepublish_secret_scan.sh writes a REDACTED
-      report under gitignored runtime/ and prints rule/path summaries only.
+- [x] Operator fetched remote branches, tags and accessible PR-head refs
+      before the 2026-10-15 scan. Re-fetch and re-scan if refs change.
+- [x] Operator ran official [Gitleaks](https://github.com/gitleaks/gitleaks)
+      over 970 reachable Git commits, with zero signature matches.
+      Re-run after history-changing operations; this is not a PII/hosted-log audit.
 - [ ] Examine each finding; do not just suppress findings or publish the raw
       finding JSON. Rotate/revoke any genuine credential **before** cleaning.
 - [ ] Manually inspect unusual high-entropy configuration files and Git
@@ -51,20 +52,18 @@ This is a checkable list, not a claim that the checks have already passed.
 
 ## C. Branches, CI and release behavior
 
-- [ ] Resolve the **draft** PR #121 and its branch ancestry. Its current base
-      is an intermediate fix branch, NOT main. Do not assume opening the
-      repository publicly makes V8 the code visible in default main.
-- [ ] Consolidate the intended V8 changes through a reviewed PR to main,
-      or consciously select a tested public default branch. Retire obsolete
-      branches only when their history and outstanding PRs are understood.
-- [x] Full GitHub Actions on the release-candidate code is GREEN: run #495,
-      commit `7a17f0c6`, 1,334 tests passed on Python 3.10 and again on
-      Python 3.13, and 102 V8 core tests passed on each version. Historical
-      79 failures came from missing sandbox provisioning and legacy test
-      contract mismatches; do not mistake an earlier failed run for current CI.
-- [ ] Isolate portable/offline checks in CI and clearly label tests requiring
-      unavailable sandbox/agent dependencies. Fix genuine source regressions
-      before making a stability promise.
+- [x] PR #121 and 14 other stacked integrated PRs were closed as superseded
+      with individual explanations following #122. PR #113's 5 extra
+      commits are an intentionally rejected broader legacy evidence-reading
+      design; PR #101's 7 extra commits were selectively ported, not wholesale
+      merged. Branches and commits were preserved.
+- [x] V8 consolidation PR #122 merged as commit `b80bf467` into default
+      `main`; no squash/force push, old development branches retained.
+- [x] Default `main` commit `b80bf467` passed GitHub Actions #498:
+      V8 core and full-repository checks on Python 3.10 and 3.13.
+      Previous migration intermittency tracked separately in open Issue #123.
+- [x] CI separates offline V8 correctness from the full suite, which
+      installs the official Codex sandbox and runs a sandbox probe first.
 - [ ] Exercise clean-install instructions in a disposable Linux/WSL workspace.
       Confirm minimum requirements and provider usage costs; V8 execution can
       spend real API tokens even if a pilot ends early.
@@ -73,15 +72,16 @@ This is a checkable list, not a claim that the checks have already passed.
 
 ## D. Documents and records
 
-- [ ] Keep curated open incident reviews, architecture contracts, exact
-      behavior/limitations and reproducible lightweight fixtures.
+- [x] Kept curated incidents, contract documents, transparent limitations
+      and a zero-model synthetic V8 gate demonstration with a regression test.
+      The demo is explicitly not autonomous scientific research.
 - [ ] Keep raw local conversations, personal decisions, private provider logs,
       credentials, runtime experiments and unpublished restricted datasets
       PRIVATE. Do not automatically publish every historic debug session.
-- [ ] Explain where authoritative local runtime evidence lives, but do not
-      claim it is downloadable or independently reproduced from this repository.
-- [ ] Publish a route for responsible security reporting, contributor behavior
-      guidelines and clear statement of experimental support scope.
+- [x] Public docs distinguish locally held authoritative runtime evidence
+      from the synthetic offline demo; neither claims public raw pilot data.
+- [x] Added SECURITY.md, CONTRIBUTING.md and README scope limitations.
+      Still enable GitHub private vulnerability reporting before Public.
 
 ## E. Actual public switch (only after A-D)
 
@@ -108,24 +108,18 @@ miss custom secrets, GitHub Actions log leaks and personal information.
 The owner makes the final visibility decision after reviewing findings.
 
 
-## 2026-10-15 RC integration status
+## 2026-10-15 private-main integration
 
-- [x] Git history Gitleaks pass: 970 locally reachable commits, zero signature matches (still not exhaustive for GitHub PR/Actions logs or personal information).
-- [x] Release branch `release/v8-rc-20261015` created from V8 head; one draft consolidation PR #122 now targets `main`.
-- [x] D4 output bound, interrupted-experiment no-replay and owned-process/profile cleanup moved into RC without merging unrelated older documentation/CI; all four imported files are byte-identical to the D4 branch.
-- [x] Operator ran **124 targeted WSL tests passing in 9.00 s** after this port (D4 + V8).
-- [x] CI has separate offline V8 correctness and full-repository jobs. Both
-      Python 3.10 and 3.13 passed the approved Codex 0.153.4 sandbox probe
-      and the full 1,334-test suite in run #495 (candidate `7a17f0c6`).
-      Documentation-only changes after this commit still require the exact
-      final HEAD check before a protected merge.
-- [x] The prior 79 failing cases were investigated. The last pre-fix full
-      run had 11 consistent orchestration-test failures across both Python
-      versions; the updated tests now preserve live resource-budget gates,
-      separate observation-only quota telemetry, and legacy pause migration.
-      Run #495 then passed all 1,334 tests on both versions.
-- [ ] PR #122 may be merged privately to `main` only after final-HEAD
-      code/metadata review and green checks. Switching to Public remains
-      separately blocked until manual review of GitHub-hosted PR/Actions
-      logs, non-key personal information, clean installation and ownership
-      decisions. Merging to private `main` does NOT grant release approval.
+- [x] PR #122 merged into private `main` as `b80bf467`.
+- [x] Main CI #498: four jobs succeeded, V8 core and full suites on
+      Python 3.10 and 3.13.
+- [x] 17 historical open PRs individually classified and closed; Git branches
+      and history remain available for later audit/disk cleanup.
+- [x] Danus-R/upstream citation metadata revised, plus explanatory architecture
+      and offline-demo docs. **New docs/demo PR needs its own green CI
+      before merging**; the earlier main CI does not cover these changes.
+- [ ] Run an actual fresh-checkout bootstrap/smoke test and review third-party
+      attribution and modified-file notices.
+- [ ] Audit GitHub-hosted PR/Action logs and personal paths beyond Gitleaks.
+- [ ] Transfer to confirmed showcase account, then set the verified version
+      and only later make the repository public.
