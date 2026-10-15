@@ -1,160 +1,166 @@
-# Danus: Orchestrating Mathematical Reasoning Agents with Fact-Graph Memory
+# Danus-R
 
-<p align="center">
-  <a href="https://arxiv.org/abs/2607.06447"><img src="https://img.shields.io/badge/arXiv-2607.06447-b31b1b" alt="Danus paper on arXiv"></a>
-  <a href="https://frenzymath.com/blog/danus/"><img src="https://img.shields.io/badge/Technical%20Report-frenzymath.com-1f6feb" alt="Technical report"></a>
-  <a href="https://github.com/frenzymath/Rethlas"><img src="https://img.shields.io/badge/Rethlas-GitHub-181717?logo=github" alt="Rethlas on GitHub"></a>
-  <a href="https://www.xiaohongshu.com/discovery/item/6a4da1ba00000000070201ef?source=webshare&xhsshare=pc_web&xsec_token=ABfiiMB7yyB-dW_hMzh3MW7ZRG2ddm5in_wBnBALXO6DE=&xsec_source=pc_share"><img src="https://img.shields.io/badge/rednote-%E5%B0%8F%E7%BA%A2%E4%B9%A6-FF2442?logo=xiaohongshu&logoColor=white" alt="rednote (Xiaohongshu) post"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-4c1" alt="Apache 2.0 license"></a>
-</p>
+**Experimental, evidence-gated multi-agent scientific research harness.**
 
-Danus orchestrates mathematical reasoning agents with fact-graph memory. A main
-agent (Claude Code) steers a swarm of autonomous codex workers that prove; a
-cold-start verifier is the sole authority on correctness: a result becomes real
-only once it passes. Verified results accumulate in a content-addressed fact
-graph — the system's only source of truth — and a strategy loop (a strong
-reasoning model) decomposes the problem and steers the swarm. When you have the
-answer, Danus renders it into a human report or a publishable LaTeX paper.
+Danus-R is an **independent research extension of
+[Danus](https://github.com/frenzymath/Danus)**, originally developed for
+mathematical reasoning with a verifier-gated fact graph. The original Danus
+authors, paper and copyright notices are acknowledged below. This repository
+is not an official release of the upstream Danus project.
 
-Danus builds on the worker–verifier core of our earlier system
-[Rethlas](https://github.com/frenzymath/Rethlas)
-([arXiv:2604.03789](https://arxiv.org/abs/2604.03789)). The
-[paper](https://arxiv.org/abs/2607.06447) and the
-[technical report](https://frenzymath.com/blog/danus/) tell the full story:
-the system, six research-level case studies it resolved, and what we learned
-along the way.
+The newer **V8 adaptive scientific workflow** is the main focus of ongoing
+development. A lightweight Supervisor chooses the next research role
+(Researcher, Reviewer or Experimenter); the Host enforces task, experiment and
+verification boundaries. V8 does not claim to autonomously establish scientific
+truth: each conclusion is limited by its data, assumptions and evidence.
 
-See `ARCHITECTURE.md` for the layered design and the map of every module.
+> **Status (2026-10): research prototype, not production-ready.**
+> Tested local V8 flows exist, but external reproducibility, failure recovery,
+> full CI, and unattended long-horizon reliability remain under evaluation.
 
-## Two orchestrator options
+## What V8 adds
 
-The workers and the verifier always run on **codex**. The **main agent (the
-orchestrator)** can run on either runtime — pick one:
+- **Adaptive handoffs:** the Supervisor dispatches role-specific work rather
+  than blindly traversing a fixed workflow. Roles can request targeted
+  information; referenced complete summaries and approved protocols are
+  retrieved without making every role read all raw artifacts.
+- **Frozen inputs and proposals:** the operator can stage SHA-256-pinned inputs;
+  an Experimenter cannot run a new experiment without a Reviewer-approved
+  exact proposal and explicit executable validation checks.
+- **Separate claims from evidence:** Experimenter execution, Host integrity
+  / process validation, Researcher interpretation and independent Reviewer
+  assessment have distinct authority. A successful command is not proof of a
+  scientific conclusion.
+- **Append-only audit history:** tasks, approvals, requests, validation failures,
+  corrections and final verdicts are recorded. Reviewer issues have stable
+  identities and may be resolved or waived only with evidence.
+- **Negative outcomes and stopping:** REVISE, REJECT, INCONCLUSIVE and bounded
+  negative results are legitimate. The Supervisor may FINISH once the
+  independent review and Host gates allow it; it should not prolong an
+  experiment merely to obtain a positive result.
 
-- **Claude Code — recommended (this branch / `main`).** Best results with
-  **Fable (`claude-fable-5`)** as the orchestrator model. Requires the Claude Code
-  CLI in addition to your codex backend.
-- **codex — for convenience (the [`codex` branch](https://github.com/frenzymath/Danus/tree/codex), tag `v0.1.0-codex`).**
-  The orchestrator runs on codex too, so you install **nothing beyond codex** — no
-  Claude Code. Same engine, workers, and verifier; only the main-agent runtime
-  differs (`AGENTS.md` + `.codex/config.toml` + `.agents/skills/` in place of
-  `CLAUDE.md` + `.mcp.json` + `.claude/skills/`).
+### V8 execution path
 
-Fable-via-Claude-Code is the recommended orchestrator; the fully-codex line exists
-so a codex-only setup works out of the box.
-
-
-## How it works
-
-<p align="center"><img src="docs/assets/architecture.png" width="820" alt="Danus architecture: a main agent orchestrates a worker swarm; a stateless verifier gates every fact; global memory and the fact graph are the shared storage"></p>
-
-The design follows a strict separation of powers: the main agent performs the
-global planning and coordination, the workers carry out the detailed proof
-search, the verifier is the sole authority on correctness, and the fact graph
-holds every verified result and is the system's only source of truth.
-
-Each kind of agent carries out its role through its own skills and its own
-role-gated set of tools, so the separation is enforced by construction, not by
-prompts: the main agent has no `fact_submit` (the agent that steers the search
-structurally cannot introduce unverified mathematics into the fact graph), and
-the verifier writes nothing at all.
-
-<p align="center"><img src="docs/assets/agent-tools.png" width="820" alt="The three kinds of agent, each with its own skills and its own role-gated set of tools: the main agent orchestrates and renders, the workers prove and submit, the verifier only reads"></p>
-
-Every claim enters truth through one cycle:
-
-<p align="center"><img src="docs/assets/verify-loop.png" width="820" alt="The submit–verify–repair cycle: a worker submits a statement and proof citing existing facts; a fresh verifier instance accepts it into the fact graph or rejects it with repair hints"></p>
-
-A worker typically focuses on one claim at a time — a lemma, a counterexample, a
-toy example — rather than an entire proof. It repeatedly submits the claim with a
-supporting proof and revises it under the verifier's feedback until it passes, at
-which point the claim enters the fact graph as a fact, with the facts its proof
-depends on as its incoming edges. The verifier is stateless: a fresh instance
-judges each submission and retains nothing afterwards. Because each worker draws
-on only the facts it needs for its current claim and submits one fact at a time,
-the working context stays small even as the proof grows to many pages — and many
-workers' contributions accumulate into one shared structure.
-
-The graph below is the fact graph of a real research run: **3,157 verified facts
-and 8,616 dependency edges**, in dependency chains up to 54 facts deep (nodes
-darken and grow with dependency depth). The search was far broader than the proof
-it left behind: 664 facts form the supporting closure of the final theorem, and
-the clusters are separate lines of attack — among them conditional scaffolding
-that the final proof never cites, and an independent re-derivation of one of its
-bounds.
-
-<p align="center"><img src="docs/assets/fact-graph.png" width="440" alt="The fact graph of a real run: 3,157 verified facts and 8,616 dependency edges, nodes darkening and growing with dependency depth"></p>
-
-## Layout
-
-```
-danus/                 the engine (installable Python package)
-  core/                truth layer: content-addressed fact graph + typed memory + schema
-  gateway/             role-gated MCP server — the only door to the truth stores
-  verify/              cold-start proof-verifier HTTP service (the sole write-gate)
-  execution/           worker swarm: the autonomous per-worker round loop + scaffolding
-  orchestration/       the `danus` CLI verbs (list/new/assign/start/status/stop)
-  strategy/            consult gateway (elaboration → strong model → master_guidance)
-  integrations/        arXiv theorem search
-  observability/       read-only dashboard
-  authoring/           shared one-shot isolated-codex driver for the two renderers below
-  write_paper/         write-paper MCP service (fact graph → publishable LaTeX paper)
-  human_summary/       human-summary MCP service (fact graph → progress-report PDF)
-agents/                codex agent contracts (main/worker/verifier) + worker & verify skills
-.claude/skills/        main-agent skills: elaboration · consult · human-summary · initialize · write-paper
-bin/ scripts/ config/  runtime layer (wrappers, bootstrap/services/doctor, env templates)
-docs/                  human docs: getting started · concepts · operating guide · security & trust · …
-examples/              unattended-ops examples + a toy project
+```text
+Operator fixes goal and (optional) input set
+                  |
+            Supervisor
+                  |
+              Researcher
+        inspect / propose plan
+                  |
+       Reviewer of exact proposal
+           APPROVE / REVISE
+                  |
+          Experimenter (gated)
+                  |
+       Host validation of artifacts
+                  |
+       Researcher interprets outputs
+                  |
+       Reviewer independently audits
+                  |
+        Supervisor FINISH / HALT
 ```
 
-## Quickstart
+## Three exploratory autonomous research pilots
+
+| Pilot | Question | Bounded outcome |
+| --- | --- | --- |
+| PFL3 steering | Can the proposed control advantage be established? | Scientific **INCONCLUSIVE**, not positive evidence |
+| Fly central-complex compass | Does the assumed connectome-constrained recurrent model retain direction during dark intervals? | **ACCEPT** of a negative, model-conditional result; not a claim about living flies |
+| UCI Air Quality / CO | Does 24-hour-delayed rolling residual calibration improve weekly 90% interval-coverage stability? | **ACCEPT** of an uncertain/negative comparison; superiority not established |
+
+These are **internal exploratory runs**, not peer-reviewed benchmarks. The
+original datasets, generated runtime event logs and large experimental outputs
+are not published here as benchmark bundles; the table is not an independent
+reproduction certificate. We retain investigation records, fixed goal
+documents and testable Host code, and state explicitly what has not been
+demonstrated.
+
+For goals and design constraints, see
+[the V8 documentation](docs/V8_ADAPTIVE.md) and
+[the frozen pilot descriptions](docs/pilots/). Implementation tests live
+under `danus/tests/`.
+
+## Getting started (Linux / WSL)
+
+This codebase contains both the inherited Danus mathematics workflow and the
+new V8 prototype. The two are **not interchangeable**.
 
 ```bash
-# 1. provision the toolchain (Node + venv + codex CLI) into runtime/
-bash scripts/bootstrap.sh
-
-# 2. configure — copy the templates and fill in YOUR keys (never committed)
-cp config/danus.env.example config/danus.env
-cp config/codex.env.example config/codex.env      # BYO OpenAI-compatible endpoint + key
-
-# 3. health check + bring up the verify service (REQUIRED for any proving)
-bash scripts/doctor.sh
-bash scripts/services.sh up verify
-
-# 4. connect Claude Code rooted at this repo dir; on first run it runs `initialize`.
-#    --dangerously-skip-permissions lets the main agent operate autonomously (no
-#    per-action permission prompts). That is the intended mode, but it means the
-#    agent acts with your shell privileges — run Danus on an isolated, disposable
-#    host, and read docs/security-and-trust.md first.
-claude --dangerously-skip-permissions
+git clone https://github.com/Marchons-AIuser/danus-r.git
+cd danus-r
+bash scripts/bootstrap.sh       # toolchain/bootstrap for a fresh installation
+source scripts/env.sh
+"$DANUS_PY" -m danus.v8 --help
+"$DANUS_PY" -m pytest -q danus/tests/test_v8_validation.py danus/tests/test_v8_adaptive.py
 ```
 
-Everything runs on your own keys (BYO). Workers and the verifier run on your codex
-backend; the strategy consult runs on a top-tier reasoning model over the `gpt_pro`
-transport (paid), `claude_api` (the Anthropic API, per-token), or `claude_code`
-(your Claude subscription), or `off` to skip it.
+Bootstrap requirements and provider accounts vary by backend. Configure only
+local, ignored `config/*.env` files from the committed `*.env.example`
+templates. **Never commit real API keys, local runtime folders, or private
+experiment data.** Commands involving model providers incur real usage costs.
 
-**Notes**
+A fresh V8 project uses the `new` command with a goal file. If it uses
+external data, `stage-inputs` must run **once before any role task**, and
+the data must be legally obtained and checked by the operator:
 
-- **Settle the stopping condition with the main agent before you start.** By
-  default the main agent keeps the swarm running until every target is proved and
-  stops it on its own once they are (a hard or slow problem is not a reason to
-  stop). Talk through what "done" means for your problem at the outset, so the swarm
-  does not keep spending tokens past the point you cared about.
+```bash
+"$DANUS_PY" -m danus.v8 new my-study --goal-file goal.md
+# For a data-driven study, FIRST stage operator-provided inputs:
+# "$DANUS_PY" -m danus.v8 stage-inputs my-study \
+#   --source-dir /path/to/input-files --dataset-label "My dataset" --files data.csv
+"$DANUS_PY" -m danus.v8 run my-study --max-steps 10 --worker-timeout 1200
+"$DANUS_PY" -m danus.v8 status my-study
+```
 
-- **Give the writing system a few exemplar papers.** Out of the box, `write-paper`
-  produces a complete, compilable paper, but the prose can read like a stack of
-  verified facts. In our experience the single highest-leverage fix is to provide
-  a few papers of your own as exemplars when you ask for the write-up — the writer
-  imitates them, and readability improves substantially.
+A `--max-steps 10` call is a bounded initial trial, not a promise to finish
+ten tasks. After inspecting the event and evidence trail, `--max-steps 0`
+runs without a step cap until FINISH, HALT, a failure, or manual interruption.
+It is not a guarantee of eventual convergence. There is also an optional
+Textual TUI: `"$DANUS_PY" -m danus.tui my-study --v8`.
 
-## Design invariants (see ARCHITECTURE.md §3)
+Read the [V8 operator notes](docs/V8_ADAPTIVE.md),
+[trust and security scope](docs/security-and-trust.md) and
+[open-source release checklist](docs/OPEN_SOURCE_RELEASE_CHECKLIST.md)
+before attempting unattended work.
 
-- Three memory tiers, one correctness boundary: only the verifier-gated fact graph
-  is truth; global memory is awareness.
-- Permission is enforced by the MCP role table (main cannot `fact_submit`; the
-  verifier is read-only).
-- Content-addressed, cascade-revocable facts; the verifier is the sole write-gate.
-- The finished paper is itself re-verified as written (a dedicated paper-math
-  verifier reads the whole document) before delivery, on top of the per-fact
-  verification.
+### Quality status
+
+The focused V8 regression suite passed locally in WSL (102 checks recorded
+on 2026-10-15). This is **not** equivalent to the entire repository test
+suite passing. The repository-wide GitHub Actions job still has outstanding
+failures, including unavailable Codex sandbox dependencies and legacy
+interface tests. See the release checklist rather than interpreting a small
+green test selection as full CI health.
+
+## Upstream credit and licensing
+
+Danus-R contains code and documentation derived from the original
+[Danus project (FrenzyMath)](https://github.com/frenzymath/Danus),
+which is distributed under **Apache License 2.0**. Original copyright and
+attribution notices are retained; see [LICENSE](LICENSE),
+[CITATION.cff](CITATION.cff) and the
+[historical upstream README](docs/UPSTREAM_DANUS_README.md).
+The original Danus paper is
+[“Danus: Orchestrating Mathematical Reasoning Agents with Fact-Graph
+Memory”](https://arxiv.org/abs/2607.06447). These upstream papers and
+case studies **must not** be represented as newly produced Danus-R results.
+
+Danus-R's V8 adaptations and exploratory pilot workflow are independently
+developed additions. No peer-reviewed Danus-R paper or general reliability
+benchmark is claimed here.
+
+## Development and contribution policy
+
+This repository is still being consolidated for public release. The main
+branch may lag feature branches until review and merge; use a tagged release
+or explicitly named branch rather than assuming a feature described here is
+in every checkout. Reproducible code and curated incident analyses are
+appropriate public development records; raw provider logs, credentials and
+private scientific datasets are not. See
+[release and contribution notes](docs/OPEN_SOURCE_RELEASE_CHECKLIST.md).
+
+For the inherited mathematics system's original usage guide, refer to
+[upstream documentation preserved here](docs/UPSTREAM_DANUS_README.md).
