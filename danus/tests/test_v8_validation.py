@@ -362,3 +362,60 @@ def test_checker_contract_rejects_ambiguous_specs():
     with pytest.raises(ValueError, match="safe workspace-relative"):
         v8_validation.normalize_checks([{
             **checker_check("pilot"), "log_path": "../outside.json"}])
+
+
+@pytest.mark.parametrize("sim_exit,check_exit,require_replay,expected", [
+    (0, 0, False, "PASSED"),
+    (2, 0, False, "FAILED"),
+    (0, 1, False, "FAILED"),
+    (None, 0, False, "INCOMPLETE"),
+    (0, 0, True, "INCOMPLETE"),
+])
+def test_typed_checker_accepts_simulator_and_checker_children_without_replay(
+        tmp_path, sim_exit, check_exit, require_replay, expected):
+    s = new_store(tmp_path)
+    name = "fly_cx"
+    receipt = {**checker_check(name), "require_replay": require_replay}
+    pid = approved(s, "fly_cx_checker", checks(name) + [receipt])
+    task = dispatch(s, "experimenter", "Run simulator then checker",
+                    "experiment", proposal_id=pid)
+    out = s.root / "workspace" / name
+    out.mkdir(parents=True)
+    (out / "metrics.csv").write_text("mse\n1\n3\n")
+    (out / "report.json").write_text('{"mse": 2}')
+    (out / "run.py").write_text("print('wrapper')\n")
+    (out / "run_log.json").write_text(json.dumps({
+        "children": [
+            {"argv": ["python", f"{name}/simulate.py", "--simulate"],
+             "exit_code": sim_exit},
+            {"argv": ["python", f"{name}/check.py", "--check"],
+             "exit_code": check_exit},
+        ],
+        "parent_exit_code": 0,
+    }))
+    log = s.root / "logs"
+    log.mkdir()
+    (log / f"{task}-trace.jsonl").write_text(json.dumps({
+        "type": "item.completed",
+        "item": {"type": "command_execution",
+                 "command": f"python -B {name}/run.py",
+                 "exit_code": 0}
+    }) + "\n")
+    complete(s, task, artifacts=[
+        f"{name}/metrics.csv", f"{name}/report.json",
+        f"{name}/run.py", f"{name}/run_log.json",
+    ])
+    validation = s.state()["latest_validation"]
+    assert validation["status"] == expected
+    checker = next(x for x in validation["checks"]
+                   if x["kind"] == "checker_execution")
+    assert checker["status"] == expected
+
+
+def test_typed_checker_requires_boolean_replay_option():
+    with pytest.raises(ValueError, match="must be boolean"):
+        v8_validation.normalize_checks([
+            {**checker_check("case"), "require_replay": "yes"}])
+    valid = v8_validation.normalize_checks([
+        {**checker_check("case"), "require_replay": True}])
+    assert valid[0]["require_replay"] is True
