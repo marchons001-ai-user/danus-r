@@ -241,7 +241,7 @@ def test_resource_and_external_blocker_chain_survives_restarts(tmp_path: Path):
             "import os; from danus.orchestration import cli; "
             "cli.spawn_loop=lambda path, lock_fd=None: os.getpid(); "
             "rows=cli._project_rows('P'); "
-            "cli._apply_quota_gate('P', rows, {'state':'NORMAL','reason':'restored','block_new_codex_rounds':False})",
+            "cli._clear_legacy_quota_pauses('P')",
             agents_root=pdir.parent,
         )
         assert not wl.pause.exists()
