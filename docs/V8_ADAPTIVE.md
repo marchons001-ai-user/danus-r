@@ -721,3 +721,36 @@ and science-vs-execution distinctions are unchanged.
 Focused tests:
 
     python -m pytest -q danus/tests/test_v8_validation.py danus/tests/test_v8_adaptive.py danus/tests/test_v8_review_convergence.py danus/tests/test_v8_review_feedback.py danus/tests/test_v8_inputs.py
+
+
+
+## 2026-10-15: exact prior-work handoff for explicit cross-role requests
+
+Observed in the fly-CX compass pilot (task-3 -> task-7 -> task-11):
+task-3 completed with a 5,195-character summary, well below the 32,000
+character **hard** summary limit and the 22,400 character (70%) **recommended**
+output budget. The model did not exceed its output budget. However,
+`_worker` included only `summary[:3000]` in `recent_completed_work`, so
+Reviewer saw a sentence cut in half and asked Researcher to reconstruct it.
+That was a transfer/presentation defect, not missing original event evidence.
+
+Fix: routine recent history is explicitly marked as a bounded
+`summary_excerpt` with `excerpt_truncated` and `task_id`. When a task's
+instruction, the incoming request's question, or that task's earlier
+questions explicitly cites a completed `task-N`, the Host attaches the
+**exact, full stored summary** in `referenced_completed_work` (up to three
+completed cited tasks; any additional IDs are disclosed in
+`omitted_referenced_task_ids`). The recipient is told to prefer that exact
+record rather than treating previews as complete or reconstructing their
+missing endings.
+
+Only the referenced **completed summary** is exposed, not all task history,
+raw artifacts or a universal workspace read permission. Supervisor routing
+continues to use its short previews. The event ledger and previous projects
+are not modified. This does not certify the summary's scientific claims:
+ordinary Reviewer/source-evidence requirements still apply.
+
+Focused offline regression: `danus/tests/test_v8_adaptive.py` simulates
+a >4,900-character researcher summary, a reviewer requesting its missing
+tail, and an answering researcher receiving the complete exact record in
+the generated Worker prompt; unrelated long summaries stay bounded.
