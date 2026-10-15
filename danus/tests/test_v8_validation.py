@@ -169,14 +169,15 @@ def test_two_repeated_unresolved_check_sets_escalate_to_high(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize(
-    "checker_exit, tool_exit, expected, nested",
-    [(1, 0, "FAILED", False), (0, 1, "FAILED", False),
-     (0, 0, "PASSED", False), (0, None, "INCOMPLETE", False),
-     (1, 0, "FAILED", True), (0, 1, "FAILED", True),
-     (0, 0, "PASSED", True), (0, None, "INCOMPLETE", True)],
+    "checker_exit, tool_exit, expected, nested, quoted",
+    [(1, 0, "FAILED", False, False), (0, 1, "FAILED", False, False),
+     (0, 0, "PASSED", False, False), (0, None, "INCOMPLETE", False, False),
+     (1, 0, "FAILED", True, False), (0, 1, "FAILED", True, False),
+     (0, 0, "PASSED", True, False), (0, None, "INCOMPLETE", True, False),
+     (0, 0, "INCOMPLETE", True, True)],
 )
 def test_checker_receipt_uses_host_owned_tool_exit(
-        tmp_path, checker_exit, tool_exit, expected, nested):
+        tmp_path, checker_exit, tool_exit, expected, nested, quoted):
     s = new_store(tmp_path)
     name = "check_pilot"
     proposal = (f"Run from workspace: python -B {name}/run.py. "
@@ -211,7 +212,8 @@ def test_checker_receipt_uses_host_owned_tool_exit(
         (logs / f"{task}-mock.jsonl").write_text(json.dumps({
             "type": "item.completed",
             "item": {"type": "command_execution",
-                     "command": f"python -B {name}/run.py",
+                     "command": (f"echo 'python -B {name}/run.py'"
+                                 if quoted else f"python -B {name}/run.py"),
                      "exit_code": tool_exit},
         }) + "\n")
     v8._worker_result(s, task, {
