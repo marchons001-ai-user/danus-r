@@ -34,16 +34,18 @@ arbitrary scientific domains, security attacks or changing model providers.
 
 ## Verified checks versus known gaps
 
-- The operator recorded **102 focused V8 tests passing** in local WSL on
-  2026-10-15, plus a read-only recheck of all nine original UCI experiment
-  Host checks as PASSED. These checks are not a full repository test pass.
+- The operator recorded **124 focused V8 + D4 tests passing** in local WSL
+  on 2026-10-15, plus a read-only recheck of all nine original UCI experiment
+  Host checks as PASSED. These local checks are distinct from full CI.
 - Historical UCI original checker-INCOMPLETE and later checker-only PASSED
   events remain truthful, immutable history. Read-only replay of the Host
   gate does not backdate or rewrite events.
-- Full GitHub Actions remains red: the inspected Python 3.13 CI run reported
-  **79 failures, 1228 passes and 15 skips**, mixing missing official Codex
-  sandbox dependency with legacy interface mismatches. Failures need to be
-  classified; do not label the entire repository CI healthy.
+- Historical full GitHub Actions initially reported **79 failed, 1,228 passed,
+  15 skipped**. After provisioning the accepted official Codex sandbox in CI
+  and updating stale tests without restoring the retired proactive quota gate,
+  run #495 at commit `7a17f0c6` passed **1,334 full-repository tests each**
+  on Python 3.10 and 3.13; V8 core separately passed 102 on each version.
+  These are bounded regression results, not a deployment safety certificate.
 - V8 pilot-scoped evidence is held in local gitignored runtime workspaces;
   no public authoritative reproduction bundle is claimed.
 - Cross-experiment validation lineage and general convergence under repeated
