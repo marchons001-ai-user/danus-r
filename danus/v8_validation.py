@@ -100,7 +100,7 @@ def _direct_python_entrypoint(command, script, workspace):
         if (len(words) == 3 and Path(words[0]).name in {"bash", "sh"}
                 and words[1] in {"-c", "-lc"}):
             inner = words[2]
-            if any(char in inner for char in ("$", "`", "\\n", "\\r")):
+            if any(char in inner for char in ("$", "`", "\n", "\r")):
                 return False
             words = tokens(inner)
     except ValueError:
