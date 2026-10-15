@@ -645,3 +645,41 @@ The existing PFL3 project has a newer PENDING replacement proposal following
 blocked task-237. It remains PENDING; normal Supervisor/Reviewer decisions
 are required. Do not delete the old blocked task, rerun it blindly, restage
 inputs, or manually edit `EVENTS.jsonl`.
+
+
+### 2026-10-15: nested child exits and append-only revalidation
+
+In the first real `validation_7` completion (task-253), the new Host
+checker receipt returned `INCOMPLETE: run_log.json lacks numeric checker/parent
+exit evidence`. This was a **Host parser mismatch**, not evidence of a
+nonzero checker exit: the actual fresh run log stores child commands as
+`children[].argv` containing `--replay` or `--check`, with corresponding
+`children[].exit_code`. The gate now recognizes exactly one of each,
+still rejects nonzero exits, requires a Host-owned completed entrypoint
+execution trace, and preserves the original flat receipt behavior.
+
+To avoid rerunning an immutable, already completed 256-episode validation
+solely to correct a Host parser bug, `revalidate` is a narrow append-only
+operation. It is allowed ONLY for the latest COMPLETE experiment whose current
+Host validation is INCOMPLETE for `checker_execution`. Under the normal
+V8 runner and store locks, it rechecks registered asset hashes and inputs,
+reruns the approved host checks against unchanged fresh outputs, appends a NEW
+`VALIDATION` event with `recheck_of_seq`, and publishes state. It does not
+execute code in the Experimenter workspace, alter artifacts, modify the
+original validation event, grant Reviewer scientific acceptance, or erase
+prior OPEN issues. This is NOT a generic override of failed science.
+
+Run the focused tests before using the command:
+
+    python -m pytest -q danus/tests/test_v8_validation.py danus/tests/test_v8_adaptive.py danus/tests/test_v8_review_convergence.py
+
+Then for the existing completed task:
+
+    python -m danus.v8 revalidate v8-pfl3-steering-20261014 --task-id task-253
+
+Inspect the returned result. A new PASSED Host receipt only establishes
+approved mechanical checks and corroborated process exit; Reviewer must still
+evaluate the independent replay implementation, scientific comparisons and
+outstanding findings. If the receipt remains INCOMPLETE because the Codex
+tool log lacks a matching command event, investigate that format without
+rerunning production or inventing proof.
