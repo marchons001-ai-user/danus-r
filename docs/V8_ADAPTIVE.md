@@ -870,3 +870,49 @@ programming or to prove the independent scientific correctness of Checker.
 An offline regression tests an arbitrary named verify_compass.py child
 and a different child with the same successful exit code, which must remain
 INCOMPLETE. Source task/project names are not part of the production logic.
+
+
+## 2026-10-15: UCI air-quality pilot — autonomous completion and generic args/argv receipt
+
+Third distinct pilot: v8-uci-co-drift-20261015, 10-step bounded run.
+Completed 8 scientific tasks within the budget (9 decisions and STOP at step
+10), 52 append-only events, FINISH at seq 52, Host latest PASSED,
+independent final Reviewer ACCEPT, zero open requests/issues, no HALT.
+Two approved experiments are recorded, but the second was strictly a
+validation-receipt repair: it did not refit or rerun the frozen producer.
+The scientific verdict is a bounded negative/uncertain finding: rolling
+delayed CO interval calibration did not establish better weekly empirical
+90% coverage stability than static calibration on this one dataset/split.
+No universal drift-robustness or future-hour forecasting claim follows.
+
+Real Host defect from first experiment task-11: producer and independent
+verifier finished successfully, with all other 8 required checks passing,
+but run_log.json stored subprocess argv as children[].args. Host scanner
+recognized only children[].argv and therefore marked checker_execution
+INCOMPLETE (seq 25). A diagnostic Researcher and independent Reviewer
+identified the mismatch, then authorized a fresh checker-only experiment
+task-34, which produced a compatible receipt and PASSED at seq 42.
+This workaround preserved scientific evidence but spent avoidable roles
+and new artifacts on Host formatting rather than scientific uncertainty.
+
+Host now accepts command tokens from either children[].args or
+children[].argv for its already-approved checker_path or old --check
+contract. When both arrays exist and disagree, the receipt is FAILED
+rather than silently preferring one. An empty/malformed command list
+is INCOMPLETE; all child and parent exit evidence still must be numeric
+zero and a separate Host-owned Codex command_execution event must
+corroborate actual entrypoint invocation. There is no task-specific path
+or UCI-specific condition in the production fix. Regressions cover both
+formats, a wrong Checker name and conflicting arrays.
+
+Guidance for further autonomy: first distinguish Host/parser INCOMPLETE
+from a genuinely unexecuted/failed check. Prefer read-only diagnosis
+and an append-only Host revalidation after a parser correction when the
+evidence is already complete. A new Reviewer-approved checker-only run
+remains permissible when required evidence genuinely does not exist;
+never bypass the science Reviewer or promote unverified claims.
+
+The completed pilot remains immutable. Local regression pytest and
+a READ-ONLY dry-run of task-11's original frozen validation contract
+against its registered outputs are requested before trusting the fix
+in another pilot. Do not reopen or rerun the FINISHed study.
