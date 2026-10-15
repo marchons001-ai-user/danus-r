@@ -57,11 +57,11 @@ This is a checkable list, not a claim that the checks have already passed.
 - [ ] Consolidate the intended V8 changes through a reviewed PR to main,
       or consciously select a tested public default branch. Retire obsolete
       branches only when their history and outstanding PRs are understood.
-- [ ] Current full GitHub Actions is **NOT GREEN**. The inspected Oct 15
-      Python 3.13 job reports 79 failed, 1228 passed, 15 skipped.
-      Some failures need the official Codex sandbox executable; other
-      failures are legacy API/test mismatches. Do not describe the full suite
-      as passing merely because the 102 focused V8 checks passed locally.
+- [x] Full GitHub Actions on the release-candidate code is GREEN: run #495,
+      commit `7a17f0c6`, 1,334 tests passed on Python 3.10 and again on
+      Python 3.13, and 102 V8 core tests passed on each version. Historical
+      79 failures came from missing sandbox provisioning and legacy test
+      contract mismatches; do not mistake an earlier failed run for current CI.
 - [ ] Isolate portable/offline checks in CI and clearly label tests requiring
       unavailable sandbox/agent dependencies. Fix genuine source regressions
       before making a stability promise.
@@ -114,6 +114,18 @@ The owner makes the final visibility decision after reviewing findings.
 - [x] Release branch `release/v8-rc-20261015` created from V8 head; one draft consolidation PR #122 now targets `main`.
 - [x] D4 output bound, interrupted-experiment no-replay and owned-process/profile cleanup moved into RC without merging unrelated older documentation/CI; all four imported files are byte-identical to the D4 branch.
 - [x] Operator ran **124 targeted WSL tests passing in 9.00 s** after this port (D4 + V8).
-- [ ] GitHub Actions CI was split into V8 offline correctness gates and a separate full suite. Full suite now provisions official Codex 0.153.4 and runs the actual sandbox acceptance probe before pytest. CI result **pending**; do not claim full green.
-- [ ] In the last previous full GitHub Actions failure (before sandbox provisioning), 79 failed / 1228 passed / 15 skipped. Of those 79, about 63 were directly consistent with missing Codex or execution timeouts, about 9 had outdated/changed API signatures, and 7 need additional investigation; these are diagnostic buckets, not proven root causes.
-- [ ] Do not merge PR #122 or switch to Public until CI failures are honestly classified, release metadata/safety reviewed and manual GitHub-hosted log scan is complete.
+- [x] CI has separate offline V8 correctness and full-repository jobs. Both
+      Python 3.10 and 3.13 passed the approved Codex 0.153.4 sandbox probe
+      and the full 1,334-test suite in run #495 (candidate `7a17f0c6`).
+      Documentation-only changes after this commit still require the exact
+      final HEAD check before a protected merge.
+- [x] The prior 79 failing cases were investigated. The last pre-fix full
+      run had 11 consistent orchestration-test failures across both Python
+      versions; the updated tests now preserve live resource-budget gates,
+      separate observation-only quota telemetry, and legacy pause migration.
+      Run #495 then passed all 1,334 tests on both versions.
+- [ ] PR #122 may be merged privately to `main` only after final-HEAD
+      code/metadata review and green checks. Switching to Public remains
+      separately blocked until manual review of GitHub-hosted PR/Actions
+      logs, non-key personal information, clean installation and ownership
+      decisions. Merging to private `main` does NOT grant release approval.
