@@ -112,7 +112,7 @@ def _proposal_instructions(path: Path, plan_version: Optional[int]) -> str:
     if plan_version is None:
         version = "<current plan_version from the committed Research Plan>"
         version_note = (
-            "Immediately before writing the proposal, read the current committed Research Plan "
+            "Immediately before writing the proposal, read `RESEARCH_PLAN.json`, the read-only current committed Plan snapshot, "
             "and copy its integer `plan_version` exactly into `base_plan_version`.\n"
         )
     else:
@@ -163,11 +163,33 @@ def _append_project_policy(project: str) -> None:
 def _bootstrap_task(pdir: Path, plan_version: int) -> str:
     return (
         "# Autonomous Research Bootstrap\n\n"
-        f"Read the binding research brief at `{pdir / BRIEF_FILE}` and RESEARCH_CHARTER.md. "
+        "Read `RESEARCH_BRIEF.md` (the read-only harness copy of the binding research brief) "
+        "and the injected project RESEARCH_CHARTER. "
         "Inspect only the existing workspace/context needed to understand the problem. Design the "
         "smallest coarse Research Plan DAG that can answer the brief, with explicit Researcher/"
-        "Reviewer/Experimenter handoffs where scientifically needed. Do not run planned experiments "
-        "in this bootstrap task.\n\n"
+        "Reviewer/Experimenter handoffs where scientifically needed. Every nontrivial "
+        "Experimenter execution must have a Researcher-proposed Implementation Contract "
+        "and an independent Reviewer approval before it runs. The contract may define "
+        "the testable scientific scope without knowing its future protocol ID; "
+        "the Experimenter freezes an Assignment-bound protocol only after approval. "
+        "For an Experimenter Plan node that will receive a downstream Implementation "
+        "Contract, call the Researcher Gateway tool implementation_render_task("
+        "goal=..., must_preserve_invariants=..., forbidden_behaviors=..., "
+        "acceptance_conditions=...) BEFORE proposing or committing the node. "
+        "Copy its returned canonical task verbatim into that Experimenter Plan task; "
+        "the renderer is read-only and does not require a committed node. "
+        "After independent Plan approval and commit, a downstream Researcher "
+        "must submit the identical fields using implementation_submit_contract "
+        "for separate Reviewer approval, so the canonical task hashes match. "
+        "Do not guess a protocol ID. "
+        "Arrange any dependencies needed to complete that review and do not "
+        "run planned experiments in this bootstrap task. For each experiment "
+        "requiring a downstream Researcher interpretation, make exactly one "
+        "dependent Researcher Plan node whose task explicitly uses "
+        "experiment_evidence_get on the Evidence ID supplied by the "
+        "Experimenter's INTERPRET handoff. Do not also schedule a second "
+        "interpretation task: the handoff dispatches this exact planned "
+        "Researcher task and its completion releases independent review.\n\n"
         + _proposal_instructions(_proposal_path(pdir), plan_version)
         + "\nAfter the proposal file is fully written, end this assignment with COMPLETE.\n"
     )
@@ -595,9 +617,10 @@ def _load_proposal_record(pdir: Path, proposal_id: str) -> Dict[str, Any]:
 def _review_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
     return (
         "# Autonomous Research Plan Review\n\n"
-        f"Review Plan change `{change['change_id']}` against the research brief, charter, current "
-        f"Plan v{change['base_plan_version']}, and the exact immutable proposal at "
-        f"`{_proposal_record_path(pdir, proposal_id)}`. Approval covers both structural operations "
+        f"Review Plan change `{change['change_id']}` using the injected Charter, "
+        f"`RESEARCH_BRIEF.md`, `RESEARCH_PLAN.json` (Plan v{change['base_plan_version']}), and "
+        f"the exact validated, read-only `PLAN_PROPOSAL.json` (proposal `{proposal_id}`). "
+        "Approval covers both structural operations "
         "and exact role/task specs. Reject if the route is scientifically weak, unnecessarily large, "
         "post-hoc without required evidence, or bypasses role/review/experiment boundaries.\n\n"
         f"Call `plan_review_change(change_id=\"{change['change_id']}\", "
@@ -612,7 +635,8 @@ def _revision_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
     return (
         "# Revise Autonomous Research Plan\n\n"
         f"Reviewer requested revision of proposal `{proposal_id}` / change `{change['change_id']}`. Read the "
-        f"immutable proposal at `{_proposal_record_path(pdir, proposal_id)}` and address only the "
+        f"assigned read-only `PLAN_PROPOSAL.json` (proposal `{proposal_id}`) and "
+        "current `RESEARCH_PLAN.json` snapshots; address only the "
         f"blocking rationale below.\n\nReviewer rationale:\n"
         f"{str(change.get('review_rationale') or 'Reviewer requested revision')}\n\n"
         "Produce the smallest corrected replacement; do not broaden the project for non-blocking suggestions.\n\n"
@@ -626,7 +650,8 @@ def _rethink_task(pdir: Path, change: Dict[str, Any], proposal_id: str) -> str:
     return (
         "# Rethink Rejected Autonomous Research Plan\n\n"
         f"Reviewer rejected proposal `{proposal_id}` / change `{change['change_id']}` as a route, not merely "
-        "as text needing local repair. Read the immutable proposal and blocking rationale below, then decide "
+        "as text needing local repair. Read `PLAN_PROPOSAL.json` and `RESEARCH_PLAN.json` "
+        "read-only snapshots plus the blocking rationale below, then decide "
         "the smallest scientifically distinct next route. Do not resubmit the rejected route with cosmetic edits.\n\n"
         f"Reviewer rationale:\n{str(change.get('review_rationale') or 'Reviewer rejected the route')}\n\n"
         + _proposal_instructions(_proposal_path(pdir), current)
@@ -638,8 +663,9 @@ def _repair_task(pdir: Path) -> str:
     current = ResearchPlanGraph(pdir).snapshot()["plan_version"]
     return (
         "# Repair Autonomous Plan Proposal\n\n"
-        f"Read the latest deterministic validation failure at `{_repair_error_path(pdir)}` and "
-        f"the rejected proposal at `{_proposal_path(pdir)}`. Replace that proposal JSON with the "
+        f"Read the read-only `PLAN_REPAIR_ERROR.json` report and the rejected draft "
+        f"at `{_proposal_path(pdir)}` in the authorized scientific workspace. "
+        "Replace the draft JSON with the "
         "smallest correction needed to satisfy the validator. Preserve the scientific intent and "
         "task decomposition unless the error itself requires changing them; do not broaden the "
         "research.\n\n"
@@ -689,22 +715,10 @@ def _assign_role(project: str, role: str, task: str, node_id: str) -> Dict[str, 
             "state": existing.get("state"),
             "outcome": existing.get("outcome"),
         }
-    wl = A._idle_worker(project, role, cli._project_rows(project), set(), cli._read_worker_role)
-    if wl is None:
-        return {"action": "PLAN_ASSIGN", "role": role, "result": "no_idle_worker"}
-    assignment = cli.do_assign(f"{project}/{wl.name}", task, node_id=node_id)
-    out = {
-        "action": "PLAN_ASSIGN",
-        "role": role,
-        "worker": wl.name,
-        "assignment_id": assignment.get("assignment_id"),
-        "result": "assigned",
-        "start_result": cli._start_one(wl),
-    }
-    if is_repair:
+    out = A.dispatch_explicit(project, role, task, node_id, action="PLAN_ASSIGN")
+    if is_repair and out.get("result") == "assigned":
         out["attempt"] = len(matches) + 1
     return out
-
 
 def _review_assignment(pdir: Path, change: Dict[str, Any], proposal_id: str) -> Optional[Dict[str, Any]]:
     """Compatibility fallback for reviews created before S2-C handoffs existed."""
@@ -766,31 +780,25 @@ def _dispatch_handoff(project: str, handoff: Dict[str, Any]) -> Dict[str, Any]:
             "handoff_id": current["handoff_id"],
             "result": current["status"].lower(),
         }
-    role = str(current["target_role"])
-    wl = A._idle_worker(project, role, cli._project_rows(project), set(), cli._read_worker_role)
-    if wl is None:
-        return {
-            "action": "PLAN_ASSIGN",
-            "role": role,
-            "handoff_id": current["handoff_id"],
-            "result": "no_idle_worker",
-        }
-    assignment = cli.do_assign(
-        f"{project}/{wl.name}",
-        current["request"],
-        node_id=current["node_id"],
-        handoff_id=current["handoff_id"],
+    # PLAN_CHANGE handoffs share the same authorized dispatch queue as the
+    # ordinary Plan nodes and frozen implementation contracts.
+    applied = A._dispatch_candidates(
+        project, rows=cli._project_rows(project),
+        assign=cli.do_assign, start=cli._start_one,
+        role_of=cli._read_worker_role,
     )
+    picked = next((
+        item for item in applied
+        if item.get("handoff_id") == current["handoff_id"]
+    ), None)
+    if picked is not None:
+        return {**picked, "action": "PLAN_ASSIGN"}
     return {
         "action": "PLAN_ASSIGN",
-        "role": role,
-        "worker": wl.name,
-        "assignment_id": assignment.get("assignment_id"),
+        "role": current["target_role"],
         "handoff_id": current["handoff_id"],
-        "result": "assigned",
-        "start_result": cli._start_one(wl),
+        "result": "awaiting_authorized_dispatch",
     }
-
 
 def _open_review_handoff(
     pdir: Path,

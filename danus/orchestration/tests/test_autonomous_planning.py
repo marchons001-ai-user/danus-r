@@ -139,7 +139,7 @@ def test_invalid_proposal_routes_deterministic_repair_to_researcher(tmp_path: Pa
         task = L.WorkerLayout(L.worker_dir("P", "low")).task.read_text()
         repair_error = json.loads(planning._repair_error_path(pdir).read_text(encoding="utf-8"))
         assert "summary exceeds 100 characters" in repair_error["reason"]
-        assert str(planning._repair_error_path(pdir)) in task
+        assert "`PLAN_REPAIR_ERROR.json`" in task
         assert "summary` is at most 100 characters" in task
         assert ResearchPlanGraph(pdir).pending_changes() == []
 
@@ -191,3 +191,22 @@ def test_proposal_requires_exact_tasks_for_changed_leaves(tmp_path: Path, monkey
         assert blocked["result"] == "blocked"
         assert any(x["action"] == "PLAN_REPAIR" for x in actions)
         assert ResearchPlanGraph(pdir).pending_changes() == []
+
+def test_plan_review_and_revision_tasks_reference_readonly_inputs(tmp_path: Path):
+    with _root(tmp_path):
+        pdir = L.project_dir("P")
+        ResearchPlanGraph.create(pdir, node_id="P0", title="Root")
+        change = {"change_id": "change-fixture", "base_plan_version": 1,
+                  "review_rationale": "Clarify the exact task"}
+        review = planning._review_task(pdir, change, "proposal-fixture")
+        revision = planning._revision_task(pdir, change, "proposal-fixture")
+        rethink = planning._rethink_task(pdir, change, "proposal-fixture")
+        repair = planning._repair_task(pdir)
+
+        for task in (review, revision, rethink):
+            assert "PLAN_PROPOSAL.json" in task
+            assert "RESEARCH_PLAN.json" in task
+            assert str(pdir / "planning" / "proposals") not in task
+            assert str(pdir / "plan" / "current.json") not in task
+        assert "PLAN_REPAIR_ERROR.json" in repair
+        assert str(planning._repair_error_path(pdir)) not in repair

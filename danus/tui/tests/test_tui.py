@@ -126,7 +126,7 @@ def test_project_snapshot_is_read_only(tmp_path, monkeypatch):
     snapshot = load_project_snapshot("P")
 
     assert snapshot["project_state"] == "RUNNING"
-    assert snapshot["quota"]["state"] == "UNKNOWN"
+    assert snapshot["quota"]["state"] == "UNAVAILABLE"
     assert ledger.path.read_bytes() == ledger_before
     assert change_path.read_bytes() == change_before
     assert (runtime / "checkpoint.json").read_bytes() == checkpoint_before

@@ -3,6 +3,9 @@
 from contextlib import contextmanager
 import json
 import os
+import selectors
+import struct
+import threading
 from pathlib import Path
 import shutil
 import socket
@@ -16,6 +19,24 @@ from . import layout as L
 from . import context as C
 
 
+def _gateway_pythonpath() -> str:
+    """Expose only trusted Danus control dependencies to an external numerical Python.
+
+    The worker's inherited PYTHONPATH is not forwarded to the role-bound Gateway.
+    The optional extra directory must resolve under this repository's existing
+    runtime/venv; this does not grant worker shell access to that venv.
+    """
+    root = Path(__file__).resolve().parents[2]
+    value = os.environ.get("DANUS_TRUSTED_CONTROL_SITE", "").strip()
+    if not value:
+        return str(root)
+    site = Path(value).resolve()
+    control = (root / "runtime" / "venv").resolve()
+    if not site.is_dir() or not site.is_relative_to(control):
+        raise ValueError("trusted control site must exist under runtime/venv")
+    return os.pathsep.join((str(root), str(site)))
+
+
 def _overlaps(path: Path, other: Path) -> bool:
     return path == other or path in other.parents or other in path.parents
 
@@ -25,6 +46,138 @@ def _outside_control(path: Path, control: Path) -> Path:
     if _overlaps(path, control):
         raise ValueError("worker input/runtime must be outside the control project")
     return path
+
+
+def _relay_gateway_socket(listener: socket.socket, gateway_fd: socket.socket,
+                          stop: threading.Event, path: Path) -> None:
+    """One-shot host-side bridge for a fixed, non-model-controlled MCP proxy.
+
+    The private socket is outside the scientific sandbox; restricted Codex
+    forbids socket connect and sendto, so an in-sandbox proxy cannot use it.
+    The host proxy only forwards MCP bytes to the role-bound Gateway.
+    Closing either endpoint terminates the round channel.
+    """
+    peer = None
+    try:
+        listener.settimeout(0.25)
+        while not stop.is_set():
+            try:
+                peer, _ = listener.accept()
+                break
+            except socket.timeout:
+                continue
+        if peer is None:
+            return
+        _, uid, _ = struct.unpack("3i", peer.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        if uid != os.getuid():
+            return
+        path.unlink(missing_ok=True)  # one connection only; no reconnect
+        with selectors.DefaultSelector() as selector:
+            selector.register(peer, selectors.EVENT_READ, gateway_fd)
+            selector.register(gateway_fd, selectors.EVENT_READ, peer)
+            while not stop.is_set():
+                for key, _ in selector.select(timeout=0.25):
+                    data = key.fileobj.recv(65536)
+                    if not data:
+                        return
+                    key.data.sendall(data)
+    except OSError:
+        pass  # Gateway or MCP peer disconnected; fail closed below
+    finally:
+        if peer is not None:
+            peer.close()
+            try:
+                gateway_fd.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+
+
+def _inject_plan_read_inputs(view: Path, wl: L.WorkerLayout, role_name: str) -> None:
+    """Mirror exact, validated, assignment-scoped planning inputs into read-only view.
+
+    The authoritative control directory itself stays hidden from Codex tools.
+    """
+    if role_name not in L.SCIENTIFIC_ROLES:
+        return
+    from danus.core import ProgressLedger, ResearchPlanGraph
+    from danus.core.handoff import HandoffRequests
+    from danus.orchestration import planning
+
+    control = wl.project_dir.resolve()
+    graph = ResearchPlanGraph(control)
+    if graph.path.is_symlink():
+        raise ValueError("research plan current file must not be a symlink")
+    if not graph.path.is_file():
+        return
+
+    snapshot = graph.snapshot()
+    (view / "RESEARCH_PLAN.json").write_text(
+        json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    ledger = ProgressLedger(control)
+    assignment = ledger.current(wl.name, refresh_stale=False)
+    if not assignment or str(assignment.get("role") or "").lower() != role_name:
+        return
+    if int(assignment.get("plan_version") or 0) != snapshot["plan_version"]:
+        return
+
+    task = wl.task.read_text(encoding="utf-8")
+    if role_name == "researcher" and task.startswith("# Repair Autonomous Plan Proposal\n"):
+        path = planning._repair_error_path(control)
+        if path.is_symlink():
+            raise ValueError("planning repair error must not be a symlink")
+        if not path.is_file():
+            raise ValueError("planning repair error is missing")
+        report = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            raise ValueError("planning repair error must be an object")
+        (view / "PLAN_REPAIR_ERROR.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    handoff_id = str(assignment.get("handoff_id") or "")
+    if not handoff_id:
+        return
+    handoff = HandoffRequests(ledger).get(handoff_id)
+    if (
+        not handoff
+        or handoff.get("status") != "ASSIGNED"
+        or handoff.get("assigned_assignment_id") != assignment.get("assignment_id")
+        or handoff.get("subject_type") != "PLAN_CHANGE"
+        or handoff.get("kind") not in {"REVIEW", "REVISION", "RETHINK"}
+    ):
+        return
+
+    change_id = str(handoff.get("subject_id") or "")
+    change = graph.get_change(change_id)
+    if int(change.get("base_plan_version") or 0) != snapshot["plan_version"]:
+        raise ValueError("assigned Plan Change is bound to a different Plan version")
+    proposal_id = planning._proposal_id_from_change(change)
+    if not proposal_id:
+        raise ValueError("assigned Plan Change lacks immutable proposal identity")
+    record_path = planning._proposal_record_path(control, proposal_id)
+    if record_path.is_symlink():
+        raise ValueError("immutable Plan proposal must not be a symlink")
+    record = planning._load_proposal_record(control, proposal_id)
+    proposal = record.get("proposal") or {}
+    if (
+        record.get("change_id") != change_id
+        or record.get("proposer") != change.get("proposer")
+        or proposal.get("base_plan_version") != snapshot["plan_version"]
+        or proposal.get("operations") != change.get("operations")
+        or bool(proposal.get("post_hoc")) != bool(change.get("post_hoc"))
+        or list(proposal.get("evidence_refs") or []) != list(change.get("evidence_refs") or [])
+    ):
+        raise ValueError("assigned Plan Change and immutable proposal differ")
+    (view / "PLAN_PROPOSAL.json").write_text(
+        json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 @contextmanager
@@ -78,6 +231,16 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             with capability.scope(binding):
                 (view / "TASK.md").write_text(wl.task.read_text())
                 (view / "AGENTS.md").write_text(L.harness_contract(role_name).read_text())
+                # The autonomous bootstrap needs the research brief, but the
+                # project control root must remain invisible to the sandbox.
+                # Mirror only this public research input into the read-only
+                # worker view; never grant access to its source directory.
+                brief = control / "RESEARCH_BRIEF.md"
+                if brief.is_symlink():
+                    raise ValueError("research brief must not be a symlink")
+                if brief.is_file():
+                    (view / "RESEARCH_BRIEF.md").write_bytes(brief.read_bytes())
+                _inject_plan_read_inputs(view, wl, role_name)
                 checkpoint = C.checkpoint_for_prompt(wl.dir, role_name)
                 if checkpoint:
                     (memory / C.CHECKPOINT_NAME).write_text(json.dumps(checkpoint))
@@ -98,15 +261,37 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             server_end, client_end = socket.socketpair()
             server_end.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
             fd = client_end.fileno()
-            proxy_cmd = [str(engine), "sandbox", "-P", "danus-worker", "-C", str(view),
-                         sys.executable, "-I", str(proxy), str(fd)]
+            # Codex 0.160 closes extra FDs when spawning MCP children.
+            # Its restricted sandbox also denies connect()/sendto(), so only
+            # the fixed transport-only MCP proxy executes outside the sandbox.
+            # The private socket cannot be accessed by model-side subprocesses;
+            # actual model tools and experiment code stay in Codex's sandbox.
+            # Keep the original direct FD for D2/D3 sandbox attack probes.
+            socket_path = root / "gateway.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(socket_path))
+                socket_path.chmod(0o600)
+                listener.listen(1)
+            except BaseException:
+                listener.close()
+                raise
+            bridge_stop = threading.Event()
+            bridge_thread = threading.Thread(
+                target=_relay_gateway_socket,
+                args=(listener, client_end, bridge_stop, socket_path), daemon=True)
+            bridge_thread.start()
+            # Preserve the direct-FD proxy invocation exposed to existing D2/D3
+            # isolation probes. Only Codex's MCP child uses the host-only bridge.
+            proxy_cmd = [sys.executable, "-I", str(proxy), str(fd)]
+            mcp_cmd = [sys.executable, "-I", str(proxy), "--socket", str(socket_path)]
             config = home / "config.toml"
             with config.open("a") as stream:
                 stream.write('\n[shell_environment_policy]\ninherit = "none"\n')
                 stream.write('set = { PATH = "/usr/local/bin:/usr/bin:/bin", LANG = "C.UTF-8" }\n')
                 stream.write('\n[mcp_servers.danus]\n')
-                stream.write('command = ' + json.dumps(proxy_cmd[0]) + '\n')
-                stream.write('args = ' + json.dumps(proxy_cmd[1:]) + '\n')
+                stream.write('command = ' + json.dumps(mcp_cmd[0]) + '\n')
+                stream.write('args = ' + json.dumps(mcp_cmd[1:]) + '\n')
                 stream.write('tool_timeout_sec = 3600\nrequired = true\ndefault_tools_approval_mode = "approve"\n')
                 stream.write('\n[mcp_servers.danus.env]\nCODEX_HOME = ' + json.dumps(str(home)) + '\n')
             auth = original_home / "auth.json"
@@ -116,7 +301,8 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             env = codex.subprocess_env(agent_bin)
             env["CODEX_HOME"] = str(home)
             gateway_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
-                           "PYTHONPATH": str(Path(__file__).resolve().parents[2])}
+                           "PYTHONPATH": _gateway_pythonpath(),
+                           "DANUS_SANDBOX_CODEX_BIN": str(engine)}
             for key in ("DANUS_VERIFY_URL", "DANUS_VERIFY_TIMEOUT"):
                 if key in os.environ:
                     gateway_env[key] = os.environ[key]
@@ -129,9 +315,15 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             )
             server_end.close()
             server_end = None
-            yield {"cwd": view, "env": env, "fd": fd, "gateway": gateway,
-                   "binding": binding, "codex_bin": agent_bin, "engine": engine,
-                   "proxy_command": proxy_cmd, "home": home}
+            try:
+                yield {"cwd": view, "env": env, "fd": fd, "gateway": gateway,
+                       "binding": binding, "codex_bin": agent_bin, "engine": engine,
+                       "proxy_command": proxy_cmd, "home": home,
+                       "gateway_socket": socket_path}
+            finally:
+                bridge_stop.set()
+                listener.close()
+                bridge_thread.join(timeout=1)
     finally:
         if client_end is not None:
             try:

@@ -109,4 +109,4 @@ def test_completed_reviewer_assignment_is_not_routed_again(tmp_path: Path):
             "progress_state": "DONE",
         }]
         quota = {"state": "NORMAL", "block_new_codex_rounds": False}
-        assert cli._reviewer_cost_rows("P", rows, quota, apply=False) == []
+        assert cli._reviewer_cost_rows("P", rows, apply=False) == []

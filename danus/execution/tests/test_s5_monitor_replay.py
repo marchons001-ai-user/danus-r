@@ -142,32 +142,40 @@ def test_completed_safe_point_wins_over_stale_running_status(execution):
 @pytest.mark.parametrize("unit_rc", [0, 7])
 @pytest.mark.parametrize("already_exited", [False, True])
 def test_monitor_reports_command_result_without_passing_private_fds(tmp_path, monkeypatch, unit_rc, already_exited):
-    import select
     import tempfile
 
-    inherited = []
-    class Child:
-        pid = 12345
-        def wait(self):
-            return unit_rc
-
-    def spawn(argv, *, pass_fds):
-        assert argv == ["engine", "sandbox", "command"]
-        inherited.extend(pass_fds)
-        return Child()
-
-    def pidfd_open(pid):
-        if already_exited:
-            raise ProcessLookupError
-        return os.open(os.devnull, os.O_RDONLY)
-
-    monkeypatch.setattr(sandbox.subprocess, "Popen", spawn)
-    monkeypatch.setattr(sandbox.os, "pidfd_open", pidfd_open, raising=False)
-    monkeypatch.setattr(select, "select", lambda reads, *args: (reads[1:], [], []))
-    with tempfile.TemporaryFile() as completion:
-        monkeypatch.setattr(sys, "argv", ["monitor", "101", str(completion.fileno()),
-                                         "102", "engine", "sandbox", "command"])
-        assert sandbox._watch_command() == 0
-        completion.seek(0)
-        assert completion.read() == str(unit_rc).encode("ascii")
-        assert inherited == [102]
+    popen = sandbox.subprocess.Popen
+    pidfd_open = os.pidfd_open
+    children = []
+    owner = pidfd_open(os.getpid())
+    inherited = os.open(os.devnull, os.O_RDONLY)
+    try:
+        with tempfile.TemporaryFile() as completion:
+            code = (
+                "import os,sys; os.fstat(int(sys.argv[1])); "
+                f"raise SystemExit({unit_rc})"
+            )
+            command = [sys.executable, "-c", code, str(inherited)]
+            def spawn(argv, *, pass_fds, **kwargs):
+                assert argv == command
+                assert pass_fds == (inherited,)
+                assert owner not in pass_fds and completion.fileno() not in pass_fds
+                child = popen(argv, pass_fds=pass_fds, **kwargs)
+                children.append(child)
+                return child
+            def open_child(pid):
+                if already_exited:
+                    children[0].wait()
+                    raise ProcessLookupError
+                return pidfd_open(pid)
+            monkeypatch.setattr(sandbox.subprocess, "Popen", spawn)
+            monkeypatch.setattr(sandbox.os, "pidfd_open", open_child)
+            monkeypatch.setattr(sys, "argv", [
+                "monitor", str(owner), str(completion.fileno()), str(inherited), *command,
+            ])
+            assert sandbox._watch_command() == 0
+            completion.seek(0)
+            assert completion.read() == str(unit_rc).encode("ascii")
+    finally:
+        os.close(owner)
+        os.close(inherited)

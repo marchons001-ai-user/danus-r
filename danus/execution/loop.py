@@ -26,7 +26,7 @@ from . import scaffold
 from danus import codex
 from danus.sandbox import _arm_parent_death
 from . import worker as W
-from danus.core import ProgressLedger
+from danus.core import ProgressLedger, ResearchPlanGraph
 from danus.core._util import read_jsonl
 from danus.core.handoff import HandoffRequests
 from danus.gateway.roles import tools_for
@@ -37,7 +37,138 @@ _OUTCOME_RE = re.compile(r"(?im)^DANUS_OUTCOME:\s*(COMPLETE|BLOCKED|NEEDS_REVIEW
 
 # --- the per-round prompt -------------------------------------------------- #
 
-def _scientific_context(project: str, role_name: str) -> str:
+def _review_governance_context(project: str, role_name: str, worker: str) -> str:
+    """Inject a checked Plan-change summary only when the audit asks for it.
+
+    Reviewers verify science, not Supervisor event logs. This summary is derived
+    from the committed revision itself and is never an LLM-made approval claim.
+    """
+    if role_name != "reviewer":
+        return ""
+    root = L.project_dir(project)
+    task_path = root / "workers" / worker / "TASK.md"
+    try:
+        task = task_path.read_text(encoding="utf-8").lower()
+    except OSError:
+        return ""
+    if not any(x in task for x in ("revision", "post-hoc", "post_hoc")):
+        return ""
+    try:
+        graph = ResearchPlanGraph(root)
+        current = graph.snapshot()
+        change_id = str(current.get("committed_change_id") or "")
+        if not change_id:
+            return ""
+        record = graph.get_change(change_id)
+        if (record.get("status") != "COMMITTED"
+            or record.get("review_verdict") != "APPROVE"
+            or graph.committed_version(record, current) != current["plan_version"]):
+            raise ValueError("committed Plan revision is not independently consistent")
+        summary = {
+            "plan_version": current["plan_version"],
+            "base_plan_version": record.get("base_plan_version"),
+            "change_id": change_id,
+            "change_reason": str(record.get("reason") or "")[:1800],
+            "status": record["status"],
+            "committed_version": record.get("committed_version"),
+            "committed_at": record.get("committed_at"),
+            "review_assignment_id": record.get("review_assignment_id"),
+            "review_rationale_excerpt": str(record.get("review_rationale") or "")[:400],
+            "review_verdict": record["review_verdict"],
+            "proposer": record.get("proposer"),
+            "reviewer": record.get("reviewer"),
+            "committer": record.get("committer"),
+            "post_hoc": bool(record.get("post_hoc")),
+            "evidence_refs": record.get("evidence_refs", []),
+            "operations": record.get("operations", []),
+            "source": "validated committed ResearchPlanGraph revision",
+        }
+        return ("\n\n<TRUSTED_PLAN_PROVENANCE>\n"
+                + json.dumps(summary, ensure_ascii=False, sort_keys=True)
+                + "\n</TRUSTED_PLAN_PROVENANCE>")
+    except (OSError, ValueError, KeyError) as exc:
+        return ("\n\n<TRUSTED_PLAN_PROVENANCE_ERROR>"
+                + str(exc)[:250] + "</TRUSTED_PLAN_PROVENANCE_ERROR>")
+
+
+def _experiment_binding_context(project: str, worker: str, role_name: str) -> str:
+    """Reveal the authoritative approval IDs without changing the frozen TASK."""
+    if role_name != "experimenter":
+        return ""
+    root = L.project_dir(project)
+    ledger = ProgressLedger(root)
+    assignment = ledger.current(worker, refresh_stale=False)
+    if not assignment or not assignment.get("implementation_contract_id"):
+        return ""
+    contract_id = assignment["implementation_contract_id"]
+    contract = ledger.implementation_contract(contract_id)
+    if (not contract or contract.get("gate_status") != "APPROVE"
+        or contract.get("consumed_by_assignment_id") != assignment["assignment_id"]):
+        return ""
+    from importlib import metadata
+    versions = {}
+    for name in ("numpy", "scipy", "torch"):
+        try:
+            versions[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            versions[name] = "missing"
+    return (
+        "\n\n<APPROVED_EXPERIMENT_BINDING>\n"
+        f"implementation_contract_id: {contract_id}\n"
+        f"execution_assignment_id: {assignment['assignment_id']}\n"
+        f"trusted_execution_python: {sys.executable}\n"
+        f"trusted_installed_numerical_packages: {versions}\n"
+        "The trusted experiment runtime and its frozen Python units use this "
+        "worker/Gateway interpreter. Verify this interpreter's available "
+        "dependencies and resources before freezing. Do not assume that "
+        "/usr/bin/python3 or a different shared runtime/venv is the bound "
+        "execution environment. Do not install packages or select an alternate "
+        "interpreter inside the scientific task without host authorization.\n"
+        "This is your Reviewer-approved experiment authority. If TASK.md has no "
+        "EXPERIMENT_PROTOCOL_ID marker, implement the approved task, then "
+        "call the bound Gateway tool experiment_freeze_protocol with the "
+        "approved question, hypothesis, matrix.units, primary_metrics, "
+        "decision_rule, metric_reducer_path, and execution_files. Both the "
+        "reducer and execution file paths must be relative to the scientific "
+        "workspace. The Gateway, not the restricted Worker shell, reads those "
+        "files and records the immutable protocol under this approved "
+        "Implementation Contract and Assignment. Do not directly access the "
+        "control EvidenceStore or invent an alternative protocol freezer. "
+        "Pass its returned protocol ID to "
+        "experiment_run(protocol_id). The Gateway pins your first dynamic protocol "
+        "to this Assignment and rejects a later switch. Do not widen the approved "
+        "scientific scope to make freezing easier. If the approved task lacks "
+        "decision-critical parameters, request clarification rather than choosing "
+        "them yourself. The optional protocol IDs above do not confer approval "
+        "to rerun or change experiments.\n"
+        "</APPROVED_EXPERIMENT_BINDING>"
+    )
+
+
+def _interpret_evidence_context(project: str, role_name: str, worker: str) -> str:
+    if role_name != "researcher":
+        return ""
+    ledger = ProgressLedger(L.project_dir(project))
+    assignment = ledger.current(worker, refresh_stale=False)
+    handoff_id = str((assignment or {}).get("handoff_id") or "")
+    handoff = HandoffRequests(ledger).get(handoff_id) if handoff_id else None
+    if (not handoff or handoff.get("kind") != "INTERPRET"
+        or handoff.get("status") != "ASSIGNED"
+        or handoff.get("assigned_assignment_id") != assignment["assignment_id"]):
+        return ""
+    refs = list(handoff.get("evidence_refs") or [])
+    return (
+        "\n\n<ASSIGNED_INTERPRET_EVIDENCE>\n"
+        "The current Plan Researcher task also owns the INTERPRET handoff. "
+        "Read only the immutable Evidence IDs listed here via the bounded "
+        "experiment_evidence_get tool, then write the single interpretation "
+        "deliverable required by TASK.md. Do not start a second interpretation.\n"
+        + "\n".join(f"- {ref}" for ref in refs)
+        + "\n</ASSIGNED_INTERPRET_EVIDENCE>"
+    )
+
+
+def _scientific_context(project: str, role_name: str, worker: str) -> str:
     role_path = L.scientific_role_md(role_name)
     if role_path is None:
         return ""
@@ -70,6 +201,9 @@ def _scientific_context(project: str, role_name: str) -> str:
         f"<SCIENTIFIC_ROLE_CONTRACT>\n{role_text}\n</SCIENTIFIC_ROLE_CONTRACT>\n\n"
         f"<PROJECT_RESEARCH_CHARTER>\n{charter_text}\n</PROJECT_RESEARCH_CHARTER>"
         f"{guidance_block}"
+        f"{_review_governance_context(project, role_name, worker)}"
+        f"{_experiment_binding_context(project, worker, role_name)}"
+        f"{_interpret_evidence_context(project, role_name, worker)}"
     )
 
 
@@ -82,7 +216,7 @@ def _resolved_scientific_route_context(project: str, assignment_id: str) -> str:
     routes = [
         item
         for item in HandoffRequests(ledger).all()
-        if item.get("kind") in {"INTERPRET", "RETHINK"}
+        if item.get("kind") in {"INTERPRET", "RETHINK", "CLARIFY"}
         and item.get("subject_type") == "ASSIGNMENT"
         and item.get("subject_id") == assignment_id
         and item.get("status") == "RESOLVED"
@@ -128,7 +262,26 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
             "inherit the legacy mathematical skill loop by default.\n"
             "5. Persist useful progress in the correct knowledge layer and keep claims at "
             "their actual evidence status.\n"
-            "6. Runtime terminal protocol: only when this assignment reaches a terminal "
+            "6. When reporting a terminal handoff, optionally submit an advisory "
+            "workflow_submit_result(outcome, next_intent, subject_id, artifact_refs). "
+            "Allowed next intents: REVIEW_PLAN, REVIEW_CONTRACT, RUN_EXPERIMENT, "
+            "RUN_NODE, REVISE, INTERPRET_EVIDENCE, WAIT, FINISH. This structured "
+            "result does not authorize bypassing the Plan, Contract, Handoff or "
+            "independent scientific review. Do not invent IDs. "
+            "7. For role-to-role information gaps, Reviewers may call the existing "
+            "handoff_request(kind='CLARIFY', target_role='researcher' or 'experimenter', "
+            "reason='specific question') before returning NEEDS_REVIEW. "
+            "Supervisor checks and dispatches this handoff; workflow_submit_result "
+            "alone is only an advisory hint. Prefer existing Evidence Packets before "
+            "re-reading raw experimental data. "
+            "8. Scientific proposal handoff: when your Researcher task asks you to save "
+            "a Research Proposal or draft contract for an already planned downstream "
+            "Reviewer node, finishing that deliverable is COMPLETE for this Researcher "
+            "assignment. The dependent Reviewer node performs the independent approval "
+            "later. Do not emit NEEDS_REVIEW merely to request that ordinary next-node "
+            "review; use NEEDS_REVIEW only when an unresolved problem prevents you from "
+            "finishing your own assigned work. "
+            "9. Runtime terminal protocol: only when this assignment reaches a terminal "
             "point, end your final response with exactly one standalone line "
             "`DANUS_OUTCOME: COMPLETE`, `DANUS_OUTCOME: BLOCKED`, or "
             "`DANUS_OUTCOME: NEEDS_REVIEW`. COMPLETE means the assigned task is done; "
@@ -136,7 +289,7 @@ def kickoff(project: str, worker: str, role_name: str = "worker") -> str:
             "scientific judgment/review is required. If useful work remains on this same "
             "assignment, emit no DANUS_OUTCOME line. Never edit the Research Plan or "
             "Progress Ledger yourself."
-            f"{_scientific_context(project, role_key)}"
+            f"{_scientific_context(project, role_key, worker)}"
         )
         checkpoint = C.checkpoint_for_prompt(L.worker_dir(project, worker), role_key)
         if checkpoint:
@@ -789,6 +942,19 @@ def main(worker_dir: str) -> int:
                         _record_exit("assignment_stale_after_round")
                         break
                     raise
+
+            if scientific and outcome and ledger is not None and round_assignment is not None:
+                # Trusted runtime emits one durable JSON Result for *every*
+                # terminal scientific Assignment. The model's prior structured
+                # intent is preserved; legacy workers safely default to WAIT.
+                from danus.orchestration.intent import ensure_terminal_result
+
+                try:
+                    ensure_terminal_result(
+                        wl.project_dir, str(round_assignment["assignment_id"]), outcome
+                    )
+                except (OSError, ValueError) as exc:
+                    write_status(wl, worker_result_error=str(exc))
 
             status_fields = {
                 "state": "stopped" if outcome or dsh_quota else "idle",

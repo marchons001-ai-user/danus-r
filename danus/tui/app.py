@@ -7,16 +7,17 @@ from typing import Any, Dict
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import DescendantFocus
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Input, Static, Tree
+from textual.widgets import Button, DataTable, Footer, Header, Input, Static, Tree
 
 from danus.orchestration import cli as C
 from danus.orchestration import steering as S
 
 from .state import load_project_snapshot
+from .v8_state import load_v8_project_snapshot
 
 
 class GuidanceScreen(ModalScreen):
@@ -95,6 +96,45 @@ class InterruptConfirmScreen(ModalScreen):
         self.dismiss(False)
 
 
+class BlockerScreen(ModalScreen):
+    """Show the persisted blocker and Main escalation without changing state."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_blocker", "Close"),
+        Binding("b", "dismiss_blocker", "Close", show=False),
+        Binding("q", "dismiss_blocker", "Close", show=False),
+    ]
+    CSS = """
+    BlockerScreen { align: center middle; }
+    #blocker-dialog {
+        width: 90%;
+        height: 80%;
+        border: round $error;
+        background: $surface;
+        padding: 1 2;
+    }
+    #blocker-content { height: 1fr; }
+    #blocker-close { width: 100%; margin-top: 1; }
+    """
+
+    def __init__(self, content: str) -> None:
+        super().__init__()
+        self.content = content
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="blocker-dialog"):
+            with VerticalScroll(id="blocker-content"):
+                yield Static(Text(self.content))
+            yield Button("Close (Esc / b / q)", id="blocker-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "blocker-close":
+            self.dismiss(None)
+
+    def action_dismiss_blocker(self) -> None:
+        self.dismiss(None)
+
+
 class DanusTUI(App[None]):
     TITLE = "Danus-R"
     AUTO_FOCUS = "#plan"
@@ -102,6 +142,7 @@ class DanusTUI(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("p", "toggle_pause", "Pause/Resume"),
         Binding("g", "guide", "Guide"),
+        Binding("b", "show_blockers", "Blockers"),
         Binding("I", "interrupt", "Interrupt", key_display="shift+i"),
         Binding("0", "filter_all", "All activity", show=False),
         Binding("1", "filter_researcher", "Researcher activity", show=False),
@@ -120,6 +161,7 @@ class DanusTUI(App[None]):
     }
     CSS = """
     #summary, #quota { height: 3; padding: 1 1; }
+    #blockers { height: 4; border: round $error; padding: 0 1; }
     #body { height: 1fr; }
     #plan { width: 2fr; border: round $primary; padding: 0 1; }
     #right { width: 3fr; height: 1fr; }
@@ -143,14 +185,17 @@ class DanusTUI(App[None]):
         height: 1;
         padding: 0 1;
     }
+    Screen.-medium-height #blockers, Screen.-short #blockers { height: 3; }
     Screen.-medium-height #experiments, Screen.-medium-height #activity { height: 7; }
     Screen.-short #experiments, Screen.-short #activity { height: 5; }
     """
 
-    def __init__(self, project: str) -> None:
+    def __init__(self, project: str, *, v8: bool = False) -> None:
         super().__init__()
         self.project_name = project
-        self.snapshot = load_project_snapshot(project)
+        self.is_v8 = v8
+        self._load_snapshot = load_v8_project_snapshot if v8 else load_project_snapshot
+        self.snapshot = self._load_snapshot(project)
         self.activity_role = "all"
         self._detail_kind = "plan"
         self._detail_key = str(self.snapshot["root_id"])
@@ -342,6 +387,15 @@ class DanusTUI(App[None]):
                 f"Progress:   {row['progress_state'] or '—'}",
                 f"Round:      {row['round']}",
                 f"Round age:  {age}",
+                *[
+                    f"\nBLOCKED CAUSE:\n{issue['reason']}\n\n"
+                    f"MAIN ESCALATION: {issue['escalation_id'] or 'none'}\n"
+                    f"HOST REQUEST: {issue['request'] or 'none'}\n"
+                    f"NEXT STEP: {issue['next_step']}"
+                    for issue in self.snapshot.get("blockers", [])
+                    if issue["worker"] == row["worker"]
+                    and issue["node_id"] == row["node_id"]
+                ],
             ],
         )
 
@@ -403,10 +457,66 @@ class DanusTUI(App[None]):
                     self._show_activity_detail(index)
                     return
 
+    def _blocker_text(self) -> str:
+        blockers = self.snapshot.get("blockers") or []
+        if not blockers:
+            return ""
+        issue = blockers[0]
+        reason = " ".join(issue["reason"].split())
+        if len(reason) > 140:
+            reason = reason[:139] + "…"
+        escalation = (
+            "V8 WORKER FAILURE — see saved log / recover via V8 CLI"
+            if self.is_v8 else (
+                f"ESCALATE {issue['escalation_id'][:8]} -> {issue['escalation_target']}"
+                if issue.get("escalation_id") else "NO OPEN MAIN ESCALATION"
+            )
+        )
+        extra = f" (+{len(blockers) - 1} more)" if len(blockers) > 1 else ""
+        return (
+            f"BLOCKED {issue['node_id']} / {issue['worker']}{extra}: {reason}\n"
+            f"{escalation}  |  Press b for full cause and next step"
+        )
+
+    def action_show_blockers(self) -> None:
+        blockers = self.snapshot.get("blockers") or []
+        if not blockers:
+            self.notify("No unresolved blocked scientific assignments.")
+            return
+        sections = []
+        for issue in blockers:
+            sections.append(
+                f"BLOCKED: {issue['node_id']} / {issue['worker']} ({issue['role']})\n"
+                f"Assignment: {issue['assignment_id']}\n\n"
+                f"Recorded failure:\n{issue['reason']}\n\n"
+                f"Main escalation: {issue['escalation_id'] or 'none'}"
+                f" ({issue['escalation_status'] or 'none'})\n"
+                f"Requested host action:\n{issue['request'] or 'No open Main request recorded.'}\n\n"
+                f"Suggested next step (not an approval or executable command):\n"
+                f"{issue['next_step']}"
+            )
+        self.push_screen(BlockerScreen("\n\n" + ("\n\n" + "-" * 64 + "\n\n").join(sections)))
+
     def _summary_text(self) -> str:
+        if self.is_v8:
+            active = next((r for r in self.snapshot["workers"]
+                           if r["progress_state"] == "RUNNING"), None)
+            running = f"    Active: {active['role']} / {active['node_id']}" if active else ""
+            failures = self.snapshot.get("failed_task_count", 0)
+            history = f"    Historical failed tasks: {failures}" if failures else ""
+            verification = f"    Evidence: {self.snapshot.get('validation_status', 'NOT_RUN')}"
+            review = self.snapshot.get("review_verdict", "NOT_REVIEWED")
+            pending = self.snapshot.get("open_review_issues", 0)
+            review_label = f"    Review: {review}" + (f" ({pending} fixes)" if pending else "")
+            staged = self.snapshot.get("input_count", 0)
+            source_info = f"    Inputs: {staged} pinned" if staged else ""
+            return (f"Project: {self.project_name}    State: {self.snapshot['project_state']}"
+                    f"    V8 Adaptive (read-only monitor){running}{verification}{review_label}{source_info}{history}")
+        outstanding = self.snapshot.get("pending_main_escalations") or []
+        pending = f"    Main requests: {len(outstanding)}" if outstanding else ""
         return (
             f"Project: {self.project_name}    State: {self.snapshot['project_state']}    "
-            f"Plan: v{self.snapshot['plan_version']}"
+            f"Plan: v{self.snapshot['plan_version']}{pending}"
         )
 
     def _quota_text(self) -> str:
@@ -420,8 +530,11 @@ class DanusTUI(App[None]):
         self.notify(message)
 
     def action_toggle_pause(self) -> None:
-        if self.snapshot["project_state"] == "COMPLETE":
-            self.notify("Project is already complete.", severity="warning")
+        if self.is_v8:
+            self.notify("V8 monitor is read-only; use the V8 CLI for control.", severity="warning")
+            return
+        if self.snapshot["project_state"] in {"COMPLETE", "ACTION_REQUIRED"}:
+            self.notify("Science is finished; outstanding Main requests need operator review.", severity="warning")
             return
         try:
             if self.snapshot["project_state"] == "PAUSED":
@@ -436,6 +549,9 @@ class DanusTUI(App[None]):
         self._control_succeeded(message)
 
     def action_guide(self) -> None:
+        if self.is_v8:
+            self.notify("V8 guidance is not wired to V7 controls.", severity="warning")
+            return
         self.push_screen(GuidanceScreen(), self._submit_guidance)
 
     def _submit_guidance(self, text: str | None) -> None:
@@ -449,6 +565,9 @@ class DanusTUI(App[None]):
         self._control_succeeded("Human Guidance saved.")
 
     def action_interrupt(self) -> None:
+        if self.is_v8:
+            self.notify("Do not use V7 interrupt on V8; use V8 CLI.", severity="warning")
+            return
         self.push_screen(GuidanceScreen(interrupt=True), self._confirm_interrupt)
 
     def _confirm_interrupt(self, text: str | None) -> None:
@@ -525,8 +644,11 @@ class DanusTUI(App[None]):
 
     def _refresh_snapshot(self) -> None:
         old_nodes = self.snapshot["nodes"]
-        self.snapshot = load_project_snapshot(self.project_name)
+        self.snapshot = self._load_snapshot(self.project_name)
         self.query_one("#summary", Static).update(self._summary_text())
+        blocker_banner = self.query_one("#blockers", Static)
+        blocker_banner.display = bool(self.snapshot.get("blockers"))
+        blocker_banner.update(Text(self._blocker_text()))
         self.query_one("#quota", Static).update(self._quota_text())
         if old_nodes != self.snapshot["nodes"]:
             self._populate_plan(self.query_one("#plan", Tree), reset=True)
@@ -538,6 +660,9 @@ class DanusTUI(App[None]):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(self._summary_text(), id="summary")
+        blocker_banner = Static(Text(self._blocker_text()), id="blockers")
+        blocker_banner.display = bool(self.snapshot.get("blockers"))
+        yield blocker_banner
         with Horizontal(id="body"):
             yield self._plan_tree()
             with Vertical(id="right"):

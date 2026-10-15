@@ -76,6 +76,180 @@ def _attack(session, body):
             sandbox._terminate_process_tree(proc)
 
 
+def test_autonomous_research_brief_is_mirrored_readonly_not_control_exposed(tmp_path):
+    """Bootstrap sees the exact Brief without access to the protected project."""
+    wl, _, _, role = _worker(tmp_path)
+    original = wl.project_dir / "RESEARCH_BRIEF.md"
+    original.write_text("Research brief fixture: frozen, read-only.\n", encoding="utf-8")
+    with W.worker_session(wl, role) as session:
+        view = session["cwd"]
+        assert (view / "RESEARCH_BRIEF.md").read_bytes() == original.read_bytes()
+        program = (
+            "from pathlib import Path\n"
+            f"mirror=Path({str(view / 'RESEARCH_BRIEF.md')!r})\n"
+            f"original=Path({str(original)!r})\n"
+            "assert mirror.read_text() == 'Research brief fixture: frozen, read-only.\\n'\n"
+            "for action in (lambda: mirror.write_text('FORGED'),"
+            " lambda: original.read_text(), lambda: original.write_text('FORGED')):\n"
+            "  try: action()\n"
+            "  except OSError: pass\n"
+            "  else: raise AssertionError('sandbox escaped research brief read-only boundary')\n"
+            "print('BRIEF_MIRROR_ISOLATED')\n"
+        )
+        result = subprocess.run(
+            [str(session["engine"]), "sandbox", "-P", "danus-worker",
+             "-C", str(view), sys.executable, "-I", "-c", program],
+            env=sandbox._sandbox_env(session["home"], session["engine"], {}),
+            cwd=view, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=20,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "BRIEF_MIRROR_ISOLATED" in result.stdout
+    assert original.read_text() == "Research brief fixture: frozen, read-only.\n"
+
+
+def test_autonomous_research_brief_rejects_symlink(tmp_path):
+    wl, _, _, role = _worker(tmp_path)
+    secret = tmp_path / "outside-secret"
+    secret.write_text("MUST_NOT_COPY")
+    (wl.project_dir / "RESEARCH_BRIEF.md").symlink_to(secret)
+    with pytest.raises(ValueError, match="research brief must not be a symlink"):
+        with W.worker_session(wl, role):
+            pytest.fail("symlinked brief was exposed")
+
+
+def _assigned_immutable_plan_fixture(tmp_path):
+    """Real role-bound Review Handoff with a content-addressed proposal."""
+    from danus.core.handoff import HandoffRequests
+    from danus.orchestration import planning
+
+    wl, ledger, _, role = _worker(tmp_path, role="reviewer")
+    graph = ResearchPlanGraph(wl.project_dir)
+    ops = [{
+        "op": "add_node", "node_id": "R1", "title": "Bounded study",
+        "summary": "One frozen experiment", "parent": "root", "depends_on": [],
+    }]
+    proposal = {
+        "assignment_id": "bootstrap-fixture",
+        "base_plan_version": 1,
+        "reason": "one bounded route",
+        "post_hoc": False,
+        "evidence_refs": [],
+        "operations": ops,
+        "tasks": [{
+            "node_id": "R1", "role": "researcher",
+            "task": "Run exactly the frozen experiment; no extra cells.",
+        }],
+    }
+    proposal_id = planning._content_id({"proposer": "researcher", "proposal": proposal})
+    change_id = graph.propose_change(
+        base_plan_version=1, proposer="researcher",
+        reason=f"[proposal:{proposal_id}] one bounded route",
+        operations=ops, post_hoc=False, evidence_refs=[],
+    )
+    record = {
+        "proposal_id": proposal_id, "change_id": change_id,
+        "proposer": "researcher", "source_assignment_id": "bootstrap-fixture",
+        "proposal": proposal,
+    }
+    path = planning._proposal_record_path(wl.project_dir, proposal_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    handoffs = HandoffRequests(ledger)
+    handoff = handoffs.open(
+        kind="REVIEW", plan_version=1, node_id="root",
+        subject_type="PLAN_CHANGE", subject_id=change_id,
+        requested_by="researcher", source_role="researcher",
+        request="Review exact bound proposal", reason="approval gate",
+    )
+    ledger.assign(
+        worker="r", role="reviewer", node_id="root", plan_version=1,
+        task=handoff["request"], handoff_id=handoff["handoff_id"],
+        write_task=True,
+    )
+    return wl, ledger, role, record, path, handoff
+
+
+def test_bound_plan_review_mirrors_exact_proposal_and_plan_readonly(tmp_path):
+    wl, ledger, role, record, path, handoff = _assigned_immutable_plan_fixture(tmp_path)
+    with W.worker_session(wl, role) as session:
+        view = session["cwd"]
+        assert json.loads((view / "PLAN_PROPOSAL.json").read_text()) == record
+        assert json.loads((view / "RESEARCH_PLAN.json").read_text()) == ResearchPlanGraph(
+            wl.project_dir
+        ).snapshot()
+        code = (
+            "import json\n"
+            "from pathlib import Path\n"
+            f"mirror=Path({str(view / 'PLAN_PROPOSAL.json')!r})\n"
+            f"source=Path({str(path)!r})\n"
+            f"control=Path({str(wl.project_dir / 'plan' / 'current.json')!r})\n"
+            "assert json.loads(mirror.read_text())['proposal']['tasks'][0]['task'].startswith('Run exactly')\n"
+            "for action in (lambda: mirror.write_text('FORGED'), lambda: source.read_bytes(),"
+            " lambda: source.write_text('FORGED'), lambda: control.read_bytes()):\n"
+            "  try: action()\n"
+            "  except OSError: pass\n"
+            "  else: raise AssertionError('control source or mirror was writable/readable')\n"
+            "print('PLAN_INPUTS_BOUND_AND_READONLY')\n"
+        )
+        probe = subprocess.run(
+            [str(session["engine"]), "sandbox", "-P", "danus-worker", "-C",
+             str(view), sys.executable, "-I", "-c", code],
+            env=sandbox._sandbox_env(session["home"], session["engine"], {}),
+            cwd=view, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=20,
+        )
+        assert probe.returncode == 0, (probe.stdout, probe.stderr)
+        assert "PLAN_INPUTS_BOUND_AND_READONLY" in probe.stdout
+    assert json.loads(path.read_text()) == record
+
+
+def test_plan_proposal_not_leaked_to_unrelated_assignment(tmp_path):
+    wl, ledger, role, record, path, handoff = _assigned_immutable_plan_fixture(tmp_path)
+    other = L.WorkerLayout(wl.project_dir / "workers" / "other")
+    other.dir.mkdir(parents=True)
+    ledger.assign(worker="other", role="researcher", node_id="root",
+                  plan_version=1, task="Another task\n", write_task=True)
+    with W.worker_session(other, {"ROLE": "researcher", "MODEL": "test"}) as session:
+        assert (session["cwd"] / "RESEARCH_PLAN.json").is_file()
+        assert not (session["cwd"] / "PLAN_PROPOSAL.json").exists()
+
+
+@pytest.mark.parametrize("attack", ["symlink", "altered_content"])
+def test_bound_plan_proposal_invalid_input_fails_closed(tmp_path, attack):
+    wl, ledger, role, record, path, handoff = _assigned_immutable_plan_fixture(tmp_path)
+    if attack == "symlink":
+        other = tmp_path / "external-file"
+        other.write_text(path.read_text())
+        path.unlink()
+        path.symlink_to(other)
+        match = "must not be a symlink"
+    else:
+        record["proposal"]["tasks"][0]["task"] = "UNAUTHORIZED EDIT"
+        path.write_text(json.dumps(record))
+        match = "content mismatch"
+    with pytest.raises(ValueError, match=match):
+        with W.worker_session(wl, role):
+            pytest.fail("tampered control proposal was mirrored")
+
+
+def test_plan_repair_error_only_exposed_for_repair_task(tmp_path):
+    from danus.orchestration import planning
+    wl, ledger, _, role = _worker(tmp_path)
+    error = {"reason": "invalid proposal", "plan_version": 1}
+    path = planning._repair_error_path(wl.project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(error))
+    with W.worker_session(wl, role) as session:
+        assert not (session["cwd"] / "PLAN_REPAIR_ERROR.json").exists()
+    ledger.assign(
+        worker="r", role="researcher", node_id="root", plan_version=1,
+        task="# Repair Autonomous Plan Proposal\n\nCorrect the draft\n", write_task=True,
+    )
+    with W.worker_session(wl, {"ROLE": "researcher", "MODEL": "test"}) as session:
+        assert json.loads((session["cwd"] / "PLAN_REPAIR_ERROR.json").read_text()) == error
+
+
 @pytest.mark.parametrize("role", ["researcher", "reviewer", "experimenter"])
 def test_real_worker_denies_files_and_forged_authority(tmp_path, role):
     wl, _, _, config = _worker(tmp_path, role)
@@ -195,6 +369,75 @@ def test_dsh_cannot_fall_back_to_unisolated_worker(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="DSH"):
         with W.worker_session(wl, config):
             pytest.fail("unisolated DSH worker was launched")
+
+
+def test_codex_mcp_proxy_uses_one_shot_socket_without_inherited_gateway_fd(tmp_path):
+    """Host-only MCP byte proxy works when Codex drops inherited descriptors."""
+    wl, _, _, role = _worker(tmp_path)
+    with W.worker_session(wl, role) as session:
+        assert session["gateway_socket"].is_socket()
+        # The model-side sandbox must not be able to reach the private
+        # host-side capability channel, even when it knows the path.
+        denied = subprocess.run(
+            [str(session["engine"]), "sandbox", "-P", "danus-worker",
+             "-C", str(session["cwd"]), sys.executable, "-I", "-c",
+             "import errno,socket; "
+             f"s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); "
+             f"p={str(session['gateway_socket'])!r}; "
+             "\ntry: s.connect(p)\n"
+             "except OSError as e: assert e.errno in "
+             "(errno.EPERM, errno.EACCES, errno.ENOENT), e\n"
+             "else: raise AssertionError('worker connected to private Gateway')\n"
+             "print('PRIVATE_SOCKET_DENIED')"],
+            env=sandbox._sandbox_env(session["home"], session["engine"], {}),
+            cwd=session["cwd"], capture_output=True, text=True, timeout=15,
+        )
+        assert denied.returncode == 0, (denied.stdout, denied.stderr)
+        assert "PRIVATE_SOCKET_DENIED" in denied.stdout
+        script = session["cwd"] / "socket_bridge_test.py"
+        script.write_text(
+            "import json, subprocess, sys\n"
+            f"p=subprocess.Popen([{sys.executable!r}, '-I', "
+            f"{str(session['cwd'] / 'gateway_proxy.py')!r}, '--socket', "
+            f"{str(session['gateway_socket'])!r}], "
+            "stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, close_fds=True)\n"
+            "def rpc(method, params, ident):\n"
+            "    p.stdin.write(json.dumps({'jsonrpc':'2.0','id':ident,"
+            "'method':method,'params':params})+'\\n')\n"
+            "    p.stdin.flush()\n"
+            "    while True:\n"
+            "        line=p.stdout.readline()\n"
+            "        assert line, 'MCP proxy closed before its response'\n"
+            "        message=json.loads(line)\n"
+            "        if message.get('id') == ident:\n"
+            "            return message\n"
+            "r=rpc('initialize', {'protocolVersion':'2024-11-05',"
+            "'capabilities':{},'clientInfo':{'name':'socket-smoke','version':'1'}}, 1)\n"
+            "assert 'result' in r, r\n"
+            "p.stdin.write(json.dumps({'jsonrpc':'2.0',"
+            "'method':'notifications/initialized'})+'\\n')\n"
+            "p.stdin.flush()\n"
+            "r=rpc('tools/call',{'name':'gm_search',"
+            "'arguments':{'query':'__socket_bridge_smoke_no_match__'}},2)\n"
+            "assert 'result' in r and not r['result'].get('isError'), r\n"
+            "r=rpc('tools/call',{'name':'fact_revoke',"
+            "'arguments':{'fact_id':'forged','reason':'attack'}},3)\n"
+            "assert 'error' in r or r.get('result',{}).get('isError'), r\n"
+            "print('SOCKET_BRIDGE_PASS',flush=True)\n"
+            "p.stdin.close()\n"
+            "p.wait(timeout=5)\n"
+        )
+        # Only the fixed, trusted MCP transport may connect to this socket.
+        # Unlike the model's tools, Codex launches this proxy host-side.
+        result = subprocess.run(
+            [sys.executable, "-I", str(script)], cwd=session["cwd"],
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "SOCKET_BRIDGE_PASS" in result.stdout
+    assert GlobalMemory(wl.project_dir).read("plan") == []
 
 
 @pytest.mark.parametrize("lifetime", ["complete", "crash", "migration"])

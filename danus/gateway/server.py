@@ -463,11 +463,13 @@ def handoff_request(
     kind: str,
     reason: str,
     evidence_refs: Optional[List[str]] = None,
+    target_role: str = "",
 ) -> Dict[str, Any]:
     """Open the caller's one durable upward handoff for this assignment.
 
-    Experimenters may request INTERPRET or ESCALATE. Researchers and Reviewers may
-    request ESCALATE. ``evidence_refs`` is optional and valid only for INTERPRET;
+    Experimenters may request INTERPRET or ESCALATE. Researchers may request
+    ESCALATE. Reviewers may request ESCALATE or a role-directed CLARIFY, which
+    reuses the existing governed Handoff dispatcher and does not grant execution. ``evidence_refs`` is optional and valid only for INTERPRET;
     when an Experiment Runtime already produced Evidence Records, pass their ids so
     the Researcher receives exact immutable evidence instead of searching broadly.
     Routing identity is derived from the authenticated role and current Assignment;
@@ -480,7 +482,7 @@ def handoff_request(
     allowed = {
         "experimenter": {"INTERPRET", "ESCALATE"},
         "researcher": {"ESCALATE"},
-        "reviewer": {"ESCALATE"},
+        "reviewer": {"ESCALATE", "CLARIFY"},
     }
     ledger = _pl()
     author = _author()
@@ -491,6 +493,12 @@ def handoff_request(
     role = source_role if gateway_role == "all" else gateway_role
     if role not in allowed or requested_kind not in allowed[role]:
         raise ValueError(f"role {role or 'unknown'} cannot request {requested_kind or 'empty'} handoff")
+    requested_role = str(target_role or "").strip().lower()
+    if requested_kind == "CLARIFY":
+        if requested_role not in {"researcher", "experimenter"}:
+            raise ValueError("CLARIFY needs target_role=researcher or experimenter")
+    elif requested_role:
+        raise ValueError("target_role is supported only for CLARIFY")
     if source_role != role:
         raise ValueError(f"gateway role {role} does not match current assignment role {source_role}")
     if source.get("state") not in {"ASSIGNED", "RUNNING"}:
@@ -522,14 +530,15 @@ def handoff_request(
             and item.get("subject_type") == "ASSIGNMENT"
             and item.get("subject_id") == source_id
             and item.get("source_assignment_id") == source_id
+            and (requested_kind != "CLARIFY" or item.get("status") in {"OPEN", "ASSIGNED"})
         ),
         None,
     )
     if existing is not None:
         existing_refs = list(existing.get("evidence_refs") or [])
-        if existing_refs != refs:
+        if existing_refs != refs or (requested_kind == "CLARIFY" and existing.get("target_role") != requested_role):
             raise ValueError(
-                "existing handoff for this assignment has different evidence_refs"
+                "existing handoff for this assignment has different evidence_refs or target_role"
             )
         return {
             "handoff_id": existing["handoff_id"],
@@ -538,6 +547,17 @@ def handoff_request(
             "target_role": existing["target_role"],
             "evidence_refs": existing_refs,
         }
+
+    interpret_node = ""
+    interpret_task = ""
+    if requested_kind == "INTERPRET" and refs:
+        # The planned downstream Researcher task owns interpretation when it
+        # explicitly requires the Evidence Gateway. Do not allocate an extra
+        # interpretation job on the completed Experimenter node.
+        from danus.orchestration.autonomy import _interpret_plan_target, _task_spec
+        interpret_node = _interpret_plan_target(_project(), str(source["node_id"]))
+        if interpret_node:
+            interpret_task = _task_spec(_project(), interpret_node)["task"]
 
     if requested_kind == "INTERPRET":
         evidence_block = ""
@@ -557,6 +577,17 @@ def handoff_request(
             "knowledge, Plan, or Implementation Contract paths if a concrete follow-up is justified. Do not alter "
             "the source Assignment or Handoff state. End with COMPLETE when this interpretation request itself is handled.\n"
         )
+    elif requested_kind == "CLARIFY":
+        request = (
+            "# Answer a Reviewer Clarification\n\n"
+            f"Reviewer assignment `{source_id}` on Plan node `{source['node_id']}` requests a bounded "
+            f"answer from the {requested_role} role.\n\n"
+            f"Question / missing information:\n{reason_text}\n\n"
+            "Reuse existing approved reports, artifacts and decisions; do not execute or rerun an experiment, "
+            "change a Plan or contract, or promote a fact in response to this clarification. "
+            "State what is known and still missing. Record an answer in your final response and end COMPLETE. "
+            "The original Reviewer retains its verdict authority.\n"
+        )
     else:
         request = (
             "# Escalation Request\n\n"
@@ -567,8 +598,12 @@ def handoff_request(
             "an automatic Plan, Contract, or source-Assignment disposition.\n"
         )
 
+    if interpret_node:
+        # Hash-identical to the frozen R2 task, so normal Plan auto-completion
+        # and independent downstream review still apply.
+        request = interpret_task
     plan = _pg().snapshot()
-    node_id = str(source["node_id"])
+    node_id = interpret_node or str(source["node_id"])
     node = plan["nodes"].get(node_id)
     if node is None or node.get("state") != "ACTIVE":
         raise ValueError(f"source plan node {node_id} is not ACTIVE")
@@ -584,6 +619,7 @@ def handoff_request(
         request=request,
         reason=reason_text,
         evidence_refs=refs,
+        target_role=requested_role,
     )
     return {
         "handoff_id": opened["handoff_id"],
@@ -594,14 +630,273 @@ def handoff_request(
     }
 
 
+def experiment_evidence_get(
+    evidence_id: str,
+    artifact_index: Optional[int] = None,
+    json_pointer: str = "",
+) -> Dict[str, Any]:
+    """Read only Evidence bound to this Researcher's active INTERPRET handoff.
+
+    Plain lookup returns verified Evidence and frozen protocol metadata with
+    artifact refs. Specify artifact_index + optional RFC6901 json_pointer to
+    read a small hash-checked JSON portion. No arbitrary paths, rerun or writes.
+    """
+    from .evidence_access import authorized_interpret_evidence, select_verified_json_artifact
+
+    if _BOUND_WORKER is None or _BOUND_WORKER.get("role") != "researcher":
+        raise PermissionError("Evidence lookup requires a bound Researcher")
+    with capability.scope(_BOUND_WORKER):
+        ledger = _pl()
+        assignment = ledger.current(_author(), refresh_stale=False)
+        if (not assignment
+            or assignment.get("assignment_id") != _BOUND_WORKER["assignment_id"]):
+            raise PermissionError("Evidence lookup requires the exact active task")
+        root = _project()
+        record, protocol = authorized_interpret_evidence(root, ledger, assignment, evidence_id)
+        answer = {
+            "evidence_id": evidence_id,
+            "protocol_id": protocol["protocol_id"],
+            "protocol": protocol,
+            "primary_metrics": record.get("primary_metrics", {}),
+            "matrix_coverage": record.get("matrix_coverage", {}),
+            "failures": record.get("failures", []),
+            "deviations": record.get("deviations", []),
+            "artifacts": record.get("artifacts", []),
+            "source": "immutable Evidence authorized by exact INTERPRET handoff",
+        }
+        if artifact_index is not None:
+            answer["selected_raw_json"] = select_verified_json_artifact(
+                root, protocol["protocol_id"], record, artifact_index, json_pointer,
+            )
+        elif json_pointer:
+            raise ValueError("json_pointer requires artifact_index")
+        return answer
+
+
 # --------------------------------------------------------------------------- #
 # pre-code semantic alignment gate                                            #
 # --------------------------------------------------------------------------- #
+
+def _approved_dynamic_protocol(assignment: Dict[str, Any], protocol_id: str, *, pin: bool) -> Dict[str, Any]:
+    """Authorize one post-review protocol for exactly its bound Experimenter Assignment.
+
+    Caller holds capability.scope. The first execution attempt irrevocably pins
+    the protocol for this Assignment; retries must use the identical ID.
+    """
+    from danus.core.evidence import _content_id, protocol_identity
+
+    if not re.fullmatch(r"[0-9a-f]{16}", str(protocol_id)):
+        raise ValueError("invalid dynamic protocol identity")
+    ledger = _pl()
+    if (not assignment or assignment.get("role") != "experimenter"
+        or assignment.get("state") not in {"ASSIGNED", "RUNNING"}
+        or ledger._is_plan_stale(assignment)):
+        raise PermissionError("dynamic protocol needs a current Experimenter assignment")
+    contract_id = str(assignment.get("implementation_contract_id") or "")
+    contract = ledger.implementation_contract(contract_id) if contract_id else None
+    if (not contract or contract.get("gate_status") != "APPROVE"
+        or contract.get("consumed_by_assignment_id") != assignment["assignment_id"]
+        or contract.get("task_sha256") != assignment.get("task_sha256")
+        or contract.get("node_id") != assignment.get("node_id")
+        or not contract.get("review_assignment_id")
+        or not contract.get("reviewed_at")):
+        raise PermissionError("dynamic protocol requires the exact reviewed Implementation Contract")
+    reviews = [
+        h for h in HandoffRequests(ledger).all()
+        if h.get("kind") == "REVIEW"
+        and h.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+        and h.get("subject_id") == contract_id
+        and h.get("status") == "RESOLVED"
+        and h.get("resolution_assignment_id") == contract["review_assignment_id"]
+    ]
+    if not reviews:
+        raise PermissionError("Implementation Contract approval handoff is not resolved")
+    protocol = EvidenceStore(_project()).get_protocol(protocol_id)
+    if (not protocol or protocol.get("protocol_id") != protocol_id
+        or protocol.get("status") != "frozen"
+        or _content_id(protocol_identity(protocol)) != protocol_id
+        or protocol.get("implementation_contract_id") != contract_id
+        or protocol.get("execution_assignment_id") != assignment["assignment_id"]
+        or protocol.get("author") != _author()
+        or str(protocol.get("frozen_at") or "") < str(contract["reviewed_at"])
+        or not isinstance(protocol.get("metric_reducer"), dict)
+        or not protocol.get("bundle_id")):
+        raise PermissionError("protocol must be frozen after approval for this contract and assignment")
+    if pin:
+        binding = {
+            "assignment_id": assignment["assignment_id"],
+            "worker": _author(), "contract_id": contract_id,
+            "protocol_id": protocol_id, "task_sha256": assignment["task_sha256"],
+        }
+        path = _project() / "experiment_runtime" / "assignment_protocols" / (
+            assignment["assignment_id"] + ".json"
+        )
+        try:
+            EvidenceStore._write_once(path, binding)
+        except ValueError as exc:
+            raise PermissionError("this Assignment already pinned a different protocol") from exc
+    return protocol
+
+
+def experiment_protocol_get(protocol_id: str) -> Dict[str, Any]:
+    """Read a fixed task/brief protocol or the exact approved dynamic binding.
+
+    Source tasks are control-plane assigned; protocol IDs are never paths.
+    No arbitrary project selection, directory read, or experiment execution.
+    """
+    from danus.core.evidence import protocol_identity, _content_id
+
+    if not re.fullmatch(r"[0-9a-f]{16}", str(protocol_id)):
+        raise ValueError("invalid protocol identity")
+    if _BOUND_WORKER is None or _BOUND_WORKER["role"] not in {
+        "researcher", "reviewer", "experimenter",
+    }:
+        raise PermissionError("protocol lookup requires a bound scientific worker")
+    with capability.scope(_BOUND_WORKER):
+        capability.validate(_BOUND_WORKER)
+        ledger = _pl()
+        assignment = ledger.current(_author(), refresh_stale=True)
+        if (
+            not assignment
+            or assignment.get("assignment_id") != _BOUND_WORKER["assignment_id"]
+            or assignment.get("state") not in {"ASSIGNED", "RUNNING"}
+            or ledger._is_plan_stale(assignment)
+        ):
+            raise PermissionError("protocol lookup requires an active assigned task")
+        task = (_project() / "workers" / _author() / "TASK.md").read_text(encoding="utf-8")
+        if (assignment.get("role") == "experimenter"
+            and not re.search(r"^EXPERIMENT_PROTOCOL_ID=", task, re.MULTILINE)):
+            return {"protocol": _approved_dynamic_protocol(assignment, protocol_id, pin=False)}
+        # An INTERPRET task derives its read authority from the immutable
+        # source Experimenter's Handoff evidence_refs, not the older frozen
+        # research brief (which predates the newly executed protocol).
+        if assignment.get("role") == "researcher" and assignment.get("handoff_id"):
+            handoff = HandoffRequests(ledger).get(assignment["handoff_id"])
+            if handoff and handoff.get("kind") == "INTERPRET":
+                from .evidence_access import authorized_interpret_evidence
+                for evidence_id in handoff.get("evidence_refs", []):
+                    record = EvidenceStore(_project()).get_record(evidence_id)
+                    if record and record.get("protocol_id") == protocol_id:
+                        _, authorized = authorized_interpret_evidence(
+                            _project(), ledger, assignment, evidence_id,
+                        )
+                        return {"protocol": authorized}
+                raise PermissionError("protocol not bound to current INTERPRET Evidence")
+        if protocol_id not in task:
+            raise PermissionError("protocol is not referenced by the assigned task")
+        brief = (_project() / "RESEARCH_BRIEF.md")
+        if not brief.is_file() or protocol_id not in brief.read_text(encoding="utf-8"):
+            raise PermissionError("protocol is not referenced by the binding research brief")
+        record = EvidenceStore(_project()).get_protocol(protocol_id)
+        if (
+            not record
+            or record.get("protocol_id") != protocol_id
+            or record.get("status") != "frozen"
+            or _content_id(protocol_identity(record)) != protocol_id
+        ):
+            raise ValueError("missing or invalid frozen protocol")
+        return {"protocol": record}
+
+
+def _contract_target_authorized(assignment: Dict[str, Any], target: str,
+                                task: str) -> None:
+    """Allow R1 to request E1 only when the committed DAG and exact task permit it."""
+    if target == assignment["node_id"]:
+        return  # Retain existing same-node implementation governance.
+    from danus.orchestration.autonomy import _task_spec
+
+    root = _project()
+    plan = ResearchPlanGraph(root).snapshot()
+    nodes = plan["nodes"]
+    source = assignment["node_id"]
+    if (
+        plan["plan_version"] != int(assignment["plan_version"])
+        or target not in nodes or source not in nodes
+        or nodes[target].get("state") != "ACTIVE"
+        or nodes[source].get("state") != "ACTIVE"
+    ):
+        raise PermissionError("contract target not active in the assigned Plan")
+    spec = _task_spec(root, target)
+    if (
+        spec.get("status") != "ready"
+        or spec.get("role") != "experimenter"
+        or ProgressLedger.task_sha256(spec["task"]) != ProgressLedger.task_sha256(task)
+    ):
+        raise PermissionError("contract target must match an exact frozen Experimenter task")
+    # Follow dependency edges backwards: the authorizing Researcher node must
+    # causally precede E1, not merely share the same project or parent.
+    frontier = list(nodes[target].get("depends_on") or [])
+    visited = set()
+    while frontier:
+        node_id = frontier.pop()
+        if node_id == source:
+            break
+        if node_id in visited or node_id not in nodes:
+            continue
+        visited.add(node_id)
+        frontier.extend(nodes[node_id].get("depends_on") or [])
+    else:
+        raise PermissionError("contract target is not downstream of the Researcher")
+    ledger = ProgressLedger(root)
+    if target in ledger.completed_nodes() or any(
+        a.get("node_id") == target and a.get("state") in {"ASSIGNED", "RUNNING", "DONE"}
+        and not ledger._is_plan_stale(a)
+        for a in ledger.assignments()
+    ):
+        raise PermissionError("cannot rewrite a dispatched or completed experiment")
+
+
+@_worker_write_scope()
+def workflow_submit_result(
+    outcome: str, next_intent: str, subject_id: str = "",
+    artifact_refs: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Submit one structured next-step request, not an execution command."""
+    from danus.orchestration.intent import submit
+
+    # The context-manager decorator already binds and authorizes this worker.
+    current = _pl().current(_author(), refresh_stale=True)
+    return submit(
+        _project(), current, outcome=outcome,
+        next_intent=next_intent, subject_id=subject_id,
+        artifact_refs=artifact_refs,
+    )
+
 
 def implementation_pending_contracts(project: Optional[str] = None) -> Dict[str, Any]:
     """Return the latest unconsumed implementation contract for each gated node."""
     contracts = _pl(project).pending_implementation_contracts()
     return {"contracts": contracts, "count": len(contracts)}
+
+
+def implementation_render_task(
+    goal: str,
+    must_preserve_invariants: List[str],
+    forbidden_behaviors: List[str],
+    acceptance_conditions: List[str],
+) -> Dict[str, str]:
+    """Researcher-only, side-effect-free canonical Implementation Contract task.
+
+    Call this BEFORE proposing an Experimenter node in a Research Plan.
+    It uses precisely the same renderer as implementation_submit_contract,
+    but requires no committed target node, creates no Implementation Contract,
+    grants no approval, and does not bind or launch an experiment. The returned
+    text must be copied verbatim into the proposed Experimenter Plan task.
+    After Plan review and commit, a Researcher must submit identical fields
+    through implementation_submit_contract for independent Reviewer APPROVE.
+    """
+    if _role().lower() not in {"researcher", "all"}:
+        raise PermissionError("canonical implementation task preview requires Researcher role")
+    task = ProgressLedger.implementation_task(
+        goal=goal,
+        must_preserve_invariants=must_preserve_invariants,
+        forbidden_behaviors=forbidden_behaviors,
+        acceptance_conditions=acceptance_conditions,
+    )
+    return {
+        "task": task,
+        "task_sha256": ProgressLedger.task_sha256(task),
+    }
 
 
 @_worker_write_scope(researcher_only=True)
@@ -620,8 +915,15 @@ def implementation_submit_contract(
     architecture. The returned ``task`` is the exact task the Supervisor must bind
     after Reviewer APPROVE; changing it invalidates the approval.
     """
-    if _pl().current(_author())["node_id"] != str(node_id).strip():
-        raise ValueError("contract node does not match current assignment")
+    assignment = _pl().current(_author(), refresh_stale=True)
+    target = str(node_id).strip()
+    contract_task = ProgressLedger.implementation_task(
+        goal=goal,
+        must_preserve_invariants=must_preserve_invariants,
+        forbidden_behaviors=forbidden_behaviors,
+        acceptance_conditions=acceptance_conditions,
+    )
+    _contract_target_authorized(assignment, target, contract_task)
     record = _pl().submit_implementation_contract(
         proposer=_author(),
         node_id=node_id,
@@ -823,22 +1125,194 @@ def search_arxiv_theorems(query: str, num_results: int = 10) -> Dict[str, Any]:
 
 
 def experiment_run(protocol_id: str) -> Dict[str, Any]:
-    """Execute the frozen protocol named in this Experimenter's assigned task."""
+    """Execute a frozen protocol bound to either an exact ID or an approved contract."""
     from danus.execution.experiment import run_experiment
+
+    if not re.fullmatch(r"[0-9a-f]{16}", str(protocol_id)):
+        raise ValueError("invalid protocol identity")
 
     @contextmanager
     def authorized():
         if _BOUND_WORKER is None or _BOUND_WORKER["role"] != "experimenter":
             raise PermissionError("experiment execution requires a bound Experimenter Gateway")
         with capability.scope(_BOUND_WORKER):
+            assignment = _pl().current(_author(), refresh_stale=True)
+            handoff = HandoffRequests(_pl()).get(str((assignment or {}).get("handoff_id") or ""))
+            if handoff and handoff.get("kind") == "CLARIFY":
+                raise PermissionError("clarification assignments cannot run experiments")
             task = (_project() / "workers" / _author() / "TASK.md").read_text()
-            if re.findall(r"^EXPERIMENT_PROTOCOL_ID=([0-9a-f]{16})$", task, re.MULTILINE) != [protocol_id]:
-                raise PermissionError("protocol is not named in the current assigned task")
+            ids = re.findall(r"^EXPERIMENT_PROTOCOL_ID=([0-9a-f]{16})$", task, re.MULTILINE)
+            if re.search(r"^EXPERIMENT_PROTOCOL_ID=", task, re.MULTILINE):
+                if ids != [protocol_id]:
+                    raise PermissionError("protocol differs from the exact assigned protocol ID")
+            else:
+                _approved_dynamic_protocol(assignment, protocol_id, pin=True)
             yield
 
     with authorized():
         root, author = _project(), _author()
     return run_experiment(root, protocol_id, author=author, authorize=authorized)
+
+
+
+def experiment_freeze_protocol(
+    question: str,
+    hypothesis: str,
+    matrix: Dict[str, Any],
+    primary_metrics: List[str],
+    decision_rule: str,
+    metric_reducer_path: str,
+    execution_files: List[str],
+    metric_reducer_function: str = "reduce_metrics",
+) -> Dict[str, Any]:
+    """Freeze one contract-bound runnable protocol from workspace files.
+
+    The Experimenter may write code in its scientific workspace but cannot
+    write the trusted Evidence Store directly. This role-gated host tool hashes
+    the declared source files, binds the protocol to the current reviewed
+    Implementation Contract and Assignment, and publishes an immutable bundle.
+    It does NOT execute any unit or accept arbitrary host paths.
+    """
+    from danus.core import bundle
+    from danus.execution import layout as L
+
+    if _BOUND_WORKER is None or _BOUND_WORKER["role"] != "experimenter":
+        raise PermissionError("protocol freezing requires a bound Experimenter Gateway")
+
+    # Authorization is checked before reading any workspace file. Freeze
+    # itself runs outside global project locks (runtime hashing may be slow).
+    with capability.scope(_BOUND_WORKER):
+        ledger = _pl()
+        assignment = ledger.current(_author(), refresh_stale=False)
+        if not assignment or assignment["assignment_id"] != _BOUND_WORKER["assignment_id"]:
+            raise PermissionError("protocol freezing requires the current Assignment")
+        if assignment.get("handoff_id"):
+            handoff = HandoffRequests(ledger).get(assignment["handoff_id"])
+            if handoff and handoff.get("kind") == "CLARIFY":
+                raise PermissionError("clarification assignments cannot freeze protocols")
+        task = (_project() / "workers" / _author() / "TASK.md").read_text(encoding="utf-8")
+        if re.search(r"^EXPERIMENT_PROTOCOL_ID=", task, re.MULTILINE):
+            raise PermissionError("exact-ID execution assignments cannot freeze new protocols")
+        contract_id = str(assignment.get("implementation_contract_id") or "")
+        contract = ledger.implementation_contract(contract_id) if contract_id else None
+        if (
+            not contract
+            or contract.get("gate_status") != "APPROVE"
+            or contract.get("consumed_by_assignment_id") != assignment["assignment_id"]
+            or contract.get("task_sha256") != assignment.get("task_sha256")
+            or contract.get("node_id") != assignment.get("node_id")
+            or not contract.get("review_assignment_id")
+            or not contract.get("reviewed_at")
+            or not any(
+                h.get("kind") == "REVIEW"
+                and h.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                and h.get("subject_id") == contract_id
+                and h.get("status") == "RESOLVED"
+                and h.get("resolution_assignment_id") == contract["review_assignment_id"]
+                for h in HandoffRequests(ledger).all()
+            )
+        ):
+            raise PermissionError("protocol freezing requires exact independently approved Implementation Contract")
+        root = _project()
+        worker = _author()
+        assignment_id = assignment["assignment_id"]
+        workspace = L.scientific_workspace(root)
+        if workspace == root.resolve():
+            raise PermissionError("dynamic protocol freezing requires a separate scientific workspace")
+
+    store = EvidenceStore(root)
+
+    def file_ref(name: str) -> Dict[str, Any]:
+        relative = bundle.relative_path(name)
+        source = workspace / relative
+        if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(workspace):
+            raise ValueError("protocol source must be a regular file inside the scientific workspace")
+        return store.artifact_ref(source, relative_to=workspace)
+
+    if not isinstance(matrix, dict) or not isinstance(matrix.get("units"), list):
+        raise ValueError("protocol requires matrix.units")
+    if not isinstance(execution_files, list) or not execution_files:
+        raise ValueError("protocol requires explicit execution_files")
+    declared = [bundle.relative_path(p) for p in execution_files]
+    if len(set(declared)) != len(declared):
+        raise ValueError("duplicate execution_files are not allowed")
+    for name in declared:
+        file_ref(name)
+
+    # Normalize input paths into trusted content references. Model-supplied
+    # digests, when present, must match actual workspace bytes.
+    units = []
+    for raw_unit in matrix["units"]:
+        if not isinstance(raw_unit, dict):
+            raise ValueError("experiment unit must be an object")
+        unit = dict(raw_unit)
+        inputs = unit.get("inputs", [])
+        if not isinstance(inputs, list):
+            raise ValueError("unit inputs must be a list")
+        frozen_inputs = []
+        for item in inputs:
+            if isinstance(item, str):
+                reference = file_ref(item)
+            elif isinstance(item, dict) and isinstance(item.get("path"), str):
+                reference = file_ref(item["path"])
+                supplied = {k: item[k] for k in ("sha256", "size") if k in item}
+                if supplied and (
+                    set(supplied) != {"sha256", "size"}
+                    or any(reference[k] != supplied[k] for k in supplied)
+                ):
+                    raise ValueError("unit input hash/size differs from current workspace file")
+            else:
+                raise ValueError("input must be a relative path or a path/hash/size object")
+            frozen_inputs.append(reference)
+        unit["inputs"] = frozen_inputs
+        units.append(unit)
+
+    frozen_matrix = {**matrix, "units": units}
+    from danus.execution.experiment import _units
+    validated_units = _units({"matrix": frozen_matrix})
+    for unit in validated_units:
+        argv = unit["argv"]
+        if len(argv) < 2 or argv[0] not in {"python", "python3"} or argv[1] not in declared:
+            raise ValueError("unit must invoke a declared frozen Python script")
+        for artifact in unit["artifacts"]:
+            bundle.relative_path(artifact)
+
+    reducer = file_ref(metric_reducer_path)
+    function = str(metric_reducer_function or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", function):
+        raise ValueError("invalid metric reducer function")
+    reducer["function"] = function
+
+    protocol_id = store.freeze_protocol(
+        question=question,
+        hypothesis=hypothesis,
+        matrix=frozen_matrix,
+        primary_metrics=primary_metrics,
+        decision_rule=decision_rule,
+        author=worker,
+        metric_reducer=reducer,
+        execution_files=declared,
+        source_root=workspace,
+        implementation_contract_id=contract_id,
+        execution_assignment_id=assignment_id,
+    )
+
+    # Recheck immediately after expensive hashing/writes. Stale/revoked
+    # Assignments cannot be handed an executable protocol, and execution is
+    # independently revalidated by experiment_run.
+    with capability.scope(_BOUND_WORKER):
+        current = _pl().current(worker, refresh_stale=False)
+        if not current or current["assignment_id"] != assignment_id:
+            raise PermissionError("Experimenter Assignment changed while freezing")
+        protocol = _approved_dynamic_protocol(current, protocol_id, pin=False)
+    return {
+        "protocol_id": protocol_id,
+        "bundle_id": protocol["bundle_id"],
+        "status": "frozen",
+        "implementation_contract_id": contract_id,
+        "execution_assignment_id": assignment_id,
+        "next_step": "Call experiment_run(protocol_id) with this exact ID.",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -853,7 +1327,12 @@ _TOOLS = {
     "fact_revoke": fact_revoke,
     "handoff_request": handoff_request,
     "experiment_run": experiment_run,
+    "experiment_freeze_protocol": experiment_freeze_protocol,
     "implementation_pending_contracts": implementation_pending_contracts,
+    "experiment_protocol_get": experiment_protocol_get,
+    "experiment_evidence_get": experiment_evidence_get,
+    "workflow_submit_result": workflow_submit_result,
+    "implementation_render_task": implementation_render_task,
     "implementation_submit_contract": implementation_submit_contract,
     "implementation_review_contract": implementation_review_contract,
     "plan_pending_changes": plan_pending_changes,
@@ -868,10 +1347,11 @@ def _bound_tool(fn):
     @wraps(fn)
     def call(*args, **kwargs):
         if fn.__name__ in {
-            "fact_submit", "experiment_run", "handoff_request", "implementation_submit_contract", "plan_propose_change",
-            "implementation_review_contract", "plan_review_change",
+            "fact_submit", "experiment_run", "experiment_freeze_protocol", "handoff_request", "implementation_submit_contract", "plan_propose_change",
+            "implementation_review_contract", "plan_review_change", "experiment_protocol_get", "experiment_evidence_get", "workflow_submit_result",
         }:
-            # These functions validate the capability inside their existing locks.
+            # These functions enforce their own capability scope/locks; do not
+            # wrap them again or flock() can deadlock against this same process.
             return fn(*args, **kwargs)
         if fn.__name__ == "search_arxiv_theorems":
             binding = _BOUND_WORKER

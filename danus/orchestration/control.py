@@ -8,142 +8,28 @@ I/O and does not start/kill workers or invent scientific work.
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
-import time
 from typing import Any, Dict, List, Optional
 
 from danus.core import ProgressLedger, ResearchPlanGraph
 from danus.core.handoff import HandoffRequests
 from danus.execution import layout as L
 
-_FIVE_HOURS_SECONDS = 5 * 60 * 60
-_QUOTA_SNAPSHOT_MAX_AGE_SECONDS = 15 * 60
 _GENERIC_REVIEW_PREFIX = "DANUS_REVIEW_CLASS:"
 _GENERIC_REVIEW_VERIFIED_PREFIX = "DANUS_REVIEW_CLASS_VERIFIED:"
 _GENERIC_REVIEW_CLASSES = {"SCIENTIFIC_AMBIGUITY", "DETERMINISTIC"}
 
 
-def _snapshot_age(snapshot: Dict[str, Any], now: float) -> Optional[float]:
-    raw = snapshot.get("observed_at")
-    if not isinstance(raw, str):
-        return None
-    try:
-        return max(0.0, now - datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
-    except ValueError:
-        return None
-
-
-def quota_policy(snapshot: Optional[Dict[str, Any]], *, now: Optional[float] = None) -> Dict[str, Any]:
-    """Turn quota telemetry into a small fail-open safe-boundary policy.
-
-    No fixed quota size is assumed. When the local 5h proxy is ready, its recent
-    weekly-equivalent burn is projected only until the current official weekly
-    reset. Pressure means that continuing at that recent pace would exhaust the
-    currently reported weekly remainder before reset.
-    """
-    now = float(time.time() if now is None else now)
-    base = {
-        "state": "UNKNOWN",
-        "reason": "telemetry_unavailable",
-        "block_new_codex_rounds": False,
-        "weekly_remaining_percent": None,
-        "weekly_reset_at": None,
-        "five_hour_proxy_status": None,
-        "projected_weekly_burn_to_reset": None,
-        "snapshot_age_seconds": None,
-    }
-    if not isinstance(snapshot, dict) or not snapshot.get("available"):
-        return base
-
-    age = _snapshot_age(snapshot, now)
-    base["snapshot_age_seconds"] = None if age is None else round(age, 1)
-    if age is None or age > _QUOTA_SNAPSHOT_MAX_AGE_SECONDS:
-        base["reason"] = "telemetry_stale"
-        return base
-
-    windows = snapshot.get("windows")
-    weekly = windows.get("weekly") if isinstance(windows, dict) else None
-    if not isinstance(weekly, dict):
-        base["reason"] = "weekly_unavailable"
-        return base
-
-    remaining = weekly.get("remaining_percent")
-    reset_at = weekly.get("resets_at")
-    if isinstance(remaining, bool) or not isinstance(remaining, (int, float)):
-        base["reason"] = "weekly_remaining_unavailable"
-        return base
-    if isinstance(reset_at, bool) or not isinstance(reset_at, int):
-        base["reason"] = "weekly_reset_unavailable"
-        return base
-
-    remaining = max(0.0, min(100.0, float(remaining)))
-    base["weekly_remaining_percent"] = remaining
-    base["weekly_reset_at"] = reset_at
-
-    five = windows.get("5h") if isinstance(windows, dict) else None
-    five_remaining = five.get("remaining_percent") if isinstance(five, dict) else None
-    if snapshot.get("rate_limit_reached_type") or remaining <= 0 or (
-        isinstance(five_remaining, (int, float))
-        and not isinstance(five_remaining, bool)
-        and float(five_remaining) <= 0
-    ):
-        base.update({
-            "state": "EXHAUSTED",
-            "reason": "official_limit_reached",
-            "block_new_codex_rounds": True,
-        })
-        return base
-
-    proxy = snapshot.get("five_hour_proxy")
-    proxy_status = proxy.get("status") if isinstance(proxy, dict) else None
-    base["five_hour_proxy_status"] = proxy_status
-    if proxy_status != "ready":
-        base["reason"] = "short_window_not_ready"
-        return base
-
-    weekly_equivalent = proxy.get("weekly_equivalent_percent")
-    if isinstance(weekly_equivalent, bool) or not isinstance(weekly_equivalent, (int, float)):
-        base["reason"] = "short_window_rate_unavailable"
-        return base
-    weekly_equivalent = max(0.0, float(weekly_equivalent))
-
-    remaining_seconds = max(0.0, float(reset_at) - now)
-    projected = weekly_equivalent * (remaining_seconds / _FIVE_HOURS_SECONDS)
-    base["projected_weekly_burn_to_reset"] = round(projected, 3)
-    if projected > remaining:
-        base.update({
-            "state": "PRESSURE",
-            "reason": "recent_pace_exhausts_before_weekly_reset",
-            "block_new_codex_rounds": True,
-        })
-    else:
-        base.update({
-            "state": "NORMAL",
-            "reason": "recent_pace_within_weekly_headroom",
-        })
-    return base
-
-
 def reviewer_cost_policy(
-    quota: Dict[str, Any],
-    *,
-    dsh_available: bool,
-    dsh_quota_exhausted: bool = False,
+    *, dsh_available: bool, dsh_quota_exhausted: bool = False,
 ) -> Dict[str, Any]:
-    """Auto Reviewers use the supported isolated Codex backend."""
-    state = str(quota.get("state") or "UNKNOWN").upper()
-    codex_blocked = bool(quota.get("block_new_codex_rounds"))
-    backend = "chatgpt"
-    reason = "dsh_isolation_unavailable"
+    """Static isolated Reviewer choice; rate telemetry cannot pause or reroute."""
     return {
         "policy": "isolated_codex",
-        "quota_state": state,
-        "codex_blocked": codex_blocked,
         "dsh_available": bool(dsh_available),
         "dsh_quota_exhausted": bool(dsh_quota_exhausted),
-        "selected_backend": backend,
-        "reason": reason,
+        "selected_backend": "chatgpt",
+        "reason": "dsh_isolation_unavailable",
     }
 
 
@@ -153,6 +39,32 @@ def _all_plan_changes(graph: ResearchPlanGraph) -> List[Dict[str, Any]]:
     return [graph.get_change(path.stem) for path in sorted(graph.changes_dir.glob("*.json"))]
 
 
+def _contract_review_node(project_dir: Path, plan: Dict[str, Any],
+                          contract: Dict[str, Any]) -> str:
+    """Find an unambiguous frozen Reviewer predecessor of an experiment.
+
+    The bound V1 task is the independent contract approval. Never infer an
+    arbitrary Reviewer from worker availability or create a new Plan node.
+    """
+    from .autonomy import _task_spec
+
+    nodes = plan["nodes"]
+    target = nodes.get(str(contract.get("node_id") or "")) or {}
+    candidates = []
+    for predecessor in target.get("depends_on") or []:
+        node = nodes.get(predecessor)
+        if not node or node.get("state") != "ACTIVE":
+            continue
+        spec = _task_spec(project_dir, predecessor)
+        if (
+            spec.get("status") == "ready"
+            and spec.get("role") == "reviewer"
+            and "contract" in spec["task"].lower()
+        ):
+            candidates.append(predecessor)
+    return candidates[0] if len(candidates) == 1 else ""
+
+
 def build_supervisor_snapshot(project_dir: Path, worker_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Read the state needed by the deterministic Supervisor reducer once."""
     root = Path(project_dir)
@@ -160,8 +72,15 @@ def build_supervisor_snapshot(project_dir: Path, worker_rows: List[Dict[str, Any
     ledger = ProgressLedger(root)
     current_assignments = ledger.snapshot(refresh_stale=True)
     pending_plan_changes = graph.pending_changes()
+    plan = graph.snapshot()
+    contracts = ledger.implementation_contracts()
     return {
-        "plan": graph.snapshot(),
+        "plan": plan,
+        "contract_review_nodes": {
+            c["contract_id"]: node
+            for c in contracts
+            if (node := _contract_review_node(root, plan, c))
+        },
         "plan_changes": pending_plan_changes,
         "all_plan_changes": _all_plan_changes(graph),
         "current_assignments": current_assignments,
@@ -170,7 +89,7 @@ def build_supervisor_snapshot(project_dir: Path, worker_rows: List[Dict[str, Any
             for item in ledger.assignments()
         ],
         "completed_nodes": ledger.completed_nodes(),
-        "implementation_contracts": ledger.implementation_contracts(),
+        "implementation_contracts": contracts,
         "pending_implementation_contracts": ledger.pending_implementation_contracts(),
         "handoffs": HandoffRequests(ledger).all(),
         "workers": [dict(row) for row in worker_rows],
@@ -339,17 +258,35 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         for item in pending_implementation_contracts
         if active_route(str(item.get("node_id") or ""))
     ]
-    complete = bool(
+    # Main-directed ESCALATE records are durable operator obligations. An
+    # otherwise finished scientific Plan must not silently resolve them, but
+    # it must also not spin a Supervisor forever as if scientific work remains.
+    science_done = bool(
         plan.get("root_id") in completed
         and not frontier
         and not pending_plan_changes
         and not unresolved_implementation_contracts
-        and not pending_handoffs
         and not any(a.get("state") in {"ASSIGNED", "RUNNING", "BLOCKED"}
                     and active_route(str(a.get("node_id") or "")) for a in current_assignments)
     )
+    pending_main_escalations = [
+        item for item in pending_handoffs
+        if item["kind"] == "ESCALATE"
+        and item["target_role"] == "main"
+        and item["status"] == "OPEN"
+    ]
+    main_only = bool(
+        pending_handoffs
+        and len(pending_main_escalations) == len(pending_handoffs)
+    )
+    complete = science_done and not pending_handoffs
+    # ACTION_REQUIRED means science is finished; operator-request records
+    # remain OPEN, and the project is NOT governance-complete.
     project_state = (
-        "COMPLETE" if complete else "PAUSED" if snapshot.get("project_paused") else "RUNNING"
+        "COMPLETE" if complete
+        else "ACTION_REQUIRED" if science_done and main_only
+        else "PAUSED" if snapshot.get("project_paused")
+        else "RUNNING"
     )
 
     decisions: List[Dict[str, Any]] = []
@@ -476,7 +413,7 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     )
     if project_state == "PAUSED":
         decisions = []
-    elif project_state == "COMPLETE":
+    elif project_state in {"COMPLETE", "ACTION_REQUIRED"}:
         alive_workers = {
             str(row.get("worker") or "")
             for row in worker_rows
@@ -609,6 +546,8 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             extra: Dict[str, Any] = {}
             if kind == "INTERPRET":
                 summary = "interpretation request completed; source disposition remains explicit"
+            elif kind == "CLARIFY" and subject_type == "ASSIGNMENT":
+                summary = "target role answered the clarification; original Reviewer must resume its audit"
             elif kind == "RETHINK" and subject_type == "ASSIGNMENT":
                 summary = "assignment rethink completed; source disposition remains explicit"
             elif kind == "REVIEW" and subject_type == "ASSIGNMENT":
@@ -746,7 +685,8 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                         source_id = str(source.get("assignment_id") or "")
                     route(
                         "OPEN_HANDOFF",
-                        node_id=contract.get("node_id"),
+                        node_id=snapshot.get("contract_review_nodes", {}).get(contract_id)
+                                or contract.get("node_id"),
                         reason="implementation_contract_requires_review",
                         handoff_kind="REVIEW",
                         subject_type="IMPLEMENTATION_CONTRACT",
@@ -983,6 +923,8 @@ def reduce_supervisor_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     )
     return {
         "project_state": project_state,
+        "scientific_complete": science_done,
+        "pending_main_escalations": pending_main_escalations,
         "plan_version": plan_version,
         "plan_changes": pending_plan_changes,
         "frontier": frontier,

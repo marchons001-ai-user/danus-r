@@ -1,12 +1,25 @@
-"""Forward MCP stdio over an inherited capability FD; no store access."""
+"""Forward MCP stdio over a bound FD or one-shot Unix socket; no store access."""
 
 import os
 import selectors
+import socket
 import sys
 
 
 def main() -> int:
-    channel = int(sys.argv[1])
+    endpoint = None
+    if len(sys.argv) == 3 and sys.argv[1] == "--socket":
+        endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            endpoint.connect(sys.argv[2])
+        except OSError:
+            endpoint.close()
+            return 1
+        channel = endpoint.fileno()
+    elif len(sys.argv) == 2:
+        channel = int(sys.argv[1])
+    else:
+        return 2
     selector = selectors.DefaultSelector()
     selector.register(0, selectors.EVENT_READ, channel)
     selector.register(channel, selectors.EVENT_READ, 1)
@@ -21,7 +34,10 @@ def main() -> int:
     except OSError:
         return 1
     finally:
-        os.close(channel)
+        if endpoint is None:
+            os.close(channel)
+        else:
+            endpoint.close()
         selector.close()
 
 

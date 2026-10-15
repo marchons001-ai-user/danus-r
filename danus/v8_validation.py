@@ -1,0 +1,383 @@
+"""Small deterministic gate for V8 experiment evidence.
+
+A completed Worker is NOT a validated experiment. Only these host-side checks
+can write a validation verdict. Domain-specific checks must be supported by an
+approved executable verifier; a model's own PASS flags are not evidence.
+"""
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import math
+import re
+import shlex
+from pathlib import Path
+
+KINDS = {"asset_integrity", "csv_rows", "csv_mean", "v7_evidence", "checker_execution"}
+_ID = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def normalize_checks(raw):
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or len(raw) > 16:
+        raise ValueError("required_checks must be a list of at most 16 checks")
+    checks, names = [], set()
+    for item in raw:
+        if not isinstance(item, dict) or not _ID.fullmatch(str(item.get("id", ""))):
+            raise ValueError("each required check needs a stable lowercase id")
+        name, kind = item["id"], item.get("kind")
+        if kind == "checker_execution" and name != "checker_execution":
+            raise ValueError("checker_execution requires id checker_execution")
+        if kind == "checker_execution" and any(
+                x["kind"] == "checker_execution" for x in checks):
+            raise ValueError("only one checker_execution receipt is allowed")
+        if name in names or kind not in KINDS:
+            raise ValueError("duplicate check id or unsupported check kind")
+        names.add(name)
+        allowed = {
+            "asset_integrity": {"id", "kind"},
+            "checker_execution": ({"id", "kind", "path", "log_path"}
+                                  | ({"require_replay"} if "require_replay" in item else set())
+                                  | ({"checker_path"} if "checker_path" in item else set())),
+            "csv_rows": {"id", "kind", "path", "expected_rows"},
+            "csv_mean": {"id", "kind", "path", "column", "report_path",
+                         "report_key", "abs_tolerance"},
+            "v7_evidence": {"id", "kind", "evidence_ids", "scope", "protocol_id"},
+        }[kind]
+        if set(item) != allowed:
+            raise ValueError(f"{name}: check needs exactly {sorted(allowed)}")
+        if kind == "checker_execution" and "require_replay" in item:
+            if type(item["require_replay"]) is not bool:
+                raise ValueError("checker_execution require_replay must be boolean")
+        if kind == "csv_rows":
+            if not isinstance(item["expected_rows"], int) or isinstance(
+                    item["expected_rows"], bool) or item["expected_rows"] < 1:
+                raise ValueError("csv_rows requires positive expected_rows")
+        if kind == "csv_mean":
+            tolerance = item["abs_tolerance"]
+            if not isinstance(tolerance, (int, float)) or isinstance(
+                    tolerance, bool) or not math.isfinite(tolerance) or tolerance < 0:
+                raise ValueError("csv_mean requires finite nonnegative tolerance")
+        if kind == "v7_evidence":
+            ids = item["evidence_ids"]
+            if (not isinstance(ids, list) or not ids
+                    or not all(isinstance(x, str) and re.fullmatch(r"[0-9a-f]{16}", x)
+                               for x in ids)
+                    or not isinstance(item["scope"], dict) or not item["scope"]
+                    or not re.fullmatch(r"[0-9a-f]{16}", str(item["protocol_id"]))):
+                raise ValueError("v7_evidence requires pinned record IDs, scope and protocol ID")
+        for field in ("path", "report_path", "log_path", "checker_path"):
+            if field in item and (not isinstance(item[field], str)
+                                  or not item[field].strip()
+                                  or Path(item[field]).is_absolute()
+                                  or ".." in Path(item[field]).parts):
+                raise ValueError("check paths must be safe workspace-relative paths")
+        for field in ("column", "report_key"):
+            if field in item and (not isinstance(item[field], str)
+                                  or not item[field].strip()):
+                raise ValueError("csv_mean needs column and report_key")
+        checks.append(dict(item))
+    if sum(c["kind"] == "checker_execution" for c in checks) > 1:
+        raise ValueError("only one checker_execution receipt is allowed")
+    return checks
+
+
+def _direct_python_entrypoint(command, script, workspace):
+    """Accept only a directly executed Python script, never text mentioning one."""
+    if not isinstance(command, str):
+        return False
+    def tokens(value):
+        lexer = shlex.shlex(value, posix=True, punctuation_chars=";&|<>()")
+        lexer.whitespace_split = True
+        return list(lexer)
+    try:
+        words = tokens(command)
+        # Codex commonly records a single shell launch around the real command.
+        # Unwrap exactly one literal shell -c command; refuse shell evaluation.
+        if (len(words) == 3 and Path(words[0]).name in {"bash", "sh"}
+                and words[1] in {"-c", "-lc"}):
+            inner = words[2]
+            if any(char in inner for char in ("$", "`", "\n", "\r")):
+                return False
+            words = tokens(inner)
+    except ValueError:
+        return False
+    if len(words) >= 4 and words[0] == "cd" and words[2] == "&&":
+        if (workspace / words[1]).resolve() != workspace.resolve():
+            return False
+        words = words[3:]
+    if not words or any(x in {";", "&&", "||", "|", "&", ">", ">>", "<", "<<", "(", ")"} for x in words):
+        return False
+    if not re.fullmatch(r"python(?:3(?:\.\d+)?)?", Path(words[0]).name):
+        return False
+    args = words[1:]
+    while args and args[0] in {"-B", "-u", "-I", "-E", "-s"}:
+        args = args[1:]
+    if not args:
+        return False
+    supplied = args[0]
+    if supplied in {script, "./" + script}:
+        return True
+    return (Path(supplied).is_absolute()
+            and Path(supplied) == (workspace / script).resolve())
+
+
+def _checker_receipt(store, task_id, proposal, owned, source):
+    """Corroborate an approved --check run using HOST-owned Codex tool events.
+
+    A worker-authored run_log can disprove success, but cannot prove execution.
+    This gate confirms the entrypoint was actually invoked and exited zero;
+    scientific independence and checker semantics still require Reviewer audit.
+    """
+    explicit = [c for c in proposal.get("required_checks", [])
+                if c["kind"] == "checker_execution"]
+    if explicit:
+        check = explicit[0]
+        script = check["path"]
+        log_path = check["log_path"]
+        result = {"id": check["id"], "kind": "checker_execution"}
+    elif proposal.get("check_contract") == "explicit_v1":
+        return None  # New proposals never trigger a checker from prose.
+    else:
+        # Backward compatibility: immutable proposals approved before this schema.
+        plan = proposal.get("content", "")
+        if "--check" not in plan or "run_log.json" not in plan:
+            return None
+        result = {"id": "checker_execution", "kind": "checker_execution"}
+        candidates = re.findall(r"\bpython(?:3)?\s+(?:-B\s+)?([\w./-]+/run\.py)\b", plan)
+        scripts = {p for p in candidates if p in owned}
+        if len(scripts) != 1:
+            return {**result, "status": "INCOMPLETE",
+                    "detail": "legacy checker has no unique registered entrypoint"}
+        script = scripts.pop()
+        logs = [p for p in owned if p.endswith("/run_log.json")]
+        if len(logs) != 1:
+            return {**result, "status": "INCOMPLETE",
+                    "detail": "legacy checker requires one fresh run_log.json"}
+        log_path = logs[0]
+    def outcome(status, detail):
+        return {**result, "status": status, "detail": detail}
+
+    if script not in owned or log_path not in owned:
+        return outcome("INCOMPLETE", "approved checker entrypoint or run log is not registered")
+    try:
+        runlog = json.loads(source(log_path).read_text(encoding="utf-8"))
+    except (ValueError, OSError, UnicodeError) as exc:
+        return outcome("FAILED", f"run_log.json cannot be read: {exc}"[:1000])
+
+    exit_markers, failures, missing = [], [], []
+    child_exits = {"replay": [], "check": []}
+    checker_path = explicit[0].get("checker_path") if explicit else None
+    checker_abs = ((store.root / "workspace" / checker_path).resolve()
+                   if checker_path else None)
+    def receipt_exit(obj):
+        fields = [obj[key] for key in ("exit_code", "returncode", "return_code")
+                  if key in obj]
+        if not fields or any(type(value) is not int for value in fields):
+            return None
+        if len(set(fields)) != 1:
+            return "CONFLICT"
+        return fields[0]
+
+    def scan(obj, context=""):
+        if isinstance(obj, dict):
+            argv, args = obj.get("argv"), obj.get("args")
+            if isinstance(argv, list) and isinstance(args, list) and argv != args:
+                failures.append(context + ".conflicting_argv_args")
+            command = argv if isinstance(argv, list) else args
+            if isinstance(command, list):
+                if not command or any(not isinstance(part, str) for part in command):
+                    missing.append(context + ".invalid_child_command")
+                    command = []
+                script_names = {Path(part).name for part in command
+                                if isinstance(part, str) and part.endswith(".py")}
+                roles = []
+                if "--replay" in command:
+                    roles.append("replay")
+                if checker_path:
+                    check_match = any(
+                        isinstance(part, str) and part.endswith(".py")
+                        and (Path(part) == Path(checker_path)
+                             or (Path(part).is_absolute()
+                                 and Path(part).resolve() == checker_abs))
+                        for part in command)
+                else:
+                    check_match = ("--check" in argv
+                                   or bool(script_names & {"check.py", "checker.py"}))
+                if check_match:
+                    roles.append("check")
+                for role in roles:
+                    child_exits[role].append(receipt_exit(obj))
+                    context += "." + role
+            for key, value in obj.items():
+                name = str(key).lower()
+                full = context + "." + name
+                if (any(part in full for part in ("check", "replay", "parent"))
+                        and ("exit" in name or "returncode" in name
+                             or "return_code" in name)):
+                    exit_markers.append(full)
+                    if type(value) is not int:
+                        missing.append(full)
+                    elif value != 0:
+                        failures.append(f"{full}={value!r}")
+                if (any(part in full for part in ("check", "replay", "parent"))
+                        and "status" in name and isinstance(value, str)
+                        and value.upper() in ("FAILED", "INCOMPLETE", "ERROR")):
+                    failures.append(f"{full}={value!r}")
+                scan(value, full)
+        elif isinstance(obj, list):
+            for value in obj:
+                scan(value, context)
+    scan(runlog)
+    if failures:
+        return outcome("FAILED", "checker/parent reported non-success: " + ", ".join(failures)[:800])
+    if missing:
+        return outcome("INCOMPLETE", "run log has nonnumeric/missing exit evidence: " + ", ".join(missing)[:800])
+    if isinstance(runlog.get("children"), list):
+        children = runlog["children"]
+        if not children or any(not isinstance(child, dict) for child in children):
+            return outcome("INCOMPLETE", "run log has missing or malformed child receipts")
+        codes = [receipt_exit(child) for child in children]
+        if any(code == "CONFLICT" for code in codes):
+            return outcome("FAILED", "run log contains conflicting child exit fields")
+        if any(code is None for code in codes):
+            return outcome("INCOMPLETE", "run log has a child without a numeric exit code")
+        nonzero = [(i, code) for i, code in enumerate(codes) if code != 0]
+        if nonzero:
+            return outcome("FAILED", f"run log has nonzero child exits: {nonzero}"[:800])
+        replay_required = (not explicit or explicit[0].get("require_replay", False))
+        if (len(child_exits["check"]) != 1
+                or len(child_exits["replay"]) > 1
+                or (replay_required and len(child_exits["replay"]) != 1)):
+            return outcome(
+                "INCOMPLETE",
+                "run log lacks exactly one --check child or required --replay child")
+    if (isinstance(runlog, dict)
+            and any(k in runlog for k in ("returncode", "exit_code", "return_code"))):
+        parent = receipt_exit(runlog)
+        if parent == "CONFLICT" or (type(parent) is int and parent != 0):
+            return outcome("FAILED", "run log reports nonzero/conflicting wrapper exit")
+        if parent is None:
+            return outcome("INCOMPLETE", "run log wrapper exit is not numeric")
+    if not any("check" in marker for marker in exit_markers):
+        return outcome("INCOMPLETE", "run_log.json lacks numeric checker exit evidence")
+
+    # Codex --json output belongs to the host log directory, NOT to the
+    # Experimenter's writable workspace. Do not accept claimed counts alone.
+    traces = sorted((store.root / "logs").glob(task_id + "-*.jsonl"))
+    if len(traces) != 1:
+        return outcome("INCOMPLETE", "missing or ambiguous host-owned Codex execution trace")
+    observed = []
+    with traces[0].open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item = event.get("item") if event.get("type") == "item.completed" else None
+            if not isinstance(item, dict) or item.get("type") != "command_execution":
+                continue
+            if _direct_python_entrypoint(
+                    item.get("command", ""), script, store.root / "workspace"):
+                observed.append(item.get("exit_code"))
+    if not observed or any(type(code) is not int for code in observed):
+        return outcome("INCOMPLETE", "host trace has no completed entrypoint command with exit code")
+    if any(code != 0 for code in observed):
+        return outcome("FAILED", f"host-observed entrypoint exit codes: {observed}")
+    return outcome("PASSED", "host observed approved entrypoint exit 0; "
+                   "run log reports checker/parent exit 0; semantics require Reviewer")
+
+
+def run_gate(store, task_id, proposal, assets):
+    """Read only frozen approved checks and freshly registered output bytes."""
+    checks = proposal.get("required_checks") or []
+    owned = {p: a for p, a in assets.items() if a["task_id"] == task_id}
+    results = []
+    if not checks:
+        return {"status": "INCOMPLETE", "checks": [],
+                "reason": "Approved proposal has no executable mandatory validation checks"}
+    if not owned:
+        return {"status": "INCOMPLETE", "checks": [],
+                "reason": "Experiment registered no new output artifacts"}
+
+    def source(path):
+        if path not in owned:
+            raise FileNotFoundError(f"required fresh artifact not registered: {path}")
+        base = (store.root / "workspace").resolve()
+        actual = (base / path).resolve()
+        if not actual.is_relative_to(base) or not actual.is_file():
+            raise FileNotFoundError(f"required artifact missing: {path}")
+        expected = owned[path]
+        data = actual.read_bytes()
+        if (len(data) != expected["bytes"] or
+                hashlib.sha256(data).hexdigest() != expected["sha256"]):
+            raise ValueError(f"registered artifact changed: {path}")
+        return actual
+
+    for check in checks:
+        name, kind = check["id"], check["kind"]
+        if kind == "checker_execution":
+            continue  # Process once against the host-owned execution trace below.
+        try:
+            if kind == "asset_integrity":
+                # Every newly registered output must still match the executor
+                # transaction's SHA-256 and byte size.
+                for path in owned:
+                    source(path)
+                detail = f"checked {len(owned)} freshly registered output files"
+            elif kind == "csv_rows":
+                path = source(check["path"])
+                with path.open(newline="", encoding="utf-8") as f:
+                    count = sum(1 for _ in csv.DictReader(f))
+                if count != check["expected_rows"]:
+                    raise ValueError(f"row count {count} != {check['expected_rows']}")
+                detail = f"{check['path']}: {count} data rows"
+            elif kind == "csv_mean":
+                data_path = source(check["path"])
+                report_path = source(check["report_path"])
+                with data_path.open(newline="", encoding="utf-8") as f:
+                    values = [float(row[check["column"]]) for row in csv.DictReader(f)]
+                if not values or not all(math.isfinite(v) for v in values):
+                    raise ValueError("CSV mean requires finite nonempty numeric values")
+                actual = math.fsum(values) / len(values)
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                claimed = report[check["report_key"]]
+                if not isinstance(claimed, (int, float)) or not math.isfinite(claimed):
+                    raise ValueError("report metric must be finite numeric")
+                if abs(actual - claimed) > check["abs_tolerance"]:
+                    raise ValueError(f"metric mismatch: recomputed {actual}, reported {claimed}")
+                detail = f"{check['column']} independently recomputed over {len(values)} rows"
+            elif kind == "v7_evidence":
+                # Reuse V7's deterministic evidence checker, not its Plan DAG.
+                # The approved V7 protocol and immutable records must already
+                # exist. This does not certify bespoke scientific invariants.
+                from danus.verify.empirical import check_empirical_evidence
+                report = check_empirical_evidence(
+                    store.root, scope=check["scope"], evidence_refs=check["evidence_ids"])
+                if not report["passed"]:
+                    raise ValueError("; ".join(report["errors"])[:1000])
+                if any(rec.get("protocol_id") != check["protocol_id"]
+                       for rec in report["evidence_records"]):
+                    raise ValueError("V7 evidence does not match approved protocol identity")
+                detail = f"V7 verified {len(report['evidence_records'])} pinned evidence records"
+            results.append({"id": name, "kind": kind, "status": "PASSED", "detail": detail})
+        except (FileNotFoundError, KeyError) as exc:
+            results.append({"id": name, "kind": kind, "status": "INCOMPLETE",
+                            "detail": f"{type(exc).__name__}: {exc}"[:1000]})
+        except Exception as exc:
+            results.append({"id": name, "kind": kind, "status": "FAILED",
+                            "detail": f"{type(exc).__name__}: {exc}"[:1000]})
+    receipt = _checker_receipt(store, task_id, proposal, owned, source)
+    if receipt is not None:
+        results.append(receipt)
+    if any(r["status"] == "FAILED" for r in results):
+        status = "FAILED"
+    elif any(r["status"] == "INCOMPLETE" for r in results):
+        status = "INCOMPLETE"
+    else:
+        status = "PASSED"
+    return {"status": status, "checks": results,
+            "reason": "; ".join(f"{r['id']}: {r['detail']}" for r in results
+                              if r["status"] != "PASSED")[:2000]}

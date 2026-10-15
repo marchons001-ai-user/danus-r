@@ -66,6 +66,29 @@ def _task_spec(project_dir: Path, node_id: str) -> Dict[str, Any]:
     return {"status": "missing", "reason": "no_autonomous_task"}
 
 
+def _interpret_plan_target(project_dir: Path, source_node: str) -> str:
+    """Find one explicitly planned, direct Researcher interpreter for an experiment.
+
+    Ambiguous/missing planned interpreters retain the legacy handoff route.
+    Never infer authority from a model-provided Evidence ID or node name.
+    """
+    graph = ResearchPlanGraph(project_dir).snapshot()
+    completed = set(ProgressLedger(project_dir).completed_nodes())
+    candidates = []
+    for node_id, node in graph["nodes"].items():
+        if (node_id in completed or node.get("state") != "ACTIVE"
+            or source_node not in (node.get("depends_on") or [])):
+            continue
+        spec = _task_spec(project_dir, node_id)
+        if (spec.get("status") == "ready"
+            and spec.get("role") == "researcher"
+            and "experiment_evidence_get" in spec["task"]):
+            candidates.append(node_id)
+    if len(candidates) > 1:
+        raise ValueError("multiple planned Researcher interpreters for one experiment")
+    return candidates[0] if candidates else ""
+
+
 def _assignment_matches_current_node(
     graph: ResearchPlanGraph,
     assignment: Dict[str, Any],
@@ -91,6 +114,13 @@ def _auto_complete(
     if not current or current["worker"] != worker:
         return {"action": "AUTO_COMPLETE", "node_id": node_id, "worker": worker, "result": "assignment_changed"}
     if current.get("state") != "DONE" or current.get("outcome") != "COMPLETE":
+        return None
+    # Generic scientific-review assignments classify a blocked source; they
+    # are not Plan-node execution and must not be auto-completed as such.
+    handoff = (HandoffRequests(ledger).get(str(current.get("handoff_id") or ""))
+               if current.get("handoff_id") else None)
+    if (handoff and handoff.get("kind") == "REVIEW"
+        and handoff.get("subject_type") == "ASSIGNMENT"):
         return None
 
     spec = _task_spec(project_dir, node_id)
@@ -174,11 +204,12 @@ def _idle_worker(
     rows: List[Dict[str, Any]],
     reserved: set[str],
     role_of: Callable[[L.WorkerLayout], str],
+    *, retry_worker: str = "", retry_node: str = "", retry_outcome: str = "BLOCKED",
 ) -> Optional[L.WorkerLayout]:
     ledger = ProgressLedger(L.project_dir(project))
     rows_by_worker = {str(row.get("worker") or ""): row for row in rows}
     for worker in L.list_workers(project):
-        if worker in reserved:
+        if worker in reserved or (retry_worker and worker != retry_worker):
             continue
         wl = L.WorkerLayout(L.worker_dir(project, worker))
         if role_of(wl) != role or wl.pause.is_file():
@@ -187,6 +218,12 @@ def _idle_worker(
         if row.get("alive"):
             continue
         current = ledger.current(worker, refresh_stale=True)
+        if retry_worker:
+            if not (current and current.get("state") == "BLOCKED"
+                    and current.get("outcome") == retry_outcome
+                    and current.get("node_id") == retry_node):
+                continue
+            return wl
         if current and not (
             current.get("state") in _TERMINAL_ASSIGNMENT_STATES
             or (current.get("state") == "BLOCKED" and current.get("outcome") == "NEEDS_REVIEW")
@@ -270,6 +307,23 @@ def _dispatch_handoff(
             "result": current["status"].lower(),
         }
     role = str(current["target_role"])
+    if (
+        current.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+        and current.get("kind") == "REVIEW"
+    ):
+        contract = ledger.implementation_contract(str(current.get("subject_id") or ""))
+        if contract is None:
+            return {"handoff_id": current["handoff_id"], "result": "missing_contract"}
+        if current["node_id"] != contract["node_id"]:
+            # A frozen V1 reviewer task can only start after R1 is completed.
+            # The E1 experiment itself stays locked until this review resolves.
+            graph = ResearchPlanGraph(L.project_dir(project)).snapshot()
+            node = graph["nodes"].get(current["node_id"]) or {}
+            completed = set(ledger.completed_nodes())
+            if node.get("state") != "ACTIVE":
+                return {"handoff_id": current["handoff_id"], "result": "review_node_inactive"}
+            if any(dep not in completed for dep in node.get("depends_on") or []):
+                return {"handoff_id": current["handoff_id"], "result": "waiting_dependencies"}
     wl = _idle_worker(project, role, rows, reserved, role_of)
     if wl is None:
         return {
@@ -308,7 +362,14 @@ def _implementation_review_task(contract: Dict[str, Any]) -> str:
         "# Implementation Contract Review\n\n"
         f"Review implementation contract `{contract['contract_id']}` for Plan node "
         f"`{contract['node_id']}` under Plan v{contract['plan_version']}. Judge whether the exact "
-        "implementation task preserves the scientific/control invariants and acceptance conditions.\n\n"
+        "implementation task preserves scientific/control invariants AND is complete "
+        "enough for Experimenter to execute without inventing decision-relevant "
+        "scientific choices. Check the exact task for accessible data/split, "
+        "approved method/baseline, finite runs/seeds/stopping/resource policy, "
+        "primary metric definitions, decision rule, required outputs and evidence. "
+        "For each, record PASS/MISSING/NOT APPLICABLE with a rationale; REVISE "
+        "if a required input is missing. Danus-R's fixed Python/tool syntax is "
+        "provided by Experimenter's own role contract, not this scientific task.\n\n"
         f"{contract['task']}\n"
         f"Call `implementation_review_contract(contract_id=\"{contract['contract_id']}\", "
         "verdict=<APPROVE|REVISE|REJECT>, rationale=<specific rationale>)` exactly once. "
@@ -361,7 +422,7 @@ def _generic_review_task(source: Dict[str, Any]) -> str:
 def _routing_label(action: Dict[str, Any]) -> str:
     subject_type = str(action.get("subject_type") or "")
     kind = str(action.get("handoff_kind") or "")
-    if kind in {"INTERPRET", "RETHINK"}:
+    if kind in {"INTERPRET", "RETHINK", "CLARIFY"}:
         return kind
     if subject_type == "IMPLEMENTATION_CONTRACT":
         return "IMPLEMENTATION_REVIEW" if kind == "REVIEW" else "IMPLEMENTATION_CORRECTION"
@@ -391,11 +452,24 @@ def _open_nonplan_handoff(
         contract = ledger.implementation_contract(subject_id)
         if contract is None:
             return None
-        request = (
-            _implementation_review_task(contract)
-            if kind == "REVIEW"
-            else _implementation_correction_task(contract, kind)
-        )
+        if kind == "REVIEW" and str(action["node_id"]) != contract["node_id"]:
+            from .control import _contract_review_node
+
+            graph = ResearchPlanGraph(ledger.root).snapshot()
+            expected = _contract_review_node(ledger.root, graph, contract)
+            if expected != str(action["node_id"]):
+                raise ValueError("contract REVIEW must bind the exact frozen Reviewer predecessor")
+            spec = _task_spec(ledger.root, expected)
+            # HandoffRequests.open() appends exactly one terminal newline.
+            # Preserve the complete frozen V1 task byte-for-byte so AUTO_COMPLETE
+            # can check its task hash and close the V1 Plan node.
+            request = spec["task"][:-1]
+        else:
+            request = (
+                _implementation_review_task(contract)
+                if kind == "REVIEW"
+                else _implementation_correction_task(contract, kind)
+            )
         reason = {
             "REVIEW": "implementation contract requires independent review",
             "REVISION": "reviewer requested implementation contract revision",
@@ -425,26 +499,22 @@ def _open_nonplan_handoff(
     )
 
 
-def _apply_routing_actions(
+def _apply_routing_events(
     project: str,
     actions: List[Dict[str, Any]],
-    *,
-    rows: List[Dict[str, Any]],
-    reserved: set[str],
-    assign: Callable[..., Dict[str, Any]],
-    start: Callable[[L.WorkerLayout], str],
-    role_of: Callable[[L.WorkerLayout], str],
 ) -> List[Dict[str, Any]]:
-    """Execute reducer-owned Contract/Handoff actions; Plan actions stay in planning.py."""
+    """Advance control-plane Handoffs. Never allocate workers here.
+
+    The authoritative dispatch queue is built *after* Handoff mutations, from
+    a fresh reducer snapshot. Plan and Contract do not own separate schedulers.
+    """
     ledger = ProgressLedger(L.project_dir(project))
     handoffs = HandoffRequests(ledger)
     applied: List[Dict[str, Any]] = []
-
     for action in actions:
         kind = str(action.get("kind") or "")
         if action.get("subject_type") == "PLAN_CHANGE" or kind == "COMMIT_PLAN_CHANGE":
             continue
-
         if kind == "WAIT" and action.get("reason") == "escalation_pending_main":
             applied.append({
                 "action": "ESCALATE",
@@ -453,16 +523,13 @@ def _apply_routing_actions(
                 "result": "pending_main",
             })
             continue
-
         if kind == "REOPEN_HANDOFF":
             current = handoffs.get(str(action.get("handoff_id") or ""))
             assignment_id = str(action.get("assignment_id") or "")
             if current and current.get("status") == "ASSIGNED" and assignment_id:
                 current = handoffs.reopen(
-                    current["handoff_id"],
-                    assignment_id=assignment_id,
-                    actor="supervisor",
-                    reason="handoff assignment became stale",
+                    current["handoff_id"], assignment_id=assignment_id,
+                    actor="supervisor", reason="handoff assignment became stale",
                 )
                 applied.append({
                     "action": _routing_label(action),
@@ -470,15 +537,13 @@ def _apply_routing_actions(
                     "result": "reopened",
                 })
             continue
-
         if kind == "RESOLVE_HANDOFF":
             current = handoffs.get(str(action.get("handoff_id") or ""))
             assignment_id = str(action.get("assignment_id") or "")
             assignment = _assignment_by_id(ledger, assignment_id)
             if current and current.get("status") == "ASSIGNED" and assignment:
                 current = handoffs.resolve(
-                    current["handoff_id"],
-                    assignment_id=assignment_id,
+                    current["handoff_id"], assignment_id=assignment_id,
                     actor=str(assignment.get("worker") or "supervisor"),
                     summary=str(action.get("summary") or "handoff work completed"),
                 )
@@ -491,80 +556,585 @@ def _apply_routing_actions(
                     item["replacement_contract_id"] = action["replacement_contract_id"]
                 applied.append(item)
             continue
-
         if kind == "OPEN_HANDOFF":
             current = _open_nonplan_handoff(ledger, handoffs, action)
-            if current is None:
-                continue
-            routed = _dispatch_handoff(
-                project,
-                current,
-                rows=rows,
-                reserved=reserved,
-                assign=assign,
-                start=start,
-                role_of=role_of,
-            )
-            applied.append({"action": _routing_label(action), **routed})
-            continue
-
-        if kind == "ASSIGN_HANDOFF":
-            current = handoffs.get(str(action.get("handoff_id") or ""))
-            if current is None:
-                continue
-            routed = _dispatch_handoff(
-                project,
-                current,
-                rows=rows,
-                reserved=reserved,
-                assign=assign,
-                start=start,
-                role_of=role_of,
-            )
-            applied.append({"action": _routing_label({**action, "handoff_kind": current.get("kind")}), **routed})
-            continue
-
-        if kind != "ASSIGN_CONTRACT":
-            continue
-        contract = ledger.implementation_contract(str(action.get("contract_id") or ""))
-        if contract is None:
-            continue
-        wl = _idle_worker(project, "experimenter", rows, reserved, role_of)
-        if wl is None:
-            applied.append({
-                "action": "IMPLEMENTATION_ASSIGN",
-                "contract_id": contract["contract_id"],
-                "role": "experimenter",
-                "result": "no_idle_worker",
-            })
-            continue
-        try:
-            assignment = assign(
-                f"{project}/{wl.name}",
-                contract["task"],
-                node_id=contract["node_id"],
-            )
-        except SystemExit as exc:
-            applied.append({
-                "action": "IMPLEMENTATION_ASSIGN",
-                "contract_id": contract["contract_id"],
-                "role": "experimenter",
-                "worker": wl.name,
-                "result": "blocked",
-                "reason": str(exc),
-            })
-            continue
-        reserved.add(wl.name)
-        applied.append({
-            "action": "IMPLEMENTATION_ASSIGN",
-            "contract_id": contract["contract_id"],
-            "role": "experimenter",
-            "worker": wl.name,
-            "assignment_id": assignment.get("assignment_id"),
-            "result": "assigned",
-            "start_result": start(wl),
-        })
+            if current is not None:
+                applied.append({
+                    "action": _routing_label(action),
+                    "handoff_id": current["handoff_id"],
+                    "result": "opened" if current["status"] == "OPEN" else "existing",
+                })
     return applied
+
+
+def dispatch_explicit(
+    project: str, role: str, task: str, node_id: str, *,
+    handoff_id: str = "",
+    rows: Optional[List[Dict[str, Any]]] = None,
+    reserved: Optional[set[str]] = None,
+    assign: Optional[Callable[..., Dict[str, Any]]] = None,
+    start: Optional[Callable[[L.WorkerLayout], str]] = None,
+    role_of: Optional[Callable[[L.WorkerLayout], str]] = None,
+    action: str = "PLAN_ASSIGN",
+    retry_worker: str = "", retry_node: str = "", retry_outcome: str = "BLOCKED",
+) -> Dict[str, Any]:
+    """Shared allocation/claim/launch primitive for all research tasks.
+
+    Legacy bootstrap/repair, Plan Review and reducer-authorized queued work
+    use the same atomic ProgressLedger.bind and worker ownership rules. The
+    callers must supply their *governed* task and its Plan/Handoff identity.
+    """
+    from . import cli as CLI
+
+    if rows is None:
+        rows = CLI._project_rows(project)
+    if reserved is None:
+        reserved = set()
+    if assign is None:
+        assign = CLI.do_assign
+    if start is None:
+        start = CLI._start_one
+    if role_of is None:
+        role_of = CLI._read_worker_role
+    wl = _idle_worker(project, role, rows, reserved, role_of,
+                      retry_worker=retry_worker, retry_node=retry_node,
+                      retry_outcome=retry_outcome)
+    if wl is None:
+        return {"action": action, "role": role, "node_id": node_id, "result": "no_idle_worker"}
+    try:
+        record = assign(
+            f"{project}/{wl.name}", task, node_id=node_id,
+            **({"handoff_id": handoff_id} if handoff_id else {}),
+        )
+    except (SystemExit, ValueError) as exc:
+        return {"action": action, "role": role, "node_id": node_id,
+                "worker": wl.name, "result": "blocked", "reason": str(exc)}
+    reserved.add(wl.name)
+    return {
+        "action": action, "role": role, "node_id": node_id,
+        "worker": wl.name, "assignment_id": record.get("assignment_id"),
+        **({"handoff_id": handoff_id} if handoff_id else {}),
+        "result": "assigned", "start_result": start(wl),
+    }
+
+
+def _dispatch_candidates(
+    project: str,
+    *,
+    rows: List[Dict[str, Any]],
+    assign: Callable[..., Dict[str, Any]],
+    start: Callable[[L.WorkerLayout], str],
+    role_of: Callable[[L.WorkerLayout], str],
+) -> List[Dict[str, Any]]:
+    """One arbitration point for every worker assignment.
+
+    Read the *current* Plan, Contract and Handoff states and translate their
+    authorized ready work into one queue. The queue is advisory: the existing
+    ledger.assign() enforces Plan/Contract/Handoff identity atomically.
+    """
+    from .control import build_supervisor_snapshot, reduce_supervisor_snapshot, _contract_review_node
+
+    root = L.project_dir(project)
+    graph = ResearchPlanGraph(root).snapshot()
+    ledger = ProgressLedger(root)
+    contracts = ledger.pending_implementation_contracts()
+    review_reserved = {
+        predecessor
+        for contract in contracts
+        if str(contract.get("gate_status") or contract.get("status") or "") == "PROPOSED"
+        if (predecessor := _contract_review_node(root, graph, contract))
+    }
+    contract_targets = {str(c.get("node_id") or "") for c in contracts}
+    reduction = reduce_supervisor_snapshot(build_supervisor_snapshot(root, rows))
+    complete = set(ledger.completed_nodes())
+
+    # A common JSON envelope; no item is executable until the reducer
+    # authorized it and the ledger accepts the exact durable binding.
+    queue: List[Dict[str, Any]] = []
+    deferred: List[Dict[str, Any]] = []
+    for action in reduction["actions"]:
+        kind = action.get("kind")
+        if kind == "ASSIGN_HANDOFF":
+            handoff = HandoffRequests(ledger).get(str(action.get("handoff_id") or ""))
+            if not handoff or handoff.get("status") != "OPEN":
+                continue
+            node_id = str(handoff["node_id"])
+            node = graph["nodes"].get(node_id)
+            if node is None or node.get("state") != "ACTIVE":
+                continue
+            missing = sorted(
+                dep for dep in (node.get("depends_on") or [])
+                if dep not in complete
+            ) if node_id != graph["root_id"] else []
+            if missing:
+                deferred.append({
+                    "action": "IMPLEMENTATION_REVIEW"
+                              if handoff.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                              else "HANDOFF",
+                    "node_id": node_id,
+                    "handoff_id": handoff["handoff_id"],
+                    "role": handoff["target_role"],
+                    "result": "waiting_dependencies",
+                    "missing_dependencies": missing,
+                })
+                continue
+            queue.append({
+                "version": 1, "kind": "HANDOFF", "node_id": node_id,
+                "role": handoff["target_role"], "task": handoff["request"],
+                "handoff_id": handoff["handoff_id"], "priority": 0,
+            })
+        elif kind == "ASSIGN_CONTRACT":
+            contract = ledger.implementation_contract(str(action.get("contract_id") or ""))
+            if not contract or str(contract.get("gate_status") or contract.get("status")) != "APPROVE":
+                continue
+            node_id = str(contract["node_id"])
+            node = graph["nodes"].get(node_id)
+            if node is None or node.get("state") != "ACTIVE" or any(
+                dep not in complete for dep in node.get("depends_on") or []
+            ):
+                continue
+            queue.append({
+                "version": 1, "kind": "CONTRACT", "node_id": node_id,
+                "role": "experimenter", "task": contract["task"],
+                "contract_id": contract["contract_id"], "priority": 1,
+            })
+    for decision in reduction["decisions"]:
+        if (
+            decision.get("action") != "RETASK"
+            or decision.get("worker") is not None
+            or decision.get("reason") != "ready_node_unassigned"
+        ):
+            continue
+        node_id = str(decision.get("node_id") or "")
+        if node_id in review_reserved or node_id in contract_targets:
+            continue
+        spec = _task_spec(root, node_id)
+        if spec.get("status") == "ready":
+            queue.append({
+                "version": 1, "kind": "PLAN_NODE", "node_id": node_id,
+                "role": spec["role"], "task": spec["task"],
+                "task_spec": spec["path"], "priority": 2,
+            })
+        elif spec.get("status") == "invalid":
+            queue.append({
+                "version": 1, "kind": "INVALID", "node_id": node_id,
+                "reason": spec.get("reason"), "priority": 3,
+            })
+
+    # A Worker Result may express a preference among *already authorized*
+    # candidates, never invent a route or bypass its priority/gates.
+    from .intent import terminal_intents
+
+    hints = {
+        (str(e["next_intent"].get("kind") or ""),
+         str(e["next_intent"].get("subject_id") or ""))
+        for e in terminal_intents(root)
+    }
+    handoff_cache = {
+        h["handoff_id"]: h for h in HandoffRequests(ledger).all()
+    }
+
+    def intent_rank(item: Dict[str, Any]) -> int:
+        if item["kind"] == "HANDOFF":
+            handoff = handoff_cache.get(item["handoff_id"]) or {}
+            category = (
+                "REVIEW_CONTRACT" if handoff.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                else "REVIEW_PLAN" if handoff.get("subject_type") == "PLAN_CHANGE"
+                else ""
+            )
+            return 0 if (category, str(handoff.get("subject_id") or "")) in hints else 1
+        if item["kind"] == "CONTRACT":
+            return 0 if ("RUN_EXPERIMENT", item["contract_id"]) in hints else 1
+        if item["kind"] == "PLAN_NODE":
+            return 0 if ("RUN_NODE", item["node_id"]) in hints else 1
+        return 1
+
+    queue.sort(key=lambda item: (
+        item["priority"], intent_rank(item), str(item.get("node_id") or ""),
+        str(item.get("handoff_id") or item.get("contract_id") or ""),
+    ))
+    reserved_workers: set[str] = set()
+    dispatched_nodes: set[str] = set()
+    applied: List[Dict[str, Any]] = []
+
+    for item in queue:
+        kind = item["kind"]
+        node_id = item["node_id"]
+        if kind == "HANDOFF":
+            source = handoff_cache.get(item["handoff_id"]) or {}
+            action_name = (
+                "IMPLEMENTATION_REVIEW"
+                if source.get("subject_type") == "IMPLEMENTATION_CONTRACT"
+                else "HANDOFF"
+            )
+            if source.get("kind") in {"INTERPRET", "RETHINK", "CLARIFY"}:
+                action_name = source["kind"]
+        else:
+            action_name = {
+                "CONTRACT": "IMPLEMENTATION_ASSIGN",
+                "PLAN_NODE": "AUTO_DISPATCH",
+                "INVALID": "AUTO_DISPATCH",
+            }[kind]
+        if kind == "INVALID":
+            applied.append({"action": action_name, "node_id": node_id,
+                            "result": "blocked", "reason": item.get("reason")})
+            continue
+        if node_id in dispatched_nodes:
+            applied.append({"action": action_name, "node_id": node_id,
+                            "result": "already_scheduled"})
+            continue
+        result = dispatch_explicit(
+            project, item["role"], item["task"], node_id,
+            handoff_id=item.get("handoff_id", ""),
+            rows=rows, reserved=reserved_workers, assign=assign,
+            start=start, role_of=role_of, action=action_name,
+        )
+        if result["result"] == "assigned":
+            dispatched_nodes.add(node_id)
+        result.update({
+            **({"contract_id": item["contract_id"]} if kind == "CONTRACT" else {}),
+            **({"task_spec": item["task_spec"]} if kind == "PLAN_NODE" else {}),
+        })
+        applied.append(result)
+    return deferred + applied
+
+
+
+def retry_blocked_review(project: str) -> Dict[str, Any]:
+    """Retry one blocked Reviewer after an explicit operator restart."""
+    from . import cli as CLI
+
+    root = L.project_dir(project)
+    ledger = ProgressLedger(root)
+    plan = ResearchPlanGraph(root).snapshot()
+    candidates = [
+        a for a in ledger.snapshot(refresh_stale=True)
+        if a.get("role") == "reviewer"
+        and a.get("state") == "BLOCKED" and a.get("outcome") == "BLOCKED"
+        and not ledger._is_plan_stale(a)
+    ]
+    if len(candidates) != 1:
+        raise ValueError("retry requires exactly one blocked Reviewer assignment")
+    source = candidates[0]
+    node_id = source["node_id"]
+    node = plan["nodes"].get(node_id)
+    completed = set(ledger.completed_nodes())
+    if (
+        node is None or node.get("state") != "ACTIVE"
+        or node_id in completed
+        or any(dep not in completed for dep in node.get("depends_on") or [])
+        or any(item.get("parent") == node_id and item.get("state") == "ACTIVE"
+               for item in plan["nodes"].values())
+    ):
+        raise ValueError("blocked Reviewer Plan node is not ready for retry")
+    spec = _task_spec(root, node_id)
+    if (spec.get("status") != "ready" or spec.get("role") != "reviewer"
+            or ProgressLedger.task_sha256(spec["task"]) != source.get("task_sha256")):
+        raise ValueError("blocked Reviewer task changed since its Assignment")
+    if any(
+        h.get("node_id") == node_id and h.get("status") in {"OPEN", "ASSIGNED"}
+        and h.get("subject_type") == "ASSIGNMENT"
+        and h.get("subject_id") == source["assignment_id"]
+        for h in HandoffRequests(ledger).all()
+    ):
+        raise ValueError("blocked Reviewer's escalation is still pending")
+    # Only this Supervisor-owned pause is recoverable. Manual, budget and
+    # quota pauses are never cleared by an audit retry.
+    wl = L.WorkerLayout(L.worker_dir(project, source["worker"]))
+    rows = CLI._project_rows(project)
+    worker_row = next((row for row in rows if row.get("worker") == source["worker"]), None)
+    if (root / L.PAUSE_FILE).exists() or worker_row is None or worker_row.get("alive"):
+        raise ValueError("blocked Reviewer worker or project is still running or paused")
+    pause_reason = CLI._pause_reason(wl)
+    if pause_reason not in {None, "review:assignment_blocked"}:
+        raise ValueError(f"blocked Reviewer has unrelated pause: {pause_reason}")
+    if pause_reason:
+        wl.pause.unlink()
+        rows = CLI._project_rows(project)
+    result = dispatch_explicit(
+        project, "reviewer", spec["task"], node_id,
+        rows=rows, assign=CLI.do_assign, start=CLI._start_one,
+        role_of=CLI._read_worker_role, action="RETRY_BLOCKED_REVIEW",
+        retry_worker=source["worker"], retry_node=node_id,
+    )
+    if result.get("result") != "assigned":
+        raise ValueError("blocked Reviewer retry failed: " + str(result))
+    return result
+
+
+
+def recover_review_after_provenance_fix(project: str) -> Dict[str, Any]:
+    """Explicitly re-audit a blocked Reviewer after a validated provenance-access fix.
+
+    This does not accept a scientific conclusion or reopen/complete a Plan node.
+    The historical NEEDS_REVIEW and ESCALATE remain in append-only records.
+    No ordinary or unrelated main escalation may be cleared by this route.
+    """
+    from . import cli as CLI
+    from danus.execution.loop import _review_governance_context
+    from danus.core.evidence import EvidenceStore
+
+    root = L.project_dir(project)
+    graph = ResearchPlanGraph(root)
+    plan = graph.snapshot()
+    ledger = ProgressLedger(root)
+    sources = [
+        a for a in ledger.snapshot(refresh_stale=True)
+        if a.get("role") == "reviewer"
+        and a.get("state") == "BLOCKED"
+        and a.get("outcome") == "NEEDS_REVIEW"
+        and not ledger._is_plan_stale(a)
+    ]
+    if len(sources) != 1:
+        raise ValueError("provenance recovery requires exactly one current NEEDS_REVIEW Reviewer")
+    source = sources[0]
+    node_id = source["node_id"]
+    node = plan["nodes"].get(node_id)
+    done = set(ledger.completed_nodes())
+    if (node is None or node.get("state") != "ACTIVE" or node_id in done
+        or any(dep not in done for dep in node.get("depends_on") or [])
+        or any(n.get("parent") == node_id and n.get("state") == "ACTIVE"
+               for n in plan["nodes"].values())):
+        raise ValueError("Reviewer node is not ready for an unchanged re-audit")
+    spec = _task_spec(root, node_id)
+    if (spec.get("status") != "ready" or spec.get("role") != "reviewer"
+        or ProgressLedger.task_sha256(spec["task"]) != source.get("task_sha256")):
+        raise ValueError("Reviewer frozen task changed")
+
+    # Validate the *committed* post-hoc change and its actual review authority.
+    change_id = str(plan.get("committed_change_id") or "")
+    if not change_id:
+        raise ValueError("no committed Plan change provides provenance")
+    change = graph.get_change(change_id)
+    if (change.get("status") != "COMMITTED"
+        or change.get("review_verdict") != "APPROVE"
+        or not change.get("post_hoc")
+        or not change.get("review_assignment_id")
+        or not change.get("evidence_refs")
+        or graph.committed_version(change, plan) != plan["plan_version"]):
+        raise ValueError("committed post-hoc Plan provenance is not valid for recovery")
+    graph._require_completed_review(change)
+    store = EvidenceStore(root)
+    if any(store.get_record(str(eid)) is None for eid in change["evidence_refs"]):
+        raise ValueError("committed Plan provenance references missing evidence")
+    context = _review_governance_context(project, "reviewer", source["worker"])
+    if "<TRUSTED_PLAN_PROVENANCE>" not in context:
+        raise ValueError("the updated Reviewer task does not receive verified Plan provenance")
+
+    handoffs = HandoffRequests(ledger)
+    related = [
+        h for h in handoffs.all()
+        if h.get("subject_type") == "ASSIGNMENT"
+        and h.get("subject_id") == source["assignment_id"]
+        and h.get("node_id") == node_id
+    ]
+    pending = [h for h in related if h.get("status") in {"OPEN", "ASSIGNED"}]
+    retriable_cancellation = [
+        h for h in related
+        if h.get("status") == "CANCELLED"
+        and h.get("terminal_reason") ==
+        "source re-audit authorized after verified committed Plan provenance became available"
+    ]
+    # A previous attempt may have retired the handoff but failed to launch.
+    # Permit only that exact interrupted recovery, never an arbitrary cancellation.
+    if len(pending) == 1:
+        handoff = pending[0]
+    elif not pending and len(retriable_cancellation) == 1:
+        handoff = retriable_cancellation[0]
+    else:
+        raise ValueError("requires one pending escalation or precisely one interrupted recovery")
+    if (handoff.get("kind") != "ESCALATE"
+        or handoff.get("target_role") != "main"
+        or handoff.get("status") not in {"OPEN", "CANCELLED"}
+        or handoff.get("source_role") != "reviewer"
+        or int(handoff.get("plan_version") or 0) != plan["plan_version"]):
+        raise ValueError("pending escalation is not a recoverable Reviewer provenance request")
+    reason = str(handoff.get("reason") or "").lower() + " " + str(source.get("result") or "").lower()
+    if not any(term in reason for term in ("provenance", "revision", "plan change", "plan v3")):
+        raise ValueError("the escalation does not identify a Plan provenance problem")
+
+    wl = L.WorkerLayout(L.worker_dir(project, source["worker"]))
+    rows = CLI._project_rows(project)
+    row = next((r for r in rows if r.get("worker") == source["worker"]), None)
+    if (root / L.PAUSE_FILE).exists() or row is None or row.get("alive"):
+        raise ValueError("Reviewer or project is still running or paused")
+    pause_reason = CLI._pause_reason(wl)
+    if pause_reason not in {None, "review:assignment_needs_review"}:
+        raise ValueError(f"unrelated Reviewer pause cannot be cleared: {pause_reason}")
+
+    # Do not mislabel an unanswered main escalation as resolved. Retire only
+    # this outdated request and ask the Reviewer to decide again independently.
+    if handoff["status"] == "OPEN":
+        handoffs.cancel(
+            handoff["handoff_id"], actor="supervisor",
+            reason="source re-audit authorized after verified committed Plan provenance became available",
+        )
+    if pause_reason:
+        wl.pause.unlink()
+        rows = CLI._project_rows(project)
+    result = dispatch_explicit(
+        project, "reviewer", spec["task"], node_id,
+        rows=rows, assign=CLI.do_assign, start=CLI._start_one,
+        role_of=CLI._read_worker_role, action="RETRY_PLAN_PROVENANCE_REVIEW",
+        retry_worker=source["worker"], retry_node=node_id,
+        retry_outcome="NEEDS_REVIEW",
+    )
+    if result.get("result") != "assigned":
+        raise ValueError("Reviewer recovery dispatch failed: " + str(result))
+    return {**result, "retired_handoff_id": handoff["handoff_id"],
+            "previous_assignment_id": source["assignment_id"],
+            "validated_change_id": change_id}
+
+
+
+def recover_premature_proposal_review(project: str, *, token_budget: int = 0) -> Dict[str, Any]:
+    """Retry only a Researcher who prematurely requested review of a saved proposal.
+
+    The planned downstream Reviewer remains responsible for scientific approval.
+    Retire the obsolete main escalation, retain immutable history, and reassign
+    the identical Researcher task. Never mark a node or verdict complete here.
+    """
+    import re
+    from . import cli as CLI
+    from .control import generic_review_class
+
+    root = L.project_dir(project)
+    plan = ResearchPlanGraph(root).snapshot()
+    ledger = ProgressLedger(root)
+    active = [
+        a for a in ledger.snapshot(refresh_stale=True)
+        if a.get("role") == "researcher"
+        and a.get("state") == "BLOCKED"
+        and a.get("outcome") == "NEEDS_REVIEW"
+        and not ledger._is_plan_stale(a)
+    ]
+    if len(active) != 1:
+        raise ValueError("recovery requires exactly one current blocked Researcher")
+    source = active[0]
+    node_id = str(source["node_id"])
+    node = plan["nodes"].get(node_id)
+    complete = set(ledger.completed_nodes())
+    if (node is None or node.get("state") != "ACTIVE"
+        or node_id in complete
+        or any(dep not in complete for dep in node.get("depends_on") or [])
+        or any(n.get("parent") == node_id and n.get("state") == "ACTIVE"
+               for n in plan["nodes"].values())):
+        raise ValueError("blocked Researcher node is not a ready executable leaf")
+    spec = _task_spec(root, node_id)
+    if (spec.get("status") != "ready" or spec.get("role") != "researcher"
+        or ProgressLedger.task_sha256(spec["task"]) != source.get("task_sha256")):
+        raise ValueError("Researcher frozen task differs from blocked Assignment")
+
+    # A separate independent Reviewer node must already exist in the Plan.
+    # This recovery is not a substitute for its approval or a new Plan change.
+    reviews = [
+        nid for nid, item in plan["nodes"].items()
+        if item.get("state") == "ACTIVE"
+        and node_id in (item.get("depends_on") or [])
+        and nid not in complete
+        and _task_spec(root, nid).get("role") == "reviewer"
+    ]
+    if not reviews:
+        raise ValueError("no planned downstream Reviewer for the saved Research Proposal")
+
+    # Check the cited deliverable exists inside the project's bound workspace.
+    # Existence does not certify scientific validity: the downstream Reviewer does.
+    result_text = str(source.get("result") or "")
+    workspace = L.scientific_workspace(root).resolve()
+    linked = re.findall(r"\]\(([^)\n]+\.md)\)", result_text)
+    artifacts = []
+    for value in linked:
+        candidate = Path(value)
+        candidate = (candidate if candidate.is_absolute() else workspace / candidate).resolve()
+        if (candidate.is_relative_to(workspace)
+            and candidate.is_file()
+            and "proposals" in candidate.parts):
+            artifacts.append(candidate)
+    if not artifacts or "proposal" not in result_text.lower():
+        raise ValueError("blocked Researcher did not persist a cited proposal artifact")
+
+    handoffs = HandoffRequests(ledger)
+    related = [
+        h for h in handoffs.all()
+        if h.get("subject_type") == "ASSIGNMENT"
+        and h.get("subject_id") == source["assignment_id"]
+        and h.get("node_id") == node_id
+    ]
+    generic = [
+        h for h in related
+        if h.get("kind") == "REVIEW" and h.get("status") == "RESOLVED"
+    ]
+    if len(generic) != 1:
+        raise ValueError("recovery requires exactly one resolved generic Reviewer handoff")
+    review = generic[0]
+    review_assignment = _assignment_by_id(
+        ledger, str(review.get("resolution_assignment_id") or "")
+    )
+    if (not review_assignment
+        or review_assignment.get("role") != "reviewer"
+        or not _assignment_complete(review_assignment)
+        or generic_review_class(review_assignment) != "SCIENTIFIC_AMBIGUITY"):
+        raise ValueError("generic Reviewer result is not a valid scientific ambiguity classification")
+
+    pending = [h for h in related if h.get("status") in {"OPEN", "ASSIGNED"}]
+    retired_reason = "premature proposal review: defer scientific approval to existing Reviewer node"
+    cancelled = [
+        h for h in related
+        if h.get("status") == "CANCELLED"
+        and h.get("terminal_reason") == retired_reason
+    ]
+    if len(pending) == 1:
+        escalation = pending[0]
+    elif not pending and len(cancelled) == 1:
+        escalation = cancelled[0]  # Interrupted attempt before dispatch.
+    else:
+        raise ValueError("requires exactly one pending main escalation or interrupted recovery")
+    if (escalation.get("kind") != "ESCALATE"
+        or escalation.get("target_role") != "main"
+        or escalation.get("source_role") != "researcher"
+        or str(escalation.get("source_assignment_id") or "") != source["assignment_id"]
+        or int(escalation.get("plan_version") or 0) != plan["plan_version"]
+        or str(escalation.get("reason") or "") != "restricted supervisor selected escalate"):
+        raise ValueError("pending handoff is not the expected premature proposal escalation")
+    if any(h.get("status") in {"OPEN", "ASSIGNED"} for h in related if h != escalation):
+        raise ValueError("other unresolved source handoffs prevent recovery")
+
+    wl = L.WorkerLayout(L.worker_dir(project, source["worker"]))
+    rows = CLI._project_rows(project)
+    row = next((r for r in rows if r.get("worker") == source["worker"]), None)
+    if (root / L.PAUSE_FILE).exists() or not row or row.get("alive"):
+        raise ValueError("project or Researcher runtime is still running/paused")
+    pause_reason = CLI._pause_reason(wl)
+    if pause_reason not in {None, "review:assignment_needs_review"}:
+        raise ValueError(f"unrelated Researcher pause cannot be cleared: {pause_reason}")
+    if token_budget:
+        budget = CLI._resource_snapshot(root, rows, token_budget)
+        if (budget["tokens"]["exceeded"] is True or budget["time"]["exceeded"]):
+            raise ValueError("project resource budget prevents recovery")
+
+    if escalation["status"] == "OPEN":
+        handoffs.cancel(escalation["handoff_id"], actor="supervisor",
+                        reason=retired_reason)
+    if pause_reason:
+        wl.pause.unlink()
+        rows = CLI._project_rows(project)
+    dispatched = dispatch_explicit(
+        project, "researcher", spec["task"], node_id,
+        rows=rows, assign=CLI.do_assign, start=CLI._start_one,
+        role_of=CLI._read_worker_role,
+        action="RETRY_PREMATURE_PROPOSAL_REVIEW",
+        retry_worker=source["worker"], retry_node=node_id,
+        retry_outcome="NEEDS_REVIEW",
+    )
+    if dispatched.get("result") != "assigned":
+        raise ValueError("Researcher proposal retry did not dispatch: " + str(dispatched))
+    return {
+        **dispatched,
+        "previous_assignment_id": source["assignment_id"],
+        "retired_handoff_id": escalation["handoff_id"],
+        "proposal_artifacts": [str(p) for p in artifacts],
+        "downstream_review_nodes": sorted(reviews),
+    }
 
 
 def apply_autonomy(
@@ -588,75 +1158,18 @@ def apply_autonomy(
             applied.append(result)
     applied.extend(_close_completed_containers(project_dir))
 
-    # Ordinary task-file dispatch keeps the established resource-overlay behavior
-    # in S3-B. Plan/Contract/Handoff scientific routing below is reducer-owned.
-    reserved: set[str] = set()
-    for decision in decisions:
-        if (
-            decision.get("action") != "RETASK"
-            or decision.get("worker") is not None
-            or decision.get("reason") != "ready_node_unassigned"
-        ):
-            continue
-        node_id = str(decision.get("node_id") or "")
-        spec = _task_spec(project_dir, node_id)
-        if spec.get("status") != "ready":
-            if spec.get("status") == "invalid":
-                applied.append({
-                    "action": "AUTO_DISPATCH",
-                    "node_id": node_id,
-                    "result": "blocked",
-                    "reason": spec.get("reason"),
-                })
-            continue
-        wl = _idle_worker(project, spec["role"], rows, reserved, role_of)
-        if wl is None:
-            applied.append({
-                "action": "AUTO_DISPATCH",
-                "node_id": node_id,
-                "role": spec["role"],
-                "result": "no_idle_worker",
-            })
-            continue
-        try:
-            assignment = assign(f"{project}/{wl.name}", spec["task"], node_id=node_id)
-        except SystemExit as exc:
-            applied.append({
-                "action": "AUTO_DISPATCH",
-                "node_id": node_id,
-                "role": spec["role"],
-                "worker": wl.name,
-                "result": "blocked",
-                "reason": str(exc),
-            })
-            continue
-        reserved.add(wl.name)
-        applied.append({
-            "action": "AUTO_DISPATCH",
-            "node_id": node_id,
-            "role": spec["role"],
-            "worker": wl.name,
-            "assignment_id": assignment.get("assignment_id"),
-            "task_spec": spec["path"],
-            "task_plan_version": spec["spec_plan_version"],
-            "result": "assigned",
-            "start_result": start(wl),
-        })
-
     from .control import build_supervisor_snapshot, reduce_supervisor_snapshot
 
-    routing_actions = reduce_supervisor_snapshot(
+    # Mutate governance events first; do not assign workers while the
+    # reducer is still using a stale event snapshot.
+    route = reduce_supervisor_snapshot(
         build_supervisor_snapshot(project_dir, rows)
-    )["actions"]
-    applied.extend(
-        _apply_routing_actions(
-            project,
-            routing_actions,
-            rows=rows,
-            reserved=reserved,
-            assign=assign,
-            start=start,
-            role_of=role_of,
-        )
     )
+    applied.extend(_apply_routing_events(project, route["actions"]))
+
+    # Every Plan/Handoff/Contract Assignment now passes one arbiter. Its
+    # fresh state read sees just-opened Handoffs and completed dependencies.
+    applied.extend(_dispatch_candidates(
+        project, rows=rows, assign=assign, start=start, role_of=role_of,
+    ))
     return applied

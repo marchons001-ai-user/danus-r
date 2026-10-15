@@ -191,8 +191,8 @@ def _prompt(packet: Dict[str, Any]) -> str:
         "route from candidate_routes using only the supplied packet.\n\n"
         "Route meanings:\n"
         "- INTERPRET: the evidence/review is valid but a Researcher should synthesize its scientific meaning.\n"
-        "- RETHINK: the current scientific direction or assumption needs substantive reworking by a Researcher.\n"
-        "- ESCALATE: the supplied state is insufficient or inappropriate for autonomous routing and a human/main agent must decide.\n\n"
+        "- RETHINK: the current scientific direction, biological grounding, or experimental controls need substantive reworking by a Researcher. Prefer this for scientific deficiencies that the Researcher can investigate or revise autonomously.\n"
+        "- ESCALATE: reserve for an actual external/authority blocker, incompatible instructions, or missing essential information that cannot be obtained by either scientific role; scientific uncertainty by itself is not grounds for human escalation.\n\n"
         "Return exactly one JSON object and nothing else with exactly these keys: "
         "route, rationale, basis. route must be in candidate_routes. rationale must be a "
         f"short string of at most {_MAX_RATIONALE_CHARS} characters. basis must be a non-empty "
@@ -201,8 +201,10 @@ def _prompt(packet: Dict[str, Any]) -> str:
     )
 
 
-def _run_luna(prompt: str) -> Dict[str, Any]:
-    """Run Luna/low through the existing ChatGPT-subscription Codex launcher."""
+def _run_luna(prompt: str, *, effort: str = _EFFORT) -> Dict[str, Any]:
+    """Run restricted Luna at the caller's fixed effort through the existing launcher."""
+    if effort not in {"low", "medium"}:
+        raise ValueError("unsupported restricted Luna reasoning effort")
     if codex.backend() != "chatgpt":
         return {
             "status": "failed",
@@ -221,7 +223,7 @@ def _run_luna(prompt: str) -> Dict[str, Any]:
         cmd = codex.exec_cmd(
             codex_bin,
             _MODEL,
-            _EFFORT,
+            effort,
             "-C", str(work),
             "--skip-git-repo-check",
             "--sandbox", "read-only",
@@ -602,8 +604,6 @@ def _route_stop_reason(root: Path, token_budget: int) -> str:
     CLI._apply_resource_budget(report, rows, CLI._resource_snapshot(root, rows, token_budget))
     if report.get("budget_stop"):
         return str(report["budget_stop"])
-    if CLI.quota_policy(CLI.Q.load_quota(root)).get("block_new_codex_rounds"):
-        return "quota_block_new_codex_rounds"
     return ""
 
 
@@ -829,7 +829,7 @@ def apply_scientific_route_dispositions(
         routes = [
             handoff
             for handoff in HandoffRequests(ledger).all()
-            if handoff.get("kind") in {"INTERPRET", "RETHINK"}
+            if handoff.get("kind") in {"INTERPRET", "RETHINK", "CLARIFY"}
             and handoff.get("subject_type") == "ASSIGNMENT"
             and handoff.get("status") == "RESOLVED"
         ]
@@ -881,7 +881,10 @@ def apply_scientific_route_dispositions(
                 or route_assignment is None
                 or route_assignment.get("state") != "DONE"
                 or route_assignment.get("outcome") != "COMPLETE"
-                or str(route_assignment.get("role") or "").lower() != "researcher"
+                or (handoff.get("kind") != "CLARIFY"
+                    and str(route_assignment.get("role") or "").lower() != "researcher")
+                or (handoff.get("kind") == "CLARIFY"
+                    and str(route_assignment.get("role") or "").lower() != handoff.get("target_role"))
             ):
                 continue
 
@@ -919,6 +922,42 @@ def apply_scientific_route_dispositions(
             source_role = str(source.get("role") or "").lower()
             source_worker = str(source.get("worker") or "")
             wl = L.WorkerLayout(L.worker_dir(project, source_worker)) if source_worker else None
+            if handoff.get("kind") == "CLARIFY" and source_role == "reviewer":
+                if (source.get("state") != "BLOCKED"
+                    or source.get("outcome") != "NEEDS_REVIEW"
+                    or not wl):
+                    continue
+                if node_id in completed:
+                    continue
+                current = ledger.current(source_worker, refresh_stale=True)
+                if not current or current.get("assignment_id") != source_id:
+                    continue
+                pause_reason = CLI._pause_reason(wl)
+                if pause_reason and pause_reason != "review:assignment_needs_review":
+                    out.append({"handoff_id": handoff["handoff_id"],
+                                "source_assignment_id": source_id,
+                                "result": "paused", "reason": pause_reason})
+                    continue
+                try:
+                    result = _checkpoint_message(root, route_assignment)
+                except ValueError:
+                    continue
+                if pause_reason == "review:assignment_needs_review":
+                    wl.pause.unlink(missing_ok=True)
+                ledger.update(
+                    worker=source_worker, state="RUNNING", actor="supervisor",
+                    note=(f"resumed after scientific route {handoff['handoff_id']}\n\n"
+                          f"CLARIFY answer from {handoff['target_role']}:\n{result}"),
+                    expected_assignment_id=source_id,
+                )
+                out.append({
+                    "handoff_id": handoff["handoff_id"],
+                    "source_assignment_id": source_id,
+                    "result": "resumed",
+                    "start_result": CLI._start_one(wl),
+                })
+                continue
+
             if source_role == "experimenter":
                 consumed = _route_consumed(ledger, source_id, handoff["handoff_id"])
                 if consumed:
@@ -1030,7 +1069,6 @@ def _eligible(report: Dict[str, Any]) -> bool:
         report.get("project_state") == "RUNNING"
         and report.get("convergence", {}).get("stable")
         and not report.get("budget_stop")
-        and not report.get("quota_policy", {}).get("block_new_codex_rounds")
     )
 
 
@@ -1124,6 +1162,14 @@ def research_main(argv: List[str]) -> int:
     parser.add_argument("--stdin", action="store_true", help="read a new-project research brief from stdin")
     parser.add_argument("--model", default=None, help="model for a newly scaffolded project")
     parser.add_argument("--once", action="store_true", help="run one planning + Supervisor pass and return")
+    parser.add_argument("--retry-blocked-review", action="store_true",
+                        help="retry one unchanged blocked Reviewer Assignment in an existing Plan")
+    parser.add_argument("--recover-provenance-review", action="store_true",
+                        help="restart one Reviewer after validation of repaired committed Plan provenance")
+    parser.add_argument("--recover-premature-proposal-review", action="store_true",
+                        help="retry a blocked Researcher who already saved a proposal for a downstream Reviewer")
+    parser.add_argument("--capture-deadlock", action="store_true",
+                        help="journal the current fully idle nonterminal project without changing science")
     parser.add_argument("--heartbeat", type=float, default=1800.0)
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--token-budget", type=int, default=0)
@@ -1135,6 +1181,36 @@ def research_main(argv: List[str]) -> int:
         model=args.model,
     )
     print(json.dumps({"research_init": init}, ensure_ascii=False, sort_keys=True), flush=True)
+    if sum(bool(x) for x in (
+        args.retry_blocked_review,
+        args.recover_provenance_review,
+        args.recover_premature_proposal_review,
+        args.capture_deadlock,
+    )) > 1:
+        parser.error("choose one review recovery mode")
+    if args.capture_deadlock:
+        from .deadlock_watch import capture_current_deadlock
+
+        captured = capture_current_deadlock(args.project, token_budget=args.token_budget)
+        print(json.dumps({"deadlock_capture": captured}, ensure_ascii=False, sort_keys=True), flush=True)
+        return 0
+    if args.retry_blocked_review:
+        from .autonomy import retry_blocked_review
+
+        retried = retry_blocked_review(args.project)
+        print(json.dumps({"review_retry": retried}, ensure_ascii=False, sort_keys=True), flush=True)
+    if args.recover_provenance_review:
+        from .autonomy import recover_review_after_provenance_fix
+
+        retried = recover_review_after_provenance_fix(args.project)
+        print(json.dumps({"review_retry": retried}, ensure_ascii=False, sort_keys=True), flush=True)
+    if args.recover_premature_proposal_review:
+        from .autonomy import recover_premature_proposal_review
+
+        retried = recover_premature_proposal_review(
+            args.project, token_budget=args.token_budget,
+        )
+        print(json.dumps({"proposal_review_retry": retried}, ensure_ascii=False, sort_keys=True), flush=True)
     if args.once:
         applied = planning.planning_step(args.project, token_budget=args.token_budget)
         report = CLI.do_supervise(

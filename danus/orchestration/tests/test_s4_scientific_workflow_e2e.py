@@ -201,6 +201,9 @@ def test_scientific_workflow_closes_without_automatic_plan_revision(tmp_path: Pa
         assert handoffs.get(contract_review["handoff_id"])["status"] == "RESOLVED"
         assert ledger.implementation_contract(contract["contract_id"])["status"] == "CONSUMED"
         assert EvidenceStore(pdir).get_record(evidence["evidence_id"])["protocol_id"] == evidence["protocol_id"]
+        assert evidence["report"]["evidence_id"] == evidence["evidence_id"]
+        assert Path(evidence["report_path"]).is_file()
+        assert len(evidence["report"]["cells"]) == evidence["completed_units"]
         assert len(ledger.assignments()) == assignment_count
         assert len(handoffs.all()) == handoff_count
         assert len(list(EvidenceStore(pdir).records_dir.glob("*.json"))) == 1
@@ -293,3 +296,490 @@ def test_scientific_workflow_commits_evidence_bound_post_hoc_revision(tmp_path: 
         assert len(ledger.assignments()) == assignment_count
         assert len(handoffs.all()) == handoff_count
         assert len(list(EvidenceStore(pdir).records_dir.glob("*.json"))) == evidence_count
+
+
+def _crossnode_contract_fixture(tmp_path, monkeypatch):
+    """Researcher R1 may propose only the exact preapproved DAG-dependent E1."""
+    from danus.gateway import capability
+
+    monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+    planning.initialize_research("P", brief="Use the frozen protocol, no extra cells.")
+    pdir = L.project_dir("P")
+    ledger = ProgressLedger(pdir)
+    protocol_id = EvidenceStore(pdir).freeze_protocol(
+        question="Frozen comparison?", hypothesis="Experimental intervention helps.",
+        matrix={"units": [{"id": "a", "argv": [sys.executable, "run_case.py"]}]},
+        primary_metrics=["loss"], decision_rule="Never change protocol after reviewing.",
+        author="fixture",
+    )
+    goal = f"Run only frozen protocol {protocol_id}\nEXPERIMENT_PROTOCOL_ID={protocol_id}"
+    fields = {
+        "goal": goal,
+        "must_preserve_invariants": ["Do not alter frozen input"],
+        "forbidden_behaviors": ["No additional experiment cells"],
+        "acceptance_conditions": ["Return immutable evidence"],
+    }
+    exact = ProgressLedger.implementation_task(**fields)
+    brief = pdir / "RESEARCH_BRIEF.md"
+    brief.write_text("Frozen protocol ID: " + protocol_id)
+    graph = ResearchPlanGraph(pdir)
+    ops = [
+        {"op": "add_node", "node_id": "R1", "title": "Frame",
+         "summary": "", "parent": "P0", "depends_on": []},
+        {"op": "add_node", "node_id": "V1", "title": "Review",
+         "summary": "", "parent": "P0", "depends_on": ["R1"]},
+        {"op": "add_node", "node_id": "E1", "title": "Experiment",
+         "summary": "", "parent": "P0", "depends_on": ["V1"]},
+        {"op": "add_node", "node_id": "E2", "title": "Unrelated experiment",
+         "summary": "", "parent": "P0", "depends_on": []},
+    ]
+    change_id = graph.propose_change(
+        base_plan_version=1, proposer="low", reason="fixed route", operations=ops,
+    )
+    graph.review_change(change_id, reviewer="low2", verdict="APPROVE", rationale="fixed")
+    assert graph.commit_change(change_id, committer="supervisor") == 2
+    for node_id in ("E1", "E2"):
+        spec = pdir / "tasks" / "v2" / "experimenter" / f"{node_id}.md"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text(exact, encoding="utf-8")
+    ledger.assign(
+        worker="low", role="researcher", node_id="R1", plan_version=2,
+        task="Inspect frozen protocol " + protocol_id + " and submit exact E1 contract.",
+        write_task=True,
+    )
+    binding = capability.issue(pdir, "low", "researcher")
+    monkeypatch.setattr(server, "_BOUND_WORKER", binding)
+    return pdir, ledger, protocol_id, fields
+
+
+def test_researcher_r1_submits_exact_downstream_e1_and_reads_bound_protocol(tmp_path, monkeypatch):
+    from danus.gateway.roles import tools_for
+    with _root(tmp_path):
+        pdir, ledger, protocol_id, fields = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        assert "experiment_protocol_get" in tools_for("researcher")
+        assert "experiment_protocol_get" in tools_for("reviewer")
+        assert "experiment_protocol_get" not in tools_for("worker")
+        loaded = server.experiment_protocol_get(protocol_id)["protocol"]
+        assert loaded["protocol_id"] == protocol_id and loaded["status"] == "frozen"
+        assert loaded["decision_rule"] == "Never change protocol after reviewing."
+        contract = server.implementation_submit_contract(
+            node_id="E1", plan_version=2, **fields
+        )
+        record = ledger.implementation_contract(contract["contract_id"])
+        assert record["node_id"] == "E1"
+        assert record["task"] == (pdir / "tasks" / "v2" / "experimenter" / "E1.md").read_text()
+        assert record["status"] == "PROPOSED"
+        assert len(ledger.implementation_contracts()) == 1
+
+
+def test_crossnode_contract_rejects_unrelated_node_or_altered_task(tmp_path, monkeypatch):
+    import pytest
+    with _root(tmp_path):
+        pdir, ledger, protocol_id, fields = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        with pytest.raises(PermissionError, match="not downstream"):
+            server.implementation_submit_contract(node_id="E2", plan_version=2, **fields)
+        with pytest.raises(PermissionError, match="exact frozen Experimenter task"):
+            server.implementation_submit_contract(
+                node_id="E1", plan_version=2, **{**fields, "goal": "altered target"}
+            )
+        with pytest.raises(PermissionError, match="exact frozen Experimenter task"):
+            server.implementation_submit_contract(node_id="V1", plan_version=2, **fields)
+        assert ledger.implementation_contracts() == []
+
+
+def test_frozen_protocol_get_rejects_other_task_and_revoked_assignment(tmp_path, monkeypatch):
+    import pytest
+    from danus.gateway import capability
+    with _root(tmp_path):
+        pdir, ledger, protocol_id, fields = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        second = EvidenceStore(pdir).freeze_protocol(
+            question="Different protocol?", hypothesis="Different result",
+            matrix={"units": [{"id": "b"}]}, primary_metrics=["loss"],
+            decision_rule="Unrelated", author="fixture",
+        )
+        with pytest.raises(PermissionError, match="assigned task"):
+            server.experiment_protocol_get(second)
+        with pytest.raises(ValueError, match="invalid protocol identity"):
+            server.experiment_protocol_get("../secret")
+        binding = server._BOUND_WORKER
+        capability.revoke(binding)
+        with pytest.raises(PermissionError, match="revoked|epoch"):
+            server.experiment_protocol_get(protocol_id)
+
+
+def _invoke_bound_protocol_mcp_child(protocol_id, response_queue):
+    """Call the same permission wrapper installed by build_app()."""
+    try:
+        result = server._bound_tool(server.experiment_protocol_get)(protocol_id)
+        response_queue.put(("ok", result["protocol"]["protocol_id"]))
+    except BaseException as exc:
+        response_queue.put(("error", type(exc).__name__ + ": " + str(exc)))
+
+
+def test_bound_protocol_mcp_wrapper_finishes_without_recursive_lock_deadlock(tmp_path, monkeypatch):
+    """A bound MCP read must return promptly; separate process catches real flock hangs."""
+    import multiprocessing
+    import pytest
+
+    with _root(tmp_path):
+        _, _, protocol_id, _ = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        context = multiprocessing.get_context("fork")  # Linux/WSL: preserve issued capability
+        responses = context.Queue()
+        child = context.Process(
+            target=_invoke_bound_protocol_mcp_child,
+            args=(protocol_id, responses),
+        )
+        child.start()
+        try:
+            child.join(timeout=6)
+            if child.is_alive():
+                pytest.fail("Bound MCP protocol read deadlocked acquiring capability locks")
+            assert child.exitcode == 0
+            assert responses.get(timeout=2) == ("ok", protocol_id)
+        finally:
+            if child.is_alive():
+                child.kill()
+            child.join(timeout=2)
+            responses.close()
+
+
+
+def test_blocked_reviewer_retry_reuses_frozen_task(tmp_path, monkeypatch):
+    from danus.orchestration.autonomy import retry_blocked_review
+
+    with _root(tmp_path):
+        pdir, ledger, _, _ = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        ledger.update(worker="low", state="DONE", actor="runtime", outcome="COMPLETE")
+        ledger.set_node_state("R1", state="DONE", actor="supervisor")
+        task = "Audit previously completed evidence without rerunning E1.\n"
+        spec = pdir / "tasks" / "v2" / "reviewer" / "V1.md"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text(task, encoding="utf-8")
+        old = ledger.assign(
+            worker="low2", role="reviewer", node_id="V1", plan_version=2,
+            task=task, write_task=True,
+        )
+        ledger.update(worker="low2", state="BLOCKED", actor="runtime", outcome="BLOCKED")
+        wl = L.WorkerLayout(L.worker_dir("P", "low2"))
+        wl.pause.write_text("review:assignment_blocked\n", encoding="utf-8")
+        resumed = retry_blocked_review("P")
+        assert not wl.pause.exists()
+        assert resumed["action"] == "RETRY_BLOCKED_REVIEW"
+        assert resumed["result"] == "assigned"
+        assert resumed["worker"] == "low2"
+        current = ledger.current("low2")
+        assert current["assignment_id"] != old["assignment_id"]
+        assert current["node_id"] == "V1" and current["role"] == "reviewer"
+        assert current["task_sha256"] == old["task_sha256"]
+        assert next(a for a in ledger.assignments() if a["assignment_id"] == old["assignment_id"])["state"] == "STALE"
+        assert "V1" not in ledger.completed_nodes()
+
+
+def _dedicated_v1_contract_fixture(tmp_path, monkeypatch):
+    """Freeze R1→V1→E1; keep exactly one Reviewer and one Experimenter."""
+    monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+    planning.initialize_research("P", brief="R1 frames, V1 approves contract, E1 executes.")
+    root = L.project_dir("P")
+    graph = ResearchPlanGraph(root)
+    fields = {
+        "goal": "Execute the frozen E1 protocol.",
+        "must_preserve_invariants": ["Keep frozen cells"],
+        "forbidden_behaviors": ["Do not add experimental cells"],
+        "acceptance_conditions": ["Persist exact evidence"],
+    }
+    exact = ProgressLedger.implementation_task(**fields)
+    ops = [
+        {"op": "add_node", "node_id": "R1", "title": "Prepare",
+         "summary": "", "parent": "P0", "depends_on": []},
+        {"op": "add_node", "node_id": "V1", "title": "Contract review",
+         "summary": "", "parent": "P0", "depends_on": ["R1"]},
+        {"op": "add_node", "node_id": "E1", "title": "Experiment",
+         "summary": "", "parent": "P0", "depends_on": ["V1"]},
+    ]
+    change_id = graph.propose_change(
+        base_plan_version=1, proposer="low", reason="bounded sequence",
+        operations=ops,
+    )
+    graph.review_change(change_id, reviewer="low2", verdict="APPROVE",
+                        rationale="frozen")
+    assert graph.commit_change(change_id, committer="supervisor") == 2
+    tasks = {
+        ("researcher", "R1"): "Submit one E1 contract.\n",
+        ("reviewer", "V1"): (
+            "Review the single pending E1 implementation contract using "
+            "implementation_pending_contracts and implementation_review_contract. "
+            "Approve only the exact frozen task.\n"
+        ),
+        ("experimenter", "E1"): exact,
+    }
+    for (role, node_id), task in tasks.items():
+        path = root / "tasks" / "v2" / role / f"{node_id}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(task)
+    ledger = ProgressLedger(root)
+    researcher = ledger.assign(
+        worker="low", role="researcher", node_id="R1", plan_version=2,
+        task=tasks[("researcher", "R1")], write_task=True,
+    )
+    contract = ledger.submit_implementation_contract(
+        proposer="low", node_id="E1", plan_version=2, **fields
+    )
+    assert contract["task_sha256"] == ProgressLedger.task_sha256(exact)
+    return root, ledger, researcher, contract, tasks
+
+
+def test_contract_review_waits_for_r1_then_uses_exact_v1_and_unlocks_e1(tmp_path, monkeypatch):
+    with _root(tmp_path):
+        root, ledger, researcher, contract, tasks = _dedicated_v1_contract_fixture(
+            tmp_path, monkeypatch
+        )
+        from danus.orchestration.control import _contract_review_node, build_supervisor_snapshot
+
+        assert _contract_review_node(root, ResearchPlanGraph(root).snapshot(), contract) == "V1"
+        initial = build_supervisor_snapshot(root, cli._project_rows("P"))
+        assert initial["contract_review_nodes"][contract["contract_id"]] == "V1"
+
+        pending = _apply("P")
+        gate = _handoff(
+            HandoffRequests(ledger), kind="REVIEW",
+            subject_type="IMPLEMENTATION_CONTRACT", subject_id=contract["contract_id"],
+        )
+        assert gate["node_id"] == "V1"
+        assert gate["status"] == "OPEN"  # must NOT start before R1 is complete
+        assert any(
+            x.get("result") == "waiting_dependencies"
+            and x.get("node_id") == "V1"
+            and x.get("missing_dependencies") == ["R1"]
+            for x in pending
+        )
+        assert ledger.current("low2") is None or ledger.current("low2")["node_id"] != "V1"
+        assert ledger.current("low3") is None
+
+        _finish("P", "low")
+        decisions = [{
+            "action": "REVIEW", "reason": "completion_not_recorded",
+            "worker": "low", "node_id": "R1",
+            "assignment_id": researcher["assignment_id"],
+        }]
+        assigned = A.apply_autonomy(
+            "P", decisions, rows=cli._project_rows("P"),
+            assign=cli.do_assign, start=cli._start_one,
+            role_of=cli._read_worker_role,
+        )
+        reviewer = ledger.current("low2")
+        assert "R1" in ledger.completed_nodes()
+        assert reviewer and reviewer["node_id"] == "V1"
+        assert reviewer["handoff_id"] == gate["handoff_id"]
+        assert reviewer["task_sha256"] == ProgressLedger.task_sha256(
+            tasks[("reviewer", "V1")]
+        )
+        assert HandoffRequests(ledger).get(gate["handoff_id"])["status"] == "ASSIGNED"
+        assert ledger.current("low3") is None
+        assert not any(x.get("action") == "AUTO_DISPATCH"
+                       and x.get("node_id") == "V1" for x in assigned)
+
+        with _gateway(root, "low2", "reviewer"):
+            verdict = server.implementation_review_contract(
+                contract["contract_id"], verdict="APPROVE",
+                rationale="Task exactly preserves E1 invariants.",
+            )
+        assert verdict["status"] == "APPROVE"
+        assert ledger.current("low3") is None
+        _finish("P", "low2")
+        decisions = [{
+            "action": "REVIEW", "reason": "completion_not_recorded",
+            "worker": "low2", "node_id": "V1",
+            "assignment_id": reviewer["assignment_id"],
+        }]
+        A.apply_autonomy(
+            "P", decisions, rows=cli._project_rows("P"),
+            assign=cli.do_assign, start=cli._start_one,
+            role_of=cli._read_worker_role,
+        )
+        assert "V1" in ledger.completed_nodes()
+        assert HandoffRequests(ledger).get(gate["handoff_id"])["status"] == "RESOLVED"
+        experiment = ledger.current("low3")
+        assert experiment and experiment["node_id"] == "E1"
+        assert experiment["implementation_contract_id"] == contract["contract_id"]
+        assert experiment["task_sha256"] == contract["task_sha256"]
+        assert len([a for a in ledger.assignments()
+                    if a["role"] == "reviewer" and a["node_id"] == "V1"]) == 1
+
+
+def test_multiple_review_predecessors_never_implicitly_choose_a_reviewer(tmp_path, monkeypatch):
+    with _root(tmp_path):
+        root, ledger, researcher, contract, tasks = _dedicated_v1_contract_fixture(
+            tmp_path, monkeypatch
+        )
+        from danus.orchestration.control import _contract_review_node
+
+        # A second direct reviewer dependency is ambiguous and must not
+        # inherit the first review node's authority.
+        graph = ResearchPlanGraph(root)
+        change_id = graph.propose_change(
+            base_plan_version=2, proposer="low", reason="ambiguous reviewer gate",
+            operations=[
+                {"op": "add_node", "node_id": "Vx", "title": "Other review",
+                 "summary": "", "parent": "P0", "depends_on": ["R1"]},
+                {"op": "set_dependencies", "node_id": "E1", "depends_on": ["V1", "Vx"]},
+            ],
+        )
+        graph.review_change(change_id, reviewer="low2", verdict="APPROVE",
+                            rationale="test only")
+        graph.commit_change(change_id, committer="supervisor")
+        spec = root / "tasks" / "v3" / "reviewer" / "Vx.md"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("Review another implementation contract.\n")
+        assert _contract_review_node(root, graph.snapshot(), contract) == ""
+
+
+def test_stale_supervisor_pause_stop_and_retask_cannot_touch_rebound_worker(tmp_path, monkeypatch):
+    with _root(tmp_path):
+        root, ledger, current, _, _ = _dedicated_v1_contract_fixture(
+            tmp_path, monkeypatch
+        )
+        wl = L.WorkerLayout(L.worker_dir("P", "low"))
+        assert not wl.pause.exists() and not wl.stop.exists()
+        old = "superseded-assignment"
+        decisions = [
+            {"action": action, "worker": "low", "node_id": "P0",
+             "assignment_id": old, "reason": "completion_not_recorded"}
+            for action in ("REVIEW", "STOP", "RETASK")
+        ]
+        results = cli._apply_supervisor_decisions("P", decisions)
+        assert [x["result"] for x in results] == ["assignment_changed"] * 3
+        assert not wl.pause.exists() and not wl.stop.exists()
+        assert ledger.current("low")["assignment_id"] == current["assignment_id"]
+
+
+def test_workflow_result_gateway_is_role_bound_and_cannot_bypass_review(tmp_path, monkeypatch):
+    import pytest
+    from danus.gateway import capability
+    from danus.gateway.roles import tools_for
+    from danus.orchestration.intent import terminal_intents
+
+    with _root(tmp_path):
+        pdir, ledger, protocol_id, fields = _crossnode_contract_fixture(tmp_path, monkeypatch)
+        assert "workflow_submit_result" in tools_for("researcher")
+        assert "workflow_submit_result" in tools_for("reviewer")
+        assert "workflow_submit_result" in tools_for("experimenter")
+        assert "workflow_submit_result" not in tools_for("worker")
+        assert "workflow_submit_result" not in tools_for("main")
+        assert "workflow_submit_result" not in tools_for("verifier")
+        result = server._bound_tool(server.workflow_submit_result)(
+            outcome="COMPLETE", next_intent="RUN_EXPERIMENT",
+            subject_id="unapproved-contract",
+        )
+        assert result["next_intent"] == {
+            "kind": "RUN_EXPERIMENT", "subject_id": "unapproved-contract"
+        }
+        assert terminal_intents(pdir) == []  # still running, no authority
+        assert ledger.implementation_contracts() == []
+        with pytest.raises(ValueError, match="conflicting"):
+            server.workflow_submit_result(
+                outcome="COMPLETE", next_intent="FINISH",
+            )
+        capability.revoke(server._BOUND_WORKER)
+        with pytest.raises((PermissionError, ValueError)):
+            server._bound_tool(server.workflow_submit_result)(
+                outcome="COMPLETE", next_intent="RUN_EXPERIMENT",
+                subject_id="unapproved-contract",
+            )
+
+
+
+def test_dynamic_protocol_can_run_only_under_exact_reviewed_assignment(tmp_path, monkeypatch):
+    """Open-ended E1 freezes after approval; the first protocol is irreversibly pinned."""
+    import pytest
+    from danus.gateway import capability
+
+    with _root(tmp_path):
+        monkeypatch.setattr(cli, "_start_one", lambda wl: "started")
+        monkeypatch.setattr(server, "_BOUND_WORKER", None)
+        workspace = tmp_path / "scientific-workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("DANUS_SCIENTIFIC_WORKSPACE", str(workspace))
+        planning.initialize_research("P", brief="Open-ended scientific question, no frozen protocol.")
+        pdir = L.project_dir("P")
+        ledger = ProgressLedger(pdir)
+        contract_fields = {
+            "goal": ("Measure one pre-approved baseline with the frozen deterministic "
+                     "runner, record the score and do not expand the matrix."),
+            "must_preserve_invariants": ["One matrix cell, score metric, frozen runner"],
+            "forbidden_behaviors": ["Do not tune or substitute the method after observing results"],
+            "acceptance_conditions": ["One hash-checked Evidence Record and full report"],
+        }
+        with _gateway(pdir, "low", "researcher"):
+            contract = server.implementation_submit_contract(
+                node_id="P0", plan_version=1, **contract_fields
+            )
+        assert "EXPERIMENT_PROTOCOL_ID" not in contract["task"]
+        _finish("P", "low")
+        _apply("P")
+        review = _handoff(
+            HandoffRequests(ledger), kind="REVIEW",
+            subject_type="IMPLEMENTATION_CONTRACT", subject_id=contract["contract_id"],
+        )
+        assert review["status"] == "ASSIGNED"
+        with _gateway(pdir, "low2", "reviewer"):
+            server.implementation_review_contract(
+                contract["contract_id"], verdict="APPROVE",
+                rationale="Single frozen cell, metric, baseline and decision rule are reviewable.",
+            )
+        _finish("P", "low2")
+        _apply("P")
+        assignment = ledger.current("low3")
+        assert assignment is not None
+        assert assignment["role"] == "experimenter"
+        assert assignment["implementation_contract_id"] == contract["contract_id"]
+        assert assignment["task_sha256"] == ProgressLedger.task_sha256(contract["task"])
+
+        (workspace / "runner.py").write_text(RUNNER, encoding="utf-8")
+        (workspace / "reducer.py").write_text(REDUCER, encoding="utf-8")
+        store = EvidenceStore(pdir)
+        reducer = store.artifact_ref(workspace / "reducer.py", relative_to=workspace)
+        assert reducer["path"] == "reducer.py"
+        reducer["function"] = "reduce_metrics"
+        kwargs = {
+            "hypothesis": "One declared deterministic run records its score.",
+            "matrix": {"units": [{"id": "u1",
+                        "argv": [sys.executable, "runner.py", "raw/result.json"],
+                        "artifacts": ["raw/result.json"]}]},
+            "primary_metrics": ["score"],
+            "decision_rule": "Report the exact measured score without tuning.",
+            "author": "low3",
+            "metric_reducer": reducer,
+            "execution_files": ["runner.py"],
+            "source_root": workspace,
+            "implementation_contract_id": contract["contract_id"],
+            "execution_assignment_id": assignment["assignment_id"],
+        }
+        protocol_id = store.freeze_protocol(
+            question="What is the approved deterministic score?", **kwargs
+        )
+        alternate = store.freeze_protocol(
+            question="What is an alternate experimental question?", **kwargs
+        )
+        foreign = store.freeze_protocol(
+            question="What is a foreign assignment score?",
+            **{**kwargs, "execution_assignment_id": "0" * 16},
+        )
+        binding = capability.issue(pdir, "low3", "experimenter")
+        monkeypatch.setattr(server, "_BOUND_WORKER", binding)
+        with _gateway(pdir, "low3", "experimenter"):
+            assert server.experiment_protocol_get(protocol_id)["protocol"]["protocol_id"] == protocol_id
+            with pytest.raises(PermissionError, match="contract and assignment"):
+                server.experiment_run(foreign)
+            first = server.experiment_run(protocol_id)
+            assert first["completed_units"] == 1
+            assert Path(first["report_path"]).is_file()
+            assert Path(first["report_path"]).is_relative_to(workspace)
+            pinned = (pdir / "experiment_runtime" / "assignment_protocols"
+                      / (assignment["assignment_id"] + ".json"))
+            assert json.loads(pinned.read_text())["protocol_id"] == protocol_id
+            with pytest.raises(PermissionError, match="already pinned"):
+                server.experiment_run(alternate)
+            replay = server.experiment_run(protocol_id)
+            assert replay["evidence_id"] == first["evidence_id"]
+        assert len(list(store.records_dir.glob("*.json"))) == 1
+

@@ -36,7 +36,7 @@ def test_budget_stop_never_executes_scientific_round(tmp_path, monkeypatch, quot
     monkeypatch.setattr(cli, "_stop_one", lambda *a, **k: "not-running")
     report = cli.do_supervise("P", apply=True, token_budget=1)
     assert report["budget_stop"] == "resource_token_budget"
-    print({"budget_stop": report["budget_stop"], "round_calls": calls, "quota_applied": report["quota_applied"]})
+    print({"budget_stop": report["budget_stop"], "round_calls": calls})
     assert calls == []
 
 

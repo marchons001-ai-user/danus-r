@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -71,12 +72,21 @@ def do_guide(project: str, text: str, *, interrupt: bool = False) -> Dict[str, A
     }
 
 
-def _resume_worker(project: str, worker: str) -> List[Dict[str, str]]:
+def _resume_worker(
+    project: str, worker: str, *,
+    budget_limit: Optional[int] = None, accept_incomplete_usage: bool = False,
+) -> List[Dict[str, str]]:
     pdir = L.project_dir(project)
     ledger_path = pdir / "progress" / "ledger.jsonl"
     row = do_status(f"{project}/{worker}")[0]
     ledger = ProgressLedger(pdir) if ledger_path.is_file() else None
     current = ledger.current(worker, refresh_stale=True) if ledger else None
+
+    # Do not let the older BLOCKED/NEEDS_REVIEW recovery branch implicitly
+    # clear an unrelated system-owned budget pause.
+    if (current and current.get("state") == "BLOCKED"
+            and str(row.get("pause_reason") or "").startswith("budget:")):
+        return [{"worker": worker, "result": "system-paused"}]
 
     if current and current.get("state") == "BLOCKED":
         outcome = str(current.get("outcome") or "").upper()
@@ -117,23 +127,78 @@ def _resume_worker(project: str, worker: str) -> List[Dict[str, str]]:
             )
         else:
             return [{"worker": worker, "result": "blocked"}]
-    elif str(row.get("pause_reason") or "").startswith(("quota:", "budget:", "review:")):
-        return [{"worker": worker, "result": "system-paused"}]
+    else:
+        pause = str(row.get("pause_reason") or "")
+        if pause.startswith("budget:"):
+            # Deliberate operator-only budget recovery. A larger Supervisor
+            # budget does NOT make missing Reviewer usage magically known.
+            # Keep the default system pause unless the operator supplies the
+            # exact new cumulative limit and acknowledges that uncertainty.
+            if budget_limit is None or current is None or current.get("state") not in _ACTIVE_PROGRESS:
+                return [{"worker": worker, "result": "system-paused"}]
+            from . import cli as CLI
+
+            rows = CLI._project_rows(project)
+            budget = CLI._resource_snapshot(pdir, rows, budget_limit)
+            tokens = budget["tokens"]
+            if budget["time"]["exceeded"] or tokens["exceeded"] is True:
+                return [{"worker": worker, "result": "budget-exceeded"}]
+            if tokens["exceeded"] is None and not accept_incomplete_usage:
+                return [{"worker": worker, "result": "budget-usage-incomplete"}]
+            if tokens["used"] >= budget_limit:
+                return [{"worker": worker, "result": "budget-exceeded"}]
+            if not (pdir / "workers" / worker / L.PAUSE_FILE).is_file():
+                return [{"worker": worker, "result": "budget-pause-changed"}]
+
+            # Persist operator authorization *before* changing .pause or
+            # launching the existing Assignment, under project_control_lock.
+            record = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "action": "AUTHORIZE_BUDGET_RESUME",
+                "actor": "operator", "worker": worker,
+                "assignment_id": current["assignment_id"],
+                "pause_reason": pause, "new_cumulative_budget": budget_limit,
+                "known_usage_lower_bound": tokens["used"],
+                "unknown_workers": tokens.get("unknown_workers", []),
+                "accepted_incomplete_usage": bool(accept_incomplete_usage),
+            }
+            with (pdir / "operator_budget_resumes.jsonl").open("a", encoding="utf-8") as log:
+                log.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            return _legacy_resume(f"{project}/{worker}", stagger=0)
+        if pause.startswith(("quota:", "review:")):
+            return [{"worker": worker, "result": "system-paused"}]
 
     return _legacy_resume(f"{project}/{worker}", stagger=0)
 
 
-def do_resume(target: str) -> List[Dict[str, str]]:
-    """Resume explicit external blockers or active project work without broad unblock."""
-    project, _ = L.resolve_target(target)
+def do_resume(
+    target: str, *,
+    budget_limit: Optional[int] = None, accept_incomplete_usage: bool = False,
+) -> List[Dict[str, str]]:
+    """Resume work. Budget-locked workers require explicit bounded operator authorization."""
+    project, worker = L.resolve_target(target)
+    if budget_limit is not None:
+        if budget_limit <= 0 or not worker:
+            raise ValueError("budget-limit must be positive and target exactly one worker")
+    if accept_incomplete_usage and budget_limit is None:
+        raise ValueError("accept-incomplete-usage requires --budget-limit")
     with project_control_lock(L.project_dir(project)):
-        return _do_resume_unlocked(target)
+        return _do_resume_unlocked(
+            target, budget_limit=budget_limit,
+            accept_incomplete_usage=accept_incomplete_usage,
+        )
 
 
-def _do_resume_unlocked(target: str) -> List[Dict[str, str]]:
+def _do_resume_unlocked(
+    target: str, *,
+    budget_limit: Optional[int] = None, accept_incomplete_usage: bool = False,
+) -> List[Dict[str, str]]:
     project, worker = L.resolve_target(target)
     if worker:
-        return _resume_worker(project, worker)
+        return _resume_worker(
+            project, worker, budget_limit=budget_limit,
+            accept_incomplete_usage=accept_incomplete_usage,
+        )
 
     pdir = L.project_dir(project)
     if not pdir.is_dir():
@@ -182,7 +247,18 @@ def resume_main(argv: Optional[List[str]] = None) -> int:
         description="Resume worker/project execution without starting unassigned planned workers.",
     )
     parser.add_argument("target", help="<project> or <project>/<worker>")
+    parser.add_argument("--budget-limit", type=int, default=None,
+                        help="operator-authorized new cumulative token ceiling for one budget-paused worker")
+    parser.add_argument("--accept-incomplete-usage", action="store_true",
+                        help="acknowledge that some workers have incomplete token telemetry")
     args = parser.parse_args(argv)
-    for row in do_resume(args.target):
+    try:
+        results = do_resume(
+            args.target, budget_limit=args.budget_limit,
+            accept_incomplete_usage=args.accept_incomplete_usage,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    for row in results:
         print(f"{row['worker']}: {row['result']}")
     return 0

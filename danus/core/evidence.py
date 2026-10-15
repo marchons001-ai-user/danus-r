@@ -20,6 +20,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -52,6 +53,11 @@ def protocol_identity(protocol: Dict[str, Any]) -> Dict[str, Any]:
         identity["metric_reducer"] = protocol.get("metric_reducer")
     if "bundle_id" in protocol:
         identity["bundle_id"] = protocol["bundle_id"]
+    # New, contract-authorized protocols bind to the exact approved execution.
+    # These optional fields do not alter the identities of existing protocols.
+    for key in ("implementation_contract_id", "execution_assignment_id"):
+        if key in protocol:
+            identity[key] = protocol[key]
     for key in ("execution_runtime", "runtime_id"):
         if key in protocol:
             identity[key] = protocol[key]
@@ -142,6 +148,8 @@ class EvidenceStore:
         metric_reducer: Optional[Dict[str, Any]] = None,
         execution_files: Optional[List[str]] = None,
         source_root: Optional[Path] = None,
+        implementation_contract_id: Optional[str] = None,
+        execution_assignment_id: Optional[str] = None,
     ) -> str:
         """Write one immutable frozen protocol and return its content id.
 
@@ -164,6 +172,17 @@ class EvidenceStore:
         metrics = [str(x).strip() for x in primary_metrics if str(x).strip()]
         if not metrics:
             raise ValueError("at least one primary metric is required")
+        if bool(implementation_contract_id) != bool(execution_assignment_id):
+            raise ValueError("dynamic protocol requires both contract and assignment IDs")
+        for field, value in (
+            ("implementation_contract_id", implementation_contract_id),
+            ("execution_assignment_id", execution_assignment_id),
+        ):
+            if value is not None and (
+                not isinstance(value, str)
+                or not re.fullmatch(r"[0-9a-f]{16}", value)
+            ):
+                raise ValueError(f"{field} must be a 16-digit lowercase hex ID")
         if parent_protocol_id:
             if self.get_protocol(parent_protocol_id) is None:
                 raise ValueError(f"unknown parent_protocol_id: {parent_protocol_id}")
@@ -194,6 +213,9 @@ class EvidenceStore:
             "post_hoc": bool(post_hoc),
             "revision_reason": revision_reason.strip(),
         }
+        if implementation_contract_id:
+            identity["implementation_contract_id"] = implementation_contract_id
+            identity["execution_assignment_id"] = execution_assignment_id
         if reducer is not None:
             from . import runtime
             identity["metric_reducer"] = reducer
@@ -261,8 +283,9 @@ class EvidenceStore:
         return _read_json(self._record_path(evidence_id))
 
     # -------------------------------------------------------------- artifact
-    def artifact_ref(self, path: Path) -> Dict[str, Any]:
-        """Return a deterministic reference to an existing artifact; copy nothing."""
+    def artifact_ref(self, path: Path, *, relative_to: Optional[Path] = None) -> Dict[str, Any]:
+        """Hash a file; use a relative ref anchored to a separate source bundle when specified."""
+
         p = Path(path)
         if not p.is_file():
             raise ValueError(f"artifact is not a file: {p}")
@@ -271,9 +294,12 @@ class EvidenceStore:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         resolved = p.resolve()
+        base = Path(relative_to).resolve() if relative_to is not None else self.root.resolve()
         try:
-            stored_path = str(resolved.relative_to(self.root.resolve()))
+            stored_path = str(resolved.relative_to(base))
         except ValueError:
+            if relative_to is not None:
+                raise ValueError("artifact is outside the declared frozen source_root")
             stored_path = str(resolved)
         return {
             "path": stored_path,

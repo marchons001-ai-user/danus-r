@@ -6,8 +6,16 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/../scripts/env.sh" >/dev/null 2>&1
-if [ -z "${DANUS_NODE:-}" ] || [ -z "${DANUS_CODEX_JS:-}" ]; then
-  echo "codex not provisioned — run scripts/bootstrap.sh (sets DANUS_NODE/DANUS_CODEX_JS)" >&2
+# Prefer a pinned, executable, absolute native CLI; keep npm as a legacy fallback.
+# Never dispatch past the approval/sandbox and WSL-interoperability guards below.
+if [ -n "${DANUS_NATIVE_CODEX_BIN:-}" ]; then
+  case "$DANUS_NATIVE_CODEX_BIN" in /*) ;; *) echo "native codex must be an absolute path" >&2; exit 127 ;; esac
+  if [ ! -f "$DANUS_NATIVE_CODEX_BIN" ] || [ ! -x "$DANUS_NATIVE_CODEX_BIN" ]; then
+    echo "native codex missing or not executable: $DANUS_NATIVE_CODEX_BIN" >&2
+    exit 127
+  fi
+elif [ -z "${DANUS_NODE:-}" ] || [ -z "${DANUS_CODEX_JS:-}" ]; then
+  echo "codex not provisioned — set DANUS_NATIVE_CODEX_BIN or run scripts/bootstrap.sh" >&2
   exit 127
 fi
 
@@ -49,4 +57,7 @@ if [ "${1:-}" = "exec" ]; then
   esac
 fi
 
+if [ -n "${DANUS_NATIVE_CODEX_BIN:-}" ]; then
+  exec "$DANUS_NATIVE_CODEX_BIN" "$@"
+fi
 exec "$DANUS_NODE" "$DANUS_CODEX_JS" "$@"

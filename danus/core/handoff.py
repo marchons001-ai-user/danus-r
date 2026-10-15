@@ -12,7 +12,7 @@ from .progress import ProgressLedger
 class HandoffRequests:
     """Append-only HandoffRequest state stored in ``ProgressLedger.path``."""
 
-    KINDS = ("REVIEW", "REVISION", "RETHINK", "INTERPRET", "ESCALATE")
+    KINDS = ("REVIEW", "REVISION", "RETHINK", "INTERPRET", "ESCALATE", "CLARIFY")
     SUBJECT_TYPES = ("PLAN_CHANGE", "IMPLEMENTATION_CONTRACT", "ASSIGNMENT", "PLAN_NODE")
     STATUSES = ("OPEN", "ASSIGNED", "RESOLVED", "STALE", "CANCELLED")
     TARGET_BY_KIND = {
@@ -44,6 +44,7 @@ class HandoffRequests:
         source_assignment_id: str = "",
         parent_handoff_id: str = "",
         evidence_refs: Optional[List[str]] = None,
+        target_role: str = "",
     ) -> Dict[str, Any]:
         kind = str(kind).strip().upper()
         if kind not in self.KINDS:
@@ -56,6 +57,7 @@ class HandoffRequests:
         subject_id = self.progress._required(subject_id, "subject_id")
         requested_by = self.progress._required(requested_by, "requested_by")
         source_role = self.progress._required(source_role, "source_role").lower()
+        original_request = str(request)
         request = self.progress._required(request, "request") + "\n"
         reason = self.progress._required(reason, "reason")
         source_assignment_id = str(source_assignment_id or "").strip()
@@ -75,10 +77,48 @@ class HandoffRequests:
             raise ValueError(f"unknown plan node: {node_id}")
         if node["state"] != "ACTIVE":
             raise ValueError(f"plan node {node_id} is not ACTIVE")
+        if kind == "INTERPRET" and subject_type == "ASSIGNMENT":
+            source = next(
+                (a for a in self.progress.assignments()
+                 if a["assignment_id"] == subject_id), None,
+            )
+            if source and node_id != source.get("node_id"):
+                # The downstream Researcher Plan task was frozen byte-for-byte.
+                # Preserve its exact trailing newlines instead of normalizing
+                # the handoff into a different task hash.
+                from danus.orchestration.autonomy import _interpret_plan_target, _task_spec
+
+                spec = _task_spec(self.root, node_id)
+                if (
+                    source.get("role") != "experimenter"
+                    or source_role != "experimenter"
+                    or source_assignment_id != subject_id
+                    or not refs
+                    or _interpret_plan_target(self.root, source["node_id"]) != node_id
+                    or spec.get("status") != "ready"
+                    or spec.get("role") != "researcher"
+                    or original_request != spec["task"]
+                ):
+                    raise ValueError("planned INTERPRET must match exact frozen Researcher task")
+                request = original_request
         if parent_handoff_id and self.get(parent_handoff_id) is None:
             raise ValueError(f"unknown parent handoff: {parent_handoff_id}")
 
-        target_role = self.TARGET_BY_KIND[kind]
+        if kind == "CLARIFY":
+            subject = next((a for a in self.progress.assignments()
+                            if a.get("assignment_id") == subject_id), None)
+            target_role = str(target_role or "").strip().lower()
+            if (source_role != "reviewer"
+                or subject_type != "ASSIGNMENT"
+                or target_role not in {"researcher", "experimenter"}
+                or not subject or subject.get("role") != "reviewer"
+                or subject.get("assignment_id") != source_assignment_id
+                or subject.get("state") not in {"ASSIGNED", "RUNNING", "BLOCKED"}):
+                raise ValueError("CLARIFY requires an active Reviewer source and a scientific target role")
+        else:
+            if target_role:
+                raise ValueError("target_role is permitted only for CLARIFY")
+            target_role = self.TARGET_BY_KIND[kind]
         request_sha256 = self.progress.task_sha256(request)
         identity = {
             "kind": kind,
@@ -102,7 +142,7 @@ class HandoffRequests:
             identity["node_epoch"] = self.progress.reopen_epoch(node_id)
         if subject_type in {"PLAN_CHANGE", "ASSIGNMENT"} and subject and subject.get("review_epoch"):
             identity["review_epoch"] = subject["review_epoch"]
-        if (subject_type == "ASSIGNMENT" and subject and kind in {"INTERPRET", "RETHINK", "ESCALATE"}
+        if (subject_type == "ASSIGNMENT" and subject and kind in {"INTERPRET", "RETHINK", "ESCALATE", "CLARIFY"}
             and not parent_handoff_id and subject.get("state") in {"ASSIGNED", "RUNNING"}):
             identity["review_epoch"] = int(subject.get("review_epoch", 0)) + 1
         handoff_id = self.progress._content_id(identity)
@@ -143,7 +183,13 @@ class HandoffRequests:
         return None
 
     def _view(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        """Subject revocation takes precedence over handoff retry state."""
+        """Keep explicit cancellation; revoke stale live handoffs as before."""
+        # CANCELLED is an explicit durable terminal event. Superseding its
+        # source Assignment cannot reclassify that historical cancellation
+        # as STALE. RESOLVED/OPEN/ASSIGNED retain their existing revocation
+        # checks, so a stale approval never gains authority.
+        if record["status"] == "CANCELLED":
+            return record
         subject = self._subject(record)
         if record.get("reauthorization"):
             if (not ResearchPlanGraph(self.root).node_compatible(record["node_id"], record["plan_version"])
@@ -157,8 +203,8 @@ class HandoffRequests:
             return record
         old_epoch = (record["subject_type"] in {"PLAN_CHANGE", "ASSIGNMENT"}
                      and int(record.get("review_epoch", 0)) != int(subject.get("review_epoch", 0)))
-        if (record["subject_type"] == "ASSIGNMENT" and record["kind"] in {"INTERPRET", "RETHINK", "ESCALATE"}
-            and not record.get("parent_handoff_id") and subject.get("state") in {"ASSIGNED", "RUNNING", "DONE"}
+        if (record["subject_type"] == "ASSIGNMENT" and record["kind"] in {"INTERPRET", "RETHINK", "ESCALATE", "CLARIFY"}
+            and not record.get("parent_handoff_id") and subject.get("state") in {"ASSIGNED", "RUNNING", "BLOCKED", "DONE"}
             and int(record.get("review_epoch", 0)) == int(subject.get("review_epoch", 0)) + 1):
             old_epoch = False
         if old_epoch or (subject.get("status") == "STALE" and record["status"] in {"OPEN", "ASSIGNED"}):

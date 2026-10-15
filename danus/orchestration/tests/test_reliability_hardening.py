@@ -206,7 +206,7 @@ def test_current_human_guidance_is_injected_into_scientific_round_context(tmp_pa
         (L.project_dir("P") / "HUMAN_GUIDANCE.md").write_text(
             "# Current Human Guidance\n\nUse the narrow route.\n", encoding="utf-8"
         )
-        text = loop._scientific_context("P", "researcher")
+        text = loop._scientific_context("P", "researcher", "low")
         assert "<CURRENT_HUMAN_GUIDANCE>" in text
         assert "Use the narrow route." in text
         assert "</CURRENT_HUMAN_GUIDANCE>" in text
