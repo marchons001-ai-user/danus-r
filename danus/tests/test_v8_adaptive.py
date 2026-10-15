@@ -413,3 +413,68 @@ def test_experimenter_can_implement_approved_missing_entrypoint(tmp_path):
     assert "Create missing NEW implementation scripts" in task["instruction"]
     assert not (s.root / "workspace" / "validation" / "run.py").exists()
     assert "planned script being absent is not a blocker" in v8._WORKER_POLICY
+
+
+def test_referenced_long_summary_is_restored_exactly_for_cross_role_answer(
+        tmp_path, monkeypatch):
+    """Regression: task-11 must not reconstruct a missing tail of task-3."""
+    s = new_store(tmp_path)
+    original = "Feasibility and provenance: " + "c" * 4900 + " END_OF_SOURCE"
+    unrelated = "Unrelated historical result " + "z" * 4900
+    source = dispatch(s, "researcher", "Inspect frozen CX inputs")
+    start(s, source)
+    v8._worker_result(s, source, {
+        "action": "complete", "summary": original})
+    other = dispatch(s, "researcher", "Different historical question")
+    start(s, other)
+    v8._worker_result(s, other, {
+        "action": "complete", "summary": unrelated})
+    reviewer = dispatch(s, "reviewer", f"Independently audit {source} findings")
+    reviewer_context, omitted = v8._referenced_completed_work(
+        s.state(), reviewer)
+    assert omitted == []
+    assert [(x["task_id"], x["summary"]) for x in reviewer_context] == [
+        (source, original)]
+    start(s, reviewer)
+    v8._worker_result(s, reviewer, {
+        "action": "request", "summary": "Need cited source's full result",
+        "to": "researcher",
+        "question": f"Please supply the remainder of {source}'s summary",
+        "reason": "Excerpt ended early"})
+    req = next(iter(s.state()["requests"]))
+    answer = dispatch(s, "researcher", "Answer the targeted request",
+                      "answer", request_id=req)
+    exact, omitted = v8._referenced_completed_work(s.state(), answer)
+    assert omitted == []
+    assert exact == [{"task_id": source, "role": "researcher",
+                      "purpose": "work", "summary": original}]
+
+    recorded = {}
+    def fake_model(model, effort, prompt, workspace, log, **kwargs):
+        recorded["payload"] = json.loads(
+            prompt.split("\nCurrent assignment:\n", 1)[1])
+        return {"action": "complete", "summary": "Cited source recovered exactly"}
+    monkeypatch.setattr(v8, "_call", fake_model)
+    v8._worker(s, answer)
+    payload = recorded["payload"]
+    assert payload["referenced_completed_work"] == exact
+    assert payload["recent_completed_work"][0]["task_id"] == source
+    assert payload["recent_completed_work"][0]["excerpt_truncated"] is True
+    assert len(payload["recent_completed_work"][0]["summary_excerpt"]) == 3000
+    assert unrelated not in json.dumps(payload["referenced_completed_work"])
+    assert s.state()["tasks"][source]["summary"] == original
+    assert s.state()["requests"][req]["status"] == "ANSWERED"
+    revived, _ = v8._referenced_completed_work(s.state(), reviewer)
+    assert revived[0]["summary"] == original
+
+
+def test_unreferenced_work_stays_bounded_and_missing_tasks_are_not_invented(tmp_path):
+    s = new_store(tmp_path)
+    source = dispatch(s, "researcher", "Long analysis")
+    start(s, source)
+    v8._worker_result(s, source, {
+        "action": "complete", "summary": "details " + "x" * 5200})
+    new = dispatch(s, "reviewer", "Assess an unrelated question")
+    assert v8._referenced_completed_work(s.state(), new) == ([], [])
+    named = dispatch(s, "reviewer", "Check task-9999 (not in event ledger)")
+    assert v8._referenced_completed_work(s.state(), named) == ([], [])
