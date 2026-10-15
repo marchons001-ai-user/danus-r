@@ -16,7 +16,7 @@ adaptive Researcher/Reviewer/Experimenter role dispatch, Host-owned
 experimental validation, frozen inputs and proposals, Reviewer issue
 resolution, an audit event log, and targeted sandbox resource protections.
 Modifications relative to the upstream repository can be traced through
-Git history and the integration PR #122.
+the Git history included with this distribution.
 
 The upstream Danus publication and mathematical proof-search results are
 not Danus-R publications or scientific findings. Danus-R's three local
