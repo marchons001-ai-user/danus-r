@@ -1258,7 +1258,10 @@ checks actual CSV rows; {"id":"mean","kind":"csv_mean","path":"output.csv",
 a reported numeric field. If the experiment has a self-contained executable
 checker, REQUIRED_CHECKS MUST include {"id":"checker_execution",
 "kind":"checker_execution","path":"fresh/run.py",
-"log_path":"fresh/run_log.json"}. Both files must be new registered artifacts;
+"log_path":"fresh/run_log.json"}. When the checker is a separate
+Python script rather than a --check flag, also pin its workspace-relative
+"checker_path":"fresh/verify.py" in that same approved check; do not rely
+on filenames like check.py. Both entrypoint and run log must be new registered artifacts;
 the run log must contain real child exits, and the host-owned Codex trace
 must show direct Python execution (printed commands do NOT count).
 For new proposals, only this typed approval activates the checker receipt;
