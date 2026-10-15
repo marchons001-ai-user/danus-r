@@ -916,3 +916,24 @@ The completed pilot remains immutable. Local regression pytest and
 a READ-ONLY dry-run of task-11's original frozen validation contract
 against its registered outputs are requested before trusting the fix
 in another pilot. Do not reopen or rerun the FINISHed study.
+
+
+### Residual architecture question: latest validation versus source experiment
+
+An independent observation from the UCI completed ledger: Host FINISH gates
+currently inspect latest_validation and latest Experimenter COMPLETE, while
+the original scientific experiment task-11 still retains its prior
+checker-only INCOMPLETE event; task-34 is a second, approved checker-only
+validation experiment with PASSED. In this specific pilot the independent
+final Reviewer explicitly inspected and reconstructed task-11's frozen
+producer, evaluation and both checker receipts, so the final bounded
+conclusion is not invalidated by the historical receipt-parser bug.
+
+The Host does NOT yet provide a general machine-enforced producer-to-repair
+lineage that proves a later checker-only PASSED settles the original source
+experiment. For future multi-experiment projects that distinction matters.
+A blanket requirement that every historical incomplete experiment become
+PASSED would also be wrong: superseded or genuinely failed trials must
+remain truthful historical evidence. Defer lineage design until a narrow
+failing case makes necessary semantics explicit; do not re-open this
+completed pilot or silently change past validation events.
