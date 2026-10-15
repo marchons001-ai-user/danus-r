@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from danus import v8
+from danus import v8, v8_validation
 from danus.tui.v8_state import load_v8_project_snapshot
 
 
@@ -63,6 +63,11 @@ def checks(name, count=2):
          "report_path": name + "/report.json", "report_key": "mse",
          "abs_tolerance": 1e-12},
     ]
+
+
+def checker_check(name):
+    return {"id": "checker_execution", "kind": "checker_execution",
+            "path": name + "/run.py", "log_path": name + "/run_log.json"}
 
 
 def test_missing_required_checks_are_debt_not_scientific_inconclusive(tmp_path):
@@ -177,7 +182,8 @@ def test_checker_receipt_uses_host_owned_tool_exit(
     proposal = (f"Run from workspace: python -B {name}/run.py. "
                 f"The parent runs --check and writes {name}/run_log.json.")
     research = dispatch(s, "researcher", "Propose check contract")
-    complete(s, research, proposal=proposal, required_checks=checks(name))
+    complete(s, research, proposal=proposal,
+             required_checks=checks(name) + [checker_check(name)])
     pid = list(s.state()["proposals"])[-1]
     reviewer = dispatch(s, "reviewer", "Review check contract",
                         "review_experiment", proposal_id=pid)
@@ -227,7 +233,7 @@ def test_revalidate_latest_checker_incomplete_without_rerunning_experiment(tmp_p
     research = dispatch(s, "researcher", "Propose receipt")
     complete(s, research,
              proposal=f"Run python -B {name}/run.py with --check; write {name}/run_log.json",
-             required_checks=checks(name))
+             required_checks=checks(name) + [checker_check(name)])
     pid = list(s.state()["proposals"])[-1]
     reviewer = dispatch(s, "reviewer", "Approve receipt",
                         "review_experiment", proposal_id=pid)
@@ -267,3 +273,89 @@ def test_revalidate_latest_checker_incomplete_without_rerunning_experiment(tmp_p
     assert len([e for e in s.read() if e["kind"] == "VALIDATION"]) == 2
     with pytest.raises(ValueError, match="checker-receipt INCOMPLETE"):
         v8.revalidate_latest(s, task)
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("python -B pilot/run.py", True),
+    ("python3.12 -u ./pilot/run.py --check", True),
+    ("/opt/venv/bin/python -B pilot/run.py", True),
+    ("cd /tmp/ws && python -B pilot/run.py", True),
+    ("echo 'python -B pilot/run.py'", False),
+    ("printf '%s' 'python -B pilot/run.py'", False),
+    ("python -c 'print(\\\"python -B pilot/run.py\\\")'", False),
+    ("python -B pilot/other.py --note pilot/run.py", False),
+    ("python -B pilot/run.py | cat", False),
+    ("true && python -B pilot/run.py", False),
+    ("cd /wrong && python -B pilot/run.py", False),
+])
+def test_only_direct_python_invocation_counts(tmp_path, command, expected):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert v8_validation._direct_python_entrypoint(
+        command, "pilot/run.py", workspace) is expected
+
+
+def test_new_checker_contract_is_typed_not_inferred_from_prose(tmp_path):
+    s = new_store(tmp_path)
+    name = "quoted_checker"
+    research = dispatch(s, "researcher", "Mention checker only")
+    complete(s, research,
+             proposal=(f"Discuss --check and {name}/run_log.json "
+                       f"but do not execute python -B {name}/run.py"),
+             required_checks=checks(name))
+    pid = next(iter(s.state()["proposals"]))
+    contract = s.state()["proposals"][pid]
+    assert contract["check_contract"] == "explicit_v1"
+    reviewer = dispatch(s, "reviewer", "Review", "review_experiment", proposal_id=pid)
+    complete(s, reviewer, verdict="APPROVE")
+    task = experiment(s, pid, name, "mse\n1\n3\n")
+    result = s.state()["validations"][task]
+    assert result["status"] == "PASSED"
+    assert not any(x["kind"] == "checker_execution" for x in result["checks"])
+
+
+def test_legacy_checker_prose_still_detected_by_host(tmp_path):
+    s = new_store(tmp_path)
+    name = "legacy"
+    root = s.root / "workspace" / name
+    root.mkdir()
+    (root / "run.py").write_text("print(0)\n")
+    (root / "run_log.json").write_text(json.dumps(
+        {"checker_exit_code": 0, "parent_exit_code": 0}))
+    task_id = "task-legacy"
+    logs = s.root / "logs"
+    logs.mkdir()
+    (logs / f"{task_id}-mock.jsonl").write_text(json.dumps({
+        "type": "item.completed",
+        "item": {"type": "command_execution",
+                 "command": f"python -B {name}/run.py", "exit_code": 0}
+    }) + "\n")
+    paths = {f"{name}/run.py": root / "run.py",
+             f"{name}/run_log.json": root / "run_log.json"}
+    import hashlib
+    owned = {
+        key: {"task_id": task_id, "bytes": path.stat().st_size,
+              "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        for key, path in paths.items()
+    }
+    proposal = {
+        "content": f"Run python -B {name}/run.py, then --check, save {name}/run_log.json",
+        "required_checks": [],
+        # Historical approved proposals have no check_contract version key.
+    }
+    receipt = v8_validation._checker_receipt(
+        s, task_id, proposal, owned, lambda key: paths[key])
+    assert receipt["status"] == "PASSED"
+
+
+def test_checker_contract_rejects_ambiguous_specs():
+    with pytest.raises(ValueError, match="id checker_execution"):
+        v8_validation.normalize_checks([
+            {"id": "something_else", "kind": "checker_execution",
+             "path": "pilot/run.py", "log_path": "pilot/run_log.json"}])
+    with pytest.raises(ValueError, match="only one checker_execution"):
+        v8_validation.normalize_checks([
+            checker_check("pilot"), checker_check("other")])
+    with pytest.raises(ValueError, match="safe workspace-relative"):
+        v8_validation.normalize_checks([{
+            **checker_check("pilot"), "log_path": "../outside.json"}])
