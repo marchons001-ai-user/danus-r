@@ -9,11 +9,12 @@ Danus system is a hardened multi-tenant service.
 Do **not** include real credentials, private datasets, personally identifying
 material or unpublished exploits in a public issue.
 
-Repository maintainers should enable **GitHub Private Vulnerability Reporting**
-in the repository Security settings before public release. Once enabled, use
-the repository's "Report a vulnerability" entry for responsible disclosure.
-Until that channel is enabled, do not publish exploit details or credentials
-in a public issue.
+For responsible disclosure, use the repository's
+[private vulnerability reporting](https://github.com/marchons001-ai-user/danus-r/security/advisories/new)
+channel (GitHub Security → Report a vulnerability). Do not publish exploit
+details, credentials or private research data in a public issue. If this
+channel is unavailable, contact a maintainer privately rather than posting
+a public reproduction containing sensitive details.
 
 Please include the affected version/commit, a redacted reproduction, the
 relevant trust boundary, and whether the failure permits unauthorized
