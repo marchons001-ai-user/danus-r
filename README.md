@@ -83,6 +83,22 @@ For goals and design constraints, see
 [the frozen pilot descriptions](docs/pilots/). Implementation tests live
 under `danus/tests/`.
 
+## Offline gate demonstration (no API calls)
+
+A minimal deterministic example runs the **real V8 approval, artifact
+verification, and FINISH guards** with synthetic data and scripted decisions:
+
+```bash
+python scripts/demo_v8_offline.py
+```
+
+No Codex login, provider key, external dataset, network access or model calls
+are needed (install the package first, as below). This is **not** an
+autonomous scientific-agent run or proof of research performance. It is an
+executable illustration of which claims the Host can and cannot verify.
+See [the offline demo explanation](docs/OFFLINE_DEMO.md) and
+[its regression test](danus/tests/test_v8_offline_demo.py).
+
 ## Getting started (Linux / WSL)
 
 This codebase contains both the inherited Danus mathematics workflow and the
@@ -148,6 +164,14 @@ The original Danus paper is
 [“Danus: Orchestrating Mathematical Reasoning Agents with Fact-Graph
 Memory”](https://arxiv.org/abs/2607.06447). These upstream papers and
 case studies **must not** be represented as newly produced Danus-R results.
+
+`CITATION.cff` identifies this repository as experimental Danus-R software
+under the collective "Danus-R contributors" label; its `references` section
+preserves the original Danus publication and author list. The original
+upstream attribution remains in the inherited LICENSE and historical README.
+This metadata does **not** claim that the Danus-R collective wrote the
+upstream Danus code or paper. The final public maintainer identity will be
+confirmed before the GitHub account transfer.
 
 Danus-R's V8 adaptations and exploratory pilot workflow are independently
 developed additions. No peer-reviewed Danus-R paper or general reliability

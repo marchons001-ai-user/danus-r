@@ -622,6 +622,12 @@ def test_worker_view_allows_science_notes_but_not_checkpoint_or_home(tmp_path):
     checkpoint = wl.local_memory / "runtime_checkpoint.json"
     checkpoint.write_text("HOST_CHECKPOINT")
     with W.worker_session(wl, config) as session:
+        # Real isolated Worker homes must not start curated plugin sync;
+        # the only authorized tool surface is the role-bound Danus Gateway.
+        worker_config = (session["home"] / "config.toml").read_text()
+        assert "\n[features]\nplugins = false\n" in worker_config
+        assert "\n[mcp_servers.danus]\n" in worker_config
+        assert session["env"]["CODEX_HOME"] == str(session["home"])
         secret = session["home"] / "auth.json"
         secret.write_text("HOST_AUTH")
         body = f'''

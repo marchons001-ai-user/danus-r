@@ -1,0 +1,24 @@
+Danus-R — derivative project attribution and change notice
+=========================================================
+
+This repository builds upon Danus, by FrenzyMath:
+https://github.com/frenzymath/Danus
+
+Original Danus copyright:
+    Copyright 2026 FrenzyMath
+
+The inherited Danus source is licensed under the Apache License, Version 2.0.
+The original LICENSE file and upstream authorship documentation are retained.
+See also docs/UPSTREAM_DANUS_README.md and CITATION.cff.
+
+Danus-R adds an experimental V8 scientific research workflow, including
+adaptive Researcher/Reviewer/Experimenter role dispatch, Host-owned
+experimental validation, frozen inputs and proposals, Reviewer issue
+resolution, an audit event log, and targeted sandbox resource protections.
+Modifications relative to the upstream repository can be traced through
+Git history and the integration PR #122.
+
+The upstream Danus publication and mathematical proof-search results are
+not Danus-R publications or scientific findings. Danus-R's three local
+pilot outcomes are exploratory and have not been established as independent
+public benchmarks. Other dependencies retain their own applicable licenses.

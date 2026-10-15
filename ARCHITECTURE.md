@@ -1,3 +1,22 @@
+# Danus-R architecture: original Danus and V8 extension
+
+This document preserves the **upstream Danus mathematical workflow** and
+its inherited interfaces below. Do not read its original layer diagram as
+the current V8 scientific-research architecture.
+
+Danus-R's additional adaptive research path is documented separately in
+[docs/V8_ADAPTIVE.md](docs/V8_ADAPTIVE.md). Its key distinction is a
+Supervisor dispatching Researcher, Reviewer and Experimenter roles over
+a fixed research goal, immutable approved experiment protocols, and
+Host-owned execution/integrity validation. A final independent Reviewer
+verdict is required before FINISH; validation PASS is not scientific truth.
+
+For an executable **scripted** state-machine demonstration without models,
+see [docs/OFFLINE_DEMO.md](docs/OFFLINE_DEMO.md). For provenance and credit
+of the inherited math system, see [the original README](docs/UPSTREAM_DANUS_README.md).
+
+---
+
 # Danus — Architecture
 
 Danus turns the Rethlas single-problem proof engine (a codex agent plus proving
