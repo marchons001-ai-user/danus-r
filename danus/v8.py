@@ -998,7 +998,7 @@ def _brief_state(store: Store, *, last=12):
     for req in state["requests"].values():
         if req["status"] != "OPEN" or req["to"] != "supervisor":
             continue
-        cited = re.findall(r"(?<![\\w])task-\\d+(?![\\w])", req["question"])
+        cited = re.findall(r"(?<![\w])task-\d+(?![\w])", req["question"])
         source = next((state["tasks"][tid] for tid in cited
                        if tid in state["tasks"]
                        and state["tasks"][tid]["status"] == "COMPLETE"), None)
