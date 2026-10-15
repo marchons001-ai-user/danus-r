@@ -531,3 +531,54 @@ def test_supervisor_request_sources_are_narrow_and_do_not_invent_missing_records
         "to": "supervisor", "question": "What did task-9999 establish?",
         "reason": "Need to know"})
     assert v8._brief_state(s)["supervisor_request_sources"][0]["completed_source"] is None
+
+
+def test_corrective_researcher_and_supervisor_can_read_frozen_revised_proposal(
+        tmp_path, monkeypatch):
+    s = new_store(tmp_path)
+    original = "Fixed study protocol: " + "x" * 12000 + " PRECISE_END"
+    researcher = dispatch(s, "researcher", "Draft a bounded exact protocol")
+    start(s, researcher)
+    v8._worker_result(s, researcher, {
+        "action": "complete", "summary": "Protocol submitted",
+        "proposal": original,
+        "required_checks": [{"id": "integrity", "kind": "asset_integrity"}],
+    })
+    pid = next(iter(s.state()["proposals"]))
+    reviewer = dispatch(s, "reviewer", "Review protocol",
+                        "review_experiment", proposal_id=pid)
+    start(s, reviewer)
+    v8._worker_result(s, reviewer, {
+        "action": "complete", "summary": "One endpoint definition is missing",
+        "verdict": "REVISE",
+    })
+    assert s.state()["proposals"][pid]["status"] == "REVISE"
+    correction = dispatch(s, "researcher", "Correct the revised protocol")
+    seen = {}
+    def model(model_name, effort, prompt, workspace, log, **kwargs):
+        seen["payload"] = json.loads(
+            prompt.split("\nCurrent assignment:\n", 1)[1])
+        return {"action": "request", "summary": "Need exact source",
+                "to": "supervisor",
+                "question": f"Provide proposal {pid} verbatim",
+                "reason": "Avoid changing approved numeric conditions"}
+    monkeypatch.setattr(v8, "_call", model)
+    v8._worker(s, correction)
+    assert seen["payload"]["cited_experiment_proposals"][0]["content"] == original
+    status = v8._brief_state(s)
+    source = status["supervisor_request_sources"][0]["cited_proposals"]
+    assert len(source) == 1
+    assert source[0]["id"] == pid
+    assert source[0]["content"] == original
+    assert s.state()["proposals"][pid]["content"] == original
+
+    # The exact same event-backed proposal is available for a targeted answer.
+    answer = dispatch(s, "researcher", "Answer proposal source request",
+                      "answer", request_id=next(iter(s.state()["requests"])))
+    payload = {}
+    def answer_model(model_name, effort, prompt, workspace, log, **kwargs):
+        payload.update(json.loads(prompt.split("\nCurrent assignment:\n", 1)[1]))
+        return {"action": "complete", "summary": "Exact proposal read"}
+    monkeypatch.setattr(v8, "_call", answer_model)
+    v8._worker(s, answer)
+    assert payload["cited_experiment_proposals"][0]["content"] == original
