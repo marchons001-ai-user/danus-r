@@ -38,10 +38,9 @@ def normalize_checks(raw):
         names.add(name)
         allowed = {
             "asset_integrity": {"id", "kind"},
-            "checker_execution": ({"id", "kind", "path", "log_path",
-                                   "require_replay"}
-                                  if "require_replay" in item
-                                  else {"id", "kind", "path", "log_path"}),
+            "checker_execution": ({"id", "kind", "path", "log_path"}
+                                  | ({"require_replay"} if "require_replay" in item else set())
+                                  | ({"checker_path"} if "checker_path" in item else set())),
             "csv_rows": {"id", "kind", "path", "expected_rows"},
             "csv_mean": {"id", "kind", "path", "column", "report_path",
                          "report_key", "abs_tolerance"},
@@ -69,7 +68,7 @@ def normalize_checks(raw):
                     or not isinstance(item["scope"], dict) or not item["scope"]
                     or not re.fullmatch(r"[0-9a-f]{16}", str(item["protocol_id"]))):
                 raise ValueError("v7_evidence requires pinned record IDs, scope and protocol ID")
-        for field in ("path", "report_path", "log_path"):
+        for field in ("path", "report_path", "log_path", "checker_path"):
             if field in item and (not isinstance(item[field], str)
                                   or not item[field].strip()
                                   or Path(item[field]).is_absolute()
@@ -170,6 +169,9 @@ def _checker_receipt(store, task_id, proposal, owned, source):
 
     exit_markers, failures, missing = [], [], []
     child_exits = {"replay": [], "check": []}
+    checker_path = explicit[0].get("checker_path") if explicit else None
+    checker_abs = ((store.root / "workspace" / checker_path).resolve()
+                   if checker_path else None)
     def receipt_exit(obj):
         fields = [obj[key] for key in ("exit_code", "returncode", "return_code")
                   if key in obj]
@@ -188,7 +190,17 @@ def _checker_receipt(store, task_id, proposal, owned, source):
                 roles = []
                 if "--replay" in argv:
                     roles.append("replay")
-                if "--check" in argv or script_names & {"check.py", "checker.py"}:
+                if checker_path:
+                    check_match = any(
+                        isinstance(part, str) and part.endswith(".py")
+                        and (Path(part) == Path(checker_path)
+                             or (Path(part).is_absolute()
+                                 and Path(part).resolve() == checker_abs))
+                        for part in argv)
+                else:
+                    check_match = ("--check" in argv
+                                   or bool(script_names & {"check.py", "checker.py"}))
+                if check_match:
                     roles.append("check")
                 for role in roles:
                     child_exits[role].append(receipt_exit(obj))
