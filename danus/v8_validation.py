@@ -28,6 +28,8 @@ def normalize_checks(raw):
         if not isinstance(item, dict) or not _ID.fullmatch(str(item.get("id", ""))):
             raise ValueError("each required check needs a stable lowercase id")
         name, kind = item["id"], item.get("kind")
+        if kind == "checker_execution" and name != "checker_execution":
+            raise ValueError("checker_execution requires id checker_execution")
         if name in names or kind not in KINDS:
             raise ValueError("duplicate check id or unsupported check kind")
         names.add(name)
