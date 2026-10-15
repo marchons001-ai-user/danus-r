@@ -48,11 +48,14 @@ This is a checkable list, not a claim that the checks have already passed.
       that will become visible. Local runtime/ is gitignored and should remain
       untracked.
 
-- [x] Operator accepts the historical author Gmail addresses and will not
-      rewrite commits solely for email privacy. This does not approve other PII.
-- [ ] Review tracked `docs/environment_baseline_raw.txt` and
-      `docs/environment_baseline.md`: these contain a Windows username,
-      workstation details and paths, including in preserved Git history.
+- [ ] Remove personal Gmail author/committer addresses from the public
+      Git history and use GitHub `noreply` commit identities going forward.
+- [ ] Remove personal workstation identifiers and private local paths from
+      public history, including both `docs/environment_baseline_raw.txt` and
+      `docs/environment_baseline.md` and any other historical occurrences.
+- [ ] Audit PR refs, archived discussions, and hosted Actions logs. A force
+      push or deleting a branch does not purge PR or cached commit history;
+      do not mark privacy as cleared until residual access is assessed.
 
 ## C. Branches, CI and release behavior
 
