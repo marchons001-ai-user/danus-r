@@ -223,10 +223,14 @@ def test_control_signature_changes_when_deadline_crosses(tmp_path: Path, monkeyp
         ctx.__exit__(None, None, None)
 
 
-def test_watch_reconciles_on_change_then_quota_refresh(tmp_path: Path, monkeypatch):
+def test_watch_refreshes_observe_only_telemetry_without_quota_reconcile(
+        tmp_path: Path, monkeypatch):
+    from itertools import chain, repeat
+
     ctx, pdir, _ = _project(tmp_path)
     try:
-        times = iter([0.0, 301.0])
+        # Deterministic clock without exhausting while the watchdog also polls it.
+        times = chain([0.0], repeat(301.0))
         monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
         monkeypatch.setattr(cli.time, "sleep", lambda _: None)
         refreshes = []
@@ -234,12 +238,14 @@ def test_watch_reconciles_on_change_then_quota_refresh(tmp_path: Path, monkeypat
 
         gen = cli.watch_supervisor("P", heartbeat=1800.0, poll=1.0)
         next(gen)
+        # Trigger a real control-input change, not a telemetry-only quota change.
+        (pdir / L.DEADLINE_FILE).write_text("9999999999\n", encoding="utf-8")
         next(gen)
         events = [
             json.loads(line)
             for line in (pdir / "supervisor" / "events.jsonl").read_text(encoding="utf-8").splitlines()
         ]
-        assert [event["trigger"] for event in events[-2:]] == ["event", "quota"]
+        assert [event["trigger"] for event in events[-2:]] == ["event", "event"]
         assert refreshes == [pdir, pdir]
     finally:
         ctx.__exit__(None, None, None)
