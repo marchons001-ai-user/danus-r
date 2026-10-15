@@ -14,8 +14,11 @@ This is a checkable list, not a claim that the checks have already passed.
       The public maintainer identity is collective until account transfer.
 - [x] The three local studies are labeled exploratory, not general
       benchmarks or peer-reviewed scientific discoveries.
-- [x] Transferred the single canonical repository to `marchons001-ai-user`;
-      original owner `Marchons-AIuser` retains write access. No duplicate repo.
+- [x] Transferred the repository to `marchons001-ai-user`;
+      original owner `Marchons-AIuser` retains write access.
+- [ ] Retain the existing repository PRIVATE as an audit archive, and publish
+      only a separately sanitized repository under the canonical `danus-r`
+      name. Never change the archive to Public.
 
 ## B. Security and privacy: hard stop before toggling Public
 
@@ -53,9 +56,10 @@ This is a checkable list, not a claim that the checks have already passed.
 - [ ] Remove personal workstation identifiers and private local paths from
       public history, including both `docs/environment_baseline_raw.txt` and
       `docs/environment_baseline.md` and any other historical occurrences.
-- [ ] Audit PR refs, archived discussions, and hosted Actions logs. A force
-      push or deleting a branch does not purge PR or cached commit history;
-      do not mark privacy as cleared until residual access is assessed.
+- [ ] Audit old PR refs, archived discussions, and hosted Actions logs.
+      They remain in the PRIVATE archive; do not carry these hosted records
+      into the sanitized public repository. Force-pushing the archive is not
+      a substitute for removing GitHub-hosted PR/cached references.
 
 ## C. Branches, CI and release behavior
 
@@ -93,7 +97,8 @@ This is a checkable list, not a claim that the checks have already passed.
 
 ## E. Actual public switch (only after A-D)
 
-In GitHub, with the intended owner account:
+Only for the independently sanitized public repository (NEVER the historical
+private archive), after checking all publish gates:
 Repository > Settings > General > Danger Zone > Change repository
 visibility > Make public. Read GitHub's visibility consequences BEFORE
 confirming. This may expose commit history, all public-accessible branches,
