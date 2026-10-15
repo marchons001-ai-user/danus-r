@@ -1317,7 +1317,7 @@ def _referenced_completed_work(state, task_id):
         texts.append(request["question"])
     texts.extend(r["question"] for r in state["requests"].values()
                  if r["from_task"] == task_id)
-    ids = set(re.findall(r"(?<![\\w])task-\\d+(?![\\w])", "\\n".join(texts)))
+    ids = set(re.findall(r"(?<![\w])task-\d+(?![\w])", "\n".join(texts)))
     candidates = [
         t for t in state["tasks"].values()
         if (t["id"] in ids and t["id"] != task_id
@@ -1355,6 +1355,7 @@ def _worker(store: Store, task_id, *, timeout=1200):
                               if t["purpose"] == "experiment"), None)
     related_proposal_id = task["proposal_id"] or (
         latest_experiment["proposal_id"] if latest_experiment else "")
+    referenced, omitted = _referenced_completed_work(state, task_id)
     payload = {
         "goal": state["goal"], "reference": state["reference"], "task": task,
         "request_to_answer": req,
@@ -1376,8 +1377,8 @@ def _worker(store: Store, task_id, *, timeout=1200):
              "excerpt_truncated": len(t["summary"]) > 3000}
             for t in state["tasks"].values() if t["status"] == "COMPLETE"
         ][-10:],
-        "referenced_completed_work": _referenced_completed_work(state, task_id)[0],
-        "omitted_referenced_task_ids": _referenced_completed_work(state, task_id)[1],
+        "referenced_completed_work": referenced,
+        "omitted_referenced_task_ids": omitted,
     }
     prompt = _WORKER_POLICY + _output_budget_guide() + "\nCurrent assignment:\n" + json.dumps(
         payload, ensure_ascii=False, indent=2)
