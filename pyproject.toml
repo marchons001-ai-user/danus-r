@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "danus"
 version = "0.1.0"
-description = "Danus — automated mathematics proof-search orchestration engine"
+description = "Danus-R — experimental adaptive scientific harness extending the upstream Danus mathematical reasoning system"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Bin Wu" }]
-keywords = ["mathematics", "proof-search", "multi-agent", "llm", "orchestration"]
+keywords = ["mathematics", "proof-search", "scientific-research", "multi-agent", "llm", "orchestration"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -29,7 +29,8 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/frenzymath/Danus"
+Repository = "https://github.com/Marchons-AIuser/danus-r"
+Upstream = "https://github.com/frenzymath/Danus"
 
 [project.optional-dependencies]
 gateway = ["mcp"]                                   # danus.gateway — role-gated MCP server
