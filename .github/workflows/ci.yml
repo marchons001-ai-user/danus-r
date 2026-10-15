@@ -28,7 +28,8 @@ jobs:
             danus/tests/test_v8_validation.py \
             danus/tests/test_v8_review_convergence.py \
             danus/tests/test_v8_review_feedback.py \
-            danus/tests/test_v8_inputs.py
+            danus/tests/test_v8_inputs.py \
+            danus/tests/test_v8_offline_demo.py
 
   full-repository:
     name: Full repository with sandbox (${{ matrix.python-version }})
