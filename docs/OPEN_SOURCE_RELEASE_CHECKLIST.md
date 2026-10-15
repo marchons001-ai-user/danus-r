@@ -106,3 +106,14 @@ After switching:
 Note: local secret scanning is **necessary but not sufficient**. Gitleaks can
 miss custom secrets, GitHub Actions log leaks and personal information.
 The owner makes the final visibility decision after reviewing findings.
+
+
+## 2026-10-15 RC integration status
+
+- [x] Git history Gitleaks pass: 970 locally reachable commits, zero signature matches (still not exhaustive for GitHub PR/Actions logs or personal information).
+- [x] Release branch `release/v8-rc-20261015` created from V8 head; one draft consolidation PR #122 now targets `main`.
+- [x] D4 output bound, interrupted-experiment no-replay and owned-process/profile cleanup moved into RC without merging unrelated older documentation/CI; all four imported files are byte-identical to the D4 branch.
+- [x] Operator ran **124 targeted WSL tests passing in 9.00 s** after this port (D4 + V8).
+- [ ] GitHub Actions CI was split into V8 offline correctness gates and a separate full suite. Full suite now provisions official Codex 0.153.4 and runs the actual sandbox acceptance probe before pytest. CI result **pending**; do not claim full green.
+- [ ] In the last previous full GitHub Actions failure (before sandbox provisioning), 79 failed / 1228 passed / 15 skipped. Of those 79, about 63 were directly consistent with missing Codex or execution timeouts, about 9 had outdated/changed API signatures, and 7 need additional investigation; these are diagnostic buckets, not proven root causes.
+- [ ] Do not merge PR #122 or switch to Public until CI failures are honestly classified, release metadata/safety reviewed and manual GitHub-hosted log scan is complete.
