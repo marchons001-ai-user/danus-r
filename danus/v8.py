@@ -954,6 +954,13 @@ def _call(model, effort, prompt, workdir, log_path, *, writable=False, timeout=1
     return _completed_model_reply(log_path)
 
 
+def _cited_proposals(state, text):
+    """Read exact frozen proposal contracts only for identifiers in a request."""
+    ids = dict.fromkeys(re.findall(
+        r"(?<![0-9a-f])[0-9a-f]{16}(?![0-9a-f])", text or ""))
+    return [state["proposals"][pid] for pid in ids if pid in state["proposals"]][:2]
+
+
 def _brief_state(store: Store, *, last=12):
     """Bounded *routing* context; the full proposal and evidence stay in Store.
 
@@ -1010,6 +1017,7 @@ def _brief_state(store: Store, *, last=12):
         supervisor_sources.append({
             "request_id": req["id"],
             "question": req["question"],
+            "cited_proposals": _cited_proposals(state, req["question"]),
             "completed_source": (
                 {"task_id": source["id"], "summary": source["summary"]}
                 if source else None),
@@ -1070,7 +1078,9 @@ Workers may ask any one role or Supervisor one question at a time, and continue
 after a reply. Resolve the oldest material open question before making new work.
 Task summaries in the routing table are TRUNCATED PREVIEWS, not absent source
 records. For requests directed to you, use supervisor_request_sources to read
-the exact completed source summary if supplied. Do not answer that the omitted
+the exact completed source summary and any cited_proposals if supplied.
+A proposal ID in the routing table is NOT its full contract. Do not claim a
+recorded proposal is unavailable merely because routing omits its content. Do not answer that the omitted
 tail is unavailable just because the routing preview ends early. If no full
 source is available and accurate details matter, dispatch an appropriate
 answer role rather than reconstructing or inventing the missing evidence.
@@ -1160,6 +1170,10 @@ recent_completed_work contains bounded PREVIEWS only, marked excerpt_truncated.
 When referenced_completed_work supplies a completed task's exact summary,
 use that complete recorded text instead of requesting or reconstructing its
 missing tail. Do not assume an excerpt is the complete historical result.
+When cited_experiment_proposals contains a frozen REVISE proposal, preserve
+its exact conditions while correcting the specified Reviewer defect. Never
+infer that a stored proposal is absent from a truncated summary or missing
+from the writable workspace; approval contracts live in the event Store.
 
 Do not modify the fixed research goal. A negative scientific result is valid.
 Keep experiment costs small. Never modify external reference repositories or
@@ -1400,6 +1414,20 @@ def _worker(store: Store, task_id, *, timeout=1200):
     related_proposal_id = task["proposal_id"] or (
         latest_experiment["proposal_id"] if latest_experiment else "")
     referenced, omitted = _referenced_completed_work(state, task_id)
+    proposal_questions = [task["instruction"]]
+    if req:
+        proposal_questions.append(req["question"])
+    proposal_questions.extend(r["question"] for r in state["requests"].values()
+                              if r["from_task"] == task_id)
+    cited_proposals = _cited_proposals(state, "\n".join(proposal_questions))
+    if (not cited_proposals and task["role"] == "researcher"
+            and task["purpose"] == "work"
+            and any(term in task["instruction"].lower()
+                    for term in ("revis", "correct", "proposal"))):
+        revised = next((p for p in reversed(list(state["proposals"].values()))
+                        if p["status"] == "REVISE"), None)
+        if revised:
+            cited_proposals = [revised]
     payload = {
         "goal": state["goal"], "reference": state["reference"], "task": task,
         "request_to_answer": req,
@@ -1423,6 +1451,7 @@ def _worker(store: Store, task_id, *, timeout=1200):
         ][-10:],
         "referenced_completed_work": referenced,
         "omitted_referenced_task_ids": omitted,
+        "cited_experiment_proposals": cited_proposals,
     }
     prompt = _WORKER_POLICY + _output_budget_guide() + "\nCurrent assignment:\n" + json.dumps(
         payload, ensure_ascii=False, indent=2)
