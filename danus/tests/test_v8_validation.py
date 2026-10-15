@@ -279,7 +279,7 @@ def test_revalidate_latest_checker_incomplete_without_rerunning_experiment(tmp_p
     ("python -B pilot/run.py", True),
     ("python3.12 -u ./pilot/run.py --check", True),
     ("/opt/venv/bin/python -B pilot/run.py", True),
-    ("cd /tmp/ws && python -B pilot/run.py", True),
+    ("cd {workspace} && python -B pilot/run.py", True),
     ("echo 'python -B pilot/run.py'", False),
     ("printf '%s' 'python -B pilot/run.py'", False),
     ("python -c 'print(\\\"python -B pilot/run.py\\\")'", False),
@@ -291,6 +291,7 @@ def test_revalidate_latest_checker_incomplete_without_rerunning_experiment(tmp_p
 def test_only_direct_python_invocation_counts(tmp_path, command, expected):
     workspace = tmp_path / "ws"
     workspace.mkdir()
+    command = command.replace("{workspace}", str(workspace))
     assert v8_validation._direct_python_entrypoint(
         command, "pilot/run.py", workspace) is expected
 
