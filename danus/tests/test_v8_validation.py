@@ -419,3 +419,72 @@ def test_typed_checker_requires_boolean_replay_option():
     valid = v8_validation.normalize_checks([
         {**checker_check("case"), "require_replay": True}])
     assert valid[0]["require_replay"] is True
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("/bin/bash -lc 'python -B pilot/run.py'", True),
+    ("bash -lc 'python -B pilot/run.py'", True),
+    ("/bin/bash -lc 'echo python -B pilot/run.py'", False),
+    ("/bin/bash -lc 'printf python -B pilot/run.py'", False),
+    ("/bin/bash -lc 'python -B pilot/other.py pilot/run.py'", False),
+    ("/bin/bash -lc 'python -B pilot/run.py | cat'", False),
+    ("/bin/bash -lc 'python -B pilot/run.py; true'", False),
+    ("/bin/bash -lc 'python -B pilot/run.py && true'", False),
+    ("/bin/bash -lc 'python -B pilot/run.py $(echo bad)'", False),
+    ("bash -lc 'bash -lc \"python -B pilot/run.py\"'", False),
+])
+def test_codex_shell_wrapper_invocation_is_not_just_a_text_match(
+        tmp_path, command, expected):
+    assert v8_validation._direct_python_entrypoint(
+        command, "pilot/run.py", tmp_path) is expected
+
+
+@pytest.mark.parametrize("sim_code,check_code,parent_code,expected", [
+    (0, 0, 0, "PASSED"),
+    (1, 0, 0, "FAILED"),
+    (0, 2, 0, "FAILED"),
+    (0, None, 0, "INCOMPLETE"),
+    (0, 0, 3, "FAILED"),
+    (0, 0, None, "INCOMPLETE"),
+])
+def test_task38_actual_runlog_schema_and_host_shell_trace(
+        tmp_path, sim_code, check_code, parent_code, expected):
+    s = new_store(tmp_path)
+    name = "fresh/task20"
+    pid = approved(s, "recorded_flycx", checks(name) + [checker_check(name)])
+    task = dispatch(s, "experimenter", "Execute reviewed compass study",
+                    "experiment", proposal_id=pid)
+    root = s.root / "workspace" / name
+    root.mkdir(parents=True)
+    (root / "metrics.csv").write_text("mse\n1\n3\n")
+    (root / "report.json").write_text('{"mse":2}')
+    (root / "run.py").write_text("print('wrapper')\n")
+    log = {
+        "proposal_id": pid,
+        "argv": ["python", "-B", name + "/run.py"],
+        "children": [
+            {"argv": ["/venv/bin/python", "-B", name + "/simulate.py"],
+             "returncode": sim_code},
+            {"argv": ["/venv/bin/python", "-B", name + "/check.py"],
+             "returncode": check_code},
+        ],
+        "returncode": parent_code,
+    }
+    (root / "run_log.json").write_text(json.dumps(log))
+    trace = s.root / "logs"
+    trace.mkdir()
+    (trace / f"{task}-real.jsonl").write_text(json.dumps({
+        "type": "item.completed",
+        "item": {"type": "command_execution",
+                 "command": f"/bin/bash -lc 'python -B {name}/run.py'",
+                 "exit_code": 0},
+    }) + "\n")
+    complete(s, task, artifacts=[
+        name + "/metrics.csv", name + "/report.json",
+        name + "/run.py", name + "/run_log.json",
+    ])
+    result = s.state()["latest_validation"]
+    assert result["status"] == expected
+    checker = next(x for x in result["checks"]
+                   if x["kind"] == "checker_execution")
+    assert checker["status"] == expected
