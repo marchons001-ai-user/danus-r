@@ -170,7 +170,7 @@ preserves the original Danus publication and author list. The original
 upstream attribution remains in the inherited LICENSE and historical README.
 This metadata does **not** claim that the Danus-R collective wrote the
 upstream Danus code or paper. The canonical repository is maintained at
-[Marchons001/danus-r](https://github.com/marchons001-ai-user/danus-r).
+[marchons001-ai-user/danus-r](https://github.com/marchons001-ai-user/danus-r).
 
 Danus-R's V8 adaptations and exploratory pilot workflow are independently
 developed additions. No peer-reviewed Danus-R paper or general reliability
