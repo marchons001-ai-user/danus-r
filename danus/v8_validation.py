@@ -89,10 +89,20 @@ def _direct_python_entrypoint(command, script, workspace):
     """Accept only a directly executed Python script, never text mentioning one."""
     if not isinstance(command, str):
         return False
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
+    def tokens(value):
+        lexer = shlex.shlex(value, posix=True, punctuation_chars=";&|<>()")
         lexer.whitespace_split = True
-        words = list(lexer)
+        return list(lexer)
+    try:
+        words = tokens(command)
+        # Codex commonly records a single shell launch around the real command.
+        # Unwrap exactly one literal shell -c command; refuse shell evaluation.
+        if (len(words) == 3 and Path(words[0]).name in {"bash", "sh"}
+                and words[1] in {"-c", "-lc"}):
+            inner = words[2]
+            if any(char in inner for char in ("$", "`", "\\n", "\\r")):
+                return False
+            words = tokens(inner)
     except ValueError:
         return False
     if len(words) >= 4 and words[0] == "cd" and words[2] == "&&":
@@ -160,14 +170,29 @@ def _checker_receipt(store, task_id, proposal, owned, source):
 
     exit_markers, failures, missing = [], [], []
     child_exits = {"replay": [], "check": []}
+    def receipt_exit(obj):
+        fields = [obj[key] for key in ("exit_code", "returncode", "return_code")
+                  if key in obj]
+        if not fields or any(type(value) is not int for value in fields):
+            return None
+        if len(set(fields)) != 1:
+            return "CONFLICT"
+        return fields[0]
+
     def scan(obj, context=""):
         if isinstance(obj, dict):
             argv = obj.get("argv")
             if isinstance(argv, list):
-                for flag, role in (("--replay", "replay"), ("--check", "check")):
-                    if flag in argv:
-                        child_exits[role].append(obj.get("exit_code"))
-                        context += "." + role
+                script_names = {Path(part).name for part in argv
+                                if isinstance(part, str) and part.endswith(".py")}
+                roles = []
+                if "--replay" in argv:
+                    roles.append("replay")
+                if "--check" in argv or script_names & {"check.py", "checker.py"}:
+                    roles.append("check")
+                for role in roles:
+                    child_exits[role].append(receipt_exit(obj))
+                    context += "." + role
             for key, value in obj.items():
                 name = str(key).lower()
                 full = context + "." + name
@@ -196,10 +221,12 @@ def _checker_receipt(store, task_id, proposal, owned, source):
         children = runlog["children"]
         if not children or any(not isinstance(child, dict) for child in children):
             return outcome("INCOMPLETE", "run log has missing or malformed child receipts")
-        if any(type(child.get("exit_code")) is not int for child in children):
+        codes = [receipt_exit(child) for child in children]
+        if any(code == "CONFLICT" for code in codes):
+            return outcome("FAILED", "run log contains conflicting child exit fields")
+        if any(code is None for code in codes):
             return outcome("INCOMPLETE", "run log has a child without a numeric exit code")
-        nonzero = [(i, child["exit_code"]) for i, child in enumerate(children)
-                   if child["exit_code"] != 0]
+        nonzero = [(i, code) for i, code in enumerate(codes) if code != 0]
         if nonzero:
             return outcome("FAILED", f"run log has nonzero child exits: {nonzero}"[:800])
         replay_required = (not explicit or explicit[0].get("require_replay", False))
@@ -209,6 +236,13 @@ def _checker_receipt(store, task_id, proposal, owned, source):
             return outcome(
                 "INCOMPLETE",
                 "run log lacks exactly one --check child or required --replay child")
+    if (isinstance(runlog, dict)
+            and any(k in runlog for k in ("returncode", "exit_code", "return_code"))):
+        parent = receipt_exit(runlog)
+        if parent == "CONFLICT" or (type(parent) is int and parent != 0):
+            return outcome("FAILED", "run log reports nonzero/conflicting wrapper exit")
+        if parent is None:
+            return outcome("INCOMPLETE", "run log wrapper exit is not numeric")
     if not any("check" in marker for marker in exit_markers):
         return outcome("INCOMPLETE", "run_log.json lacks numeric checker exit evidence")
 
