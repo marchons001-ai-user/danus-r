@@ -164,12 +164,14 @@ def test_two_repeated_unresolved_check_sets_escalate_to_high(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize(
-    "checker_exit, tool_exit, expected",
-    [(1, 0, "FAILED"), (0, 1, "FAILED"),
-     (0, 0, "PASSED"), (0, None, "INCOMPLETE")],
+    "checker_exit, tool_exit, expected, nested",
+    [(1, 0, "FAILED", False), (0, 1, "FAILED", False),
+     (0, 0, "PASSED", False), (0, None, "INCOMPLETE", False),
+     (1, 0, "FAILED", True), (0, 1, "FAILED", True),
+     (0, 0, "PASSED", True), (0, None, "INCOMPLETE", True)],
 )
 def test_checker_receipt_uses_host_owned_tool_exit(
-        tmp_path, checker_exit, tool_exit, expected):
+        tmp_path, checker_exit, tool_exit, expected, nested):
     s = new_store(tmp_path)
     name = "check_pilot"
     proposal = (f"Run from workspace: python -B {name}/run.py. "
@@ -186,8 +188,15 @@ def test_checker_receipt_uses_host_owned_tool_exit(
     out.mkdir(parents=True)
     (out / "metrics.csv").write_text("mse\n1\n3\n")
     (out / "report.json").write_text('{"mse": 2}')
-    (out / "run_log.json").write_text(
-        json.dumps({"checker_exit_code": checker_exit, "parent_exit_code": 0}))
+    if nested:
+        receipt = {"children": [
+            {"argv": ["python", f"{name}/run.py", "--replay"], "exit_code": 0},
+            {"argv": ["python", f"{name}/run.py", "--check"],
+             "exit_code": checker_exit},
+        ]}
+    else:
+        receipt = {"checker_exit_code": checker_exit, "parent_exit_code": 0}
+    (out / "run_log.json").write_text(json.dumps(receipt))
     (out / "run.py").write_text("print('check pilot')\n")
     s.append("RUNNING", task_id=task)
     if tool_exit is not None:
@@ -210,3 +219,51 @@ def test_checker_receipt_uses_host_owned_tool_exit(
                    if r["id"] == "checker_execution")
     assert receipt["status"] == expected
     assert s.state()["tasks"][task]["status"] == "COMPLETE"
+
+
+def test_revalidate_latest_checker_incomplete_without_rerunning_experiment(tmp_path):
+    s = new_store(tmp_path)
+    name = "receipt"
+    research = dispatch(s, "researcher", "Propose receipt")
+    complete(s, research,
+             proposal=f"Run python -B {name}/run.py with --check; write {name}/run_log.json",
+             required_checks=checks(name))
+    pid = list(s.state()["proposals"])[-1]
+    reviewer = dispatch(s, "reviewer", "Approve receipt",
+                        "review_experiment", proposal_id=pid)
+    complete(s, reviewer, verdict="APPROVE")
+    out = s.root / "workspace" / name
+    out.mkdir()
+    (out / "metrics.csv").write_text("mse\n1\n3\n")
+    (out / "report.json").write_text('{"mse": 2}')
+    (out / "run.py").write_text("print(0)\n")
+    (out / "run_log.json").write_text(json.dumps({
+        "children": [
+            {"argv": ["python", f"{name}/run.py", "--replay"], "exit_code": 0},
+            {"argv": ["python", f"{name}/run.py", "--check"], "exit_code": 0},
+        ]
+    }))
+    task = dispatch(s, "experimenter", "Run receipt", "experiment",
+                    proposal_id=pid)
+    complete(s, task, artifacts=[
+        f"{name}/metrics.csv", f"{name}/report.json",
+        f"{name}/run.py", f"{name}/run_log.json",
+    ])
+    prior = s.state()["latest_validation"]
+    assert prior["status"] == "INCOMPLETE"
+    assert prior["checks"][-1]["id"] == "checker_execution"
+    logs = s.root / "logs"
+    logs.mkdir()
+    (logs / f"{task}-real.jsonl").write_text(json.dumps({
+        "type": "item.completed",
+        "item": {"type": "command_execution",
+                 "command": f"python -B {name}/run.py", "exit_code": 0},
+    }) + "\n")
+    result = v8.revalidate_latest(s, task)
+    assert result["status"] == "PASSED"
+    assert result["recheck_of_seq"] == prior["seq"]
+    state = s.state()
+    assert state["latest_validation"]["status"] == "PASSED"
+    assert len([e for e in s.read() if e["kind"] == "VALIDATION"]) == 2
+    with pytest.raises(ValueError, match="checker-receipt INCOMPLETE"):
+        v8.revalidate_latest(s, task)
