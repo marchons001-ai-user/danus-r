@@ -1127,7 +1127,13 @@ A Worker COMPLETE records execution only; it does not certify scientific
 validity. Independent host-side checks from the exact approved proposal
 produce VALIDATION PASSED, INCOMPLETE or FAILED. FINISH is forbidden while
 the latest experiment has validation debt. On INCOMPLETE or FAILED inspect
-the recorded check results and arrange authorized diagnostic work or a new
+the recorded check results. Distinguish an actual missing/failed approved
+check from a Host receipt-parser mismatch: when frozen evidence and Host-owned
+execution traces already exist but the gate cannot parse their format, prefer
+a read-only diagnosis and a Host-side compatibility fix with append-only
+revalidation, not a new scientific experiment merely to rewrite receipts.
+Do not declare PASSED from Worker prose or bypass independent verification.
+When evidence is truly missing, arrange authorized diagnostic work or a new
 Reviewer-approved corrective / validation-only experiment on frozen outputs.
 Never simply retry identical work or erase historical failed experiments.
 An INCONCLUSIVE scientific hypothesis is allowed only with valid experiment
