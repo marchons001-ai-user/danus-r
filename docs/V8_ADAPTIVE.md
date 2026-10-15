@@ -760,3 +760,31 @@ Focused offline regression: `danus/tests/test_v8_adaptive.py` simulates
 a >4,900-character researcher summary, a reviewer requesting its missing
 tail, and an answering researcher receiving the complete exact record in
 the generated Worker prompt; unrelated long summaries stay bounded.
+
+
+## 2026-10-15: targeted Supervisor evidence retrieval (fly-CX R2)
+
+The R2 pilot demonstrated that the Worker handoff fix worked: task-7 consumed
+the original task-3 summary without re-reading all CSVs. However, while
+task-7 was WAITING for a Supervisor reply, Supervisor answered that only the
+400-character routing preview was available, despite the exact summary being
+present in the authoritative Store. This was not caused by the 70% output
+budget or a failed Worker; it was a second missing **read path**, now in the
+Supervisor rather than the Worker.
+
+Supervisor continues to route with 400-character task previews. **Only when an
+OPEN request is addressed to Supervisor**, `_brief_state` additionally
+provides the full question and the **full completed task summary** explicitly
+cited by `task-N`. When no task is cited, it supplies at most the latest
+completed result by the requesting role, excluding the waiting task. It
+never fabricates an unknown or incomplete source; it supplies details for at
+most two Supervisor requests. If the source is unavailable, Supervisor must
+route an answer task rather than inferring the missing tail.
+
+The change neither expands normal Supervisor browsing into full histories nor
+changes permissions, experiment approvals, immutable event records, or
+scientific claims. The R2 pilot is not restarted; its pending proposal still
+requires independent Reviewer approval. A local regression checks both the
+short routing preview and the exact full source seen by the actual Supervisor
+model prompt. Additional requests with no cited completed source remain
+unresolved rather than fabricated.
