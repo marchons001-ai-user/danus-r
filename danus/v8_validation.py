@@ -97,7 +97,7 @@ def _checker_receipt(store, task_id, proposal, owned, source):
     except (ValueError, OSError, UnicodeError) as exc:
         return outcome("FAILED", f"run_log.json cannot be read: {exc}"[:1000])
 
-    exit_markers, failures = [], []
+    exit_markers, failures, missing = [], [], []
     child_exits = {"replay": [], "check": []}
     def scan(obj, context=""):
         if isinstance(obj, dict):
@@ -114,7 +114,9 @@ def _checker_receipt(store, task_id, proposal, owned, source):
                         and ("exit" in name or "returncode" in name
                              or "return_code" in name)):
                     exit_markers.append(full)
-                    if type(value) is not int or value != 0:
+                    if type(value) is not int:
+                        missing.append(full)
+                    elif value != 0:
                         failures.append(f"{full}={value!r}")
                 if (any(part in full for part in ("check", "replay", "parent"))
                         and "status" in name and isinstance(value, str)
@@ -127,13 +129,15 @@ def _checker_receipt(store, task_id, proposal, owned, source):
     scan(runlog)
     if failures:
         return outcome("FAILED", "checker/parent reported non-success: " + ", ".join(failures)[:800])
+    if missing:
+        return outcome("INCOMPLETE", "run log has nonnumeric/missing exit evidence: " + ", ".join(missing)[:800])
     if isinstance(runlog.get("children"), list):
         if any(len(child_exits[role]) != 1 for role in ("replay", "check")):
             return outcome("INCOMPLETE", "run log requires exactly one --replay and --check child")
         if any(type(code) is not int for codes in child_exits.values() for code in codes):
             return outcome("INCOMPLETE", "run log has a child without a numeric exit code")
-    if not exit_markers:
-        return outcome("INCOMPLETE", "run_log.json lacks numeric checker/parent exit evidence")
+    if not any("check" in marker for marker in exit_markers):
+        return outcome("INCOMPLETE", "run_log.json lacks numeric checker exit evidence")
 
     # Codex --json output belongs to the host log directory, NOT to the
     # Experimenter's writable workspace. Do not accept claimed counts alone.
