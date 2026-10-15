@@ -1125,6 +1125,11 @@ _WORKER_POLICY = """
 You are one assigned Danus-R scientific worker. Execute only your task.
 You can ask ONE question to researcher, reviewer, experimenter or supervisor
 at a time. State WHY the answer is needed. After it returns, reconsider next step.
+recent_completed_work contains bounded PREVIEWS only, marked excerpt_truncated.
+When referenced_completed_work supplies a completed task's exact summary,
+use that complete recorded text instead of requesting or reconstructing its
+missing tail. Do not assume an excerpt is the complete historical result.
+
 Do not modify the fixed research goal. A negative scientific result is valid.
 Keep experiment costs small. Never modify external reference repositories or
 previously frozen artifacts. Prefer summaries to full raw-data re-interpretation.
@@ -1299,6 +1304,31 @@ def _supervisor(store: Store, level, error=""):
                  writable=False, timeout=180)
 
 
+def _referenced_completed_work(state, task_id):
+    """Recover exact summaries for task IDs explicitly cited by this assignment.
+
+    The routine history stays short. A targeted request must not receive a
+    silently truncated version of a completed task's authoritative summary.
+    """
+    task = state["tasks"][task_id]
+    texts = [task["instruction"]]
+    request = state["requests"].get(task["request_id"])
+    if request:
+        texts.append(request["question"])
+    texts.extend(r["question"] for r in state["requests"].values()
+                 if r["from_task"] == task_id)
+    ids = set(re.findall(r"(?<![\\w])task-\\d+(?![\\w])", "\\n".join(texts)))
+    candidates = [
+        t for t in state["tasks"].values()
+        if (t["id"] in ids and t["id"] != task_id
+            and t["status"] == "COMPLETE")
+    ]
+    return ([{"task_id": t["id"], "role": t["role"],
+              "purpose": t["purpose"], "summary": t["summary"]}
+             for t in candidates[:3]],
+            [t["id"] for t in candidates[3:]])
+
+
 def _worker(store: Store, task_id, *, timeout=1200):
     with store.lock():
         verify_assets(store)
@@ -1341,10 +1371,13 @@ def _worker(store: Store, task_id, *, timeout=1200):
         "latest_validation": state["latest_validation"],
         "input_provenance": state["inputs"],
         "recent_completed_work": [
-            {"role": t["role"], "purpose": t["purpose"],
-             "summary": t["summary"][:3000]}
+            {"task_id": t["id"], "role": t["role"], "purpose": t["purpose"],
+             "summary_excerpt": t["summary"][:3000],
+             "excerpt_truncated": len(t["summary"]) > 3000}
             for t in state["tasks"].values() if t["status"] == "COMPLETE"
         ][-10:],
+        "referenced_completed_work": _referenced_completed_work(state, task_id)[0],
+        "omitted_referenced_task_ids": _referenced_completed_work(state, task_id)[1],
     }
     prompt = _WORKER_POLICY + _output_budget_guide() + "\nCurrent assignment:\n" + json.dumps(
         payload, ensure_ascii=False, indent=2)
