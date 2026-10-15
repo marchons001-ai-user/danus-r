@@ -109,36 +109,27 @@ def test_budget_recovery_never_clears_foreign_pause(tmp_path: Path, reason: str)
         assert wl.pause.read_text(encoding="utf-8").strip() == reason
 
 
-def test_quota_pause_recovers_only_its_own_worker_pause(tmp_path: Path, monkeypatch):
+def test_legacy_quota_pause_migration_clears_only_its_owned_pause(tmp_path: Path):
+    # The old proactive quota gate was removed; only migrate its stale pause.
     with _root(tmp_path):
         _, wl, ledger, assignment_id = _setup()
         wl.pause.write_text("quota:pressure:test\n", encoding="utf-8")
-        rows = cli._project_rows("P")
-        calls = _fake_spawn(monkeypatch)
 
-        applied = cli._apply_quota_gate(
-            "P",
-            rows,
-            {"state": "NORMAL", "reason": "headroom_restored", "block_new_codex_rounds": False},
-        )
-        assert applied == [{"worker": "high", "result": "started"}]
+        result = cli._clear_legacy_quota_pauses("P")
+        assert result == [{"worker": "high", "result": "legacy-quota-pause-cleared"}]
         assert not wl.pause.exists()
-        assert calls == [wl.dir]
         assert ledger.current("high", refresh_stale=False)["assignment_id"] == assignment_id
 
 
-@pytest.mark.parametrize("reason", ["manual", "review:scientific", "budget:resource_token_budget"])
-def test_quota_recovery_never_clears_foreign_pause(tmp_path: Path, reason: str):
+@pytest.mark.parametrize("reason", [
+    "manual", "review:scientific", "budget:resource_token_budget",
+])
+def test_legacy_quota_migration_does_not_clear_foreign_pause(
+        tmp_path: Path, reason: str):
     with _root(tmp_path):
         _, wl, _, _ = _setup()
         wl.pause.write_text(reason + "\n", encoding="utf-8")
-        rows = cli._project_rows("P")
-        applied = cli._apply_quota_gate(
-            "P",
-            rows,
-            {"state": "NORMAL", "reason": "headroom_restored", "block_new_codex_rounds": False},
-        )
-        assert applied == []
+        assert cli._clear_legacy_quota_pauses("P") == []
         assert wl.pause.read_text(encoding="utf-8").strip() == reason
 
 
