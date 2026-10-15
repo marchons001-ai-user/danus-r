@@ -98,14 +98,14 @@ def _checker_receipt(store, task_id, proposal, owned, source):
         return outcome("FAILED", f"run_log.json cannot be read: {exc}"[:1000])
 
     exit_markers, failures = [], []
-    child_roles = set()
+    child_exits = {"replay": [], "check": []}
     def scan(obj, context=""):
         if isinstance(obj, dict):
             argv = obj.get("argv")
             if isinstance(argv, list):
                 for flag, role in (("--replay", "replay"), ("--check", "check")):
                     if flag in argv:
-                        child_roles.add(role)
+                        child_exits[role].append(obj.get("exit_code"))
                         context += "." + role
             for key, value in obj.items():
                 name = str(key).lower()
@@ -127,8 +127,11 @@ def _checker_receipt(store, task_id, proposal, owned, source):
     scan(runlog)
     if failures:
         return outcome("FAILED", "checker/parent reported non-success: " + ", ".join(failures)[:800])
-    if isinstance(runlog.get("children"), list) and not {"replay", "check"} <= child_roles:
-        return outcome("INCOMPLETE", "run log lacks a --replay or --check child")
+    if isinstance(runlog.get("children"), list):
+        if any(len(child_exits[role]) != 1 for role in ("replay", "check")):
+            return outcome("INCOMPLETE", "run log requires exactly one --replay and --check child")
+        if any(type(code) is not int for codes in child_exits.values() for code in codes):
+            return outcome("INCOMPLETE", "run log has a child without a numeric exit code")
     if not exit_markers:
         return outcome("INCOMPLETE", "run_log.json lacks numeric checker/parent exit evidence")
 
