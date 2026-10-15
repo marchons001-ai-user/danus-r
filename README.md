@@ -128,14 +128,13 @@ before attempting unattended work.
 
 ### Quality status
 
-The focused V8 regression suite passed locally in WSL (102 checks recorded
-on 2026-10-15). This is **not** equivalent to the entire repository test
-suite passing. The repository-wide GitHub Actions job still has outstanding
-failures, including unavailable Codex sandbox dependencies and legacy
-interface tests. See the release checklist rather than interpreting a small
-green test selection as full CI health. Curated engineering outcomes,
-including failures and their scope, are in
-[development notes](docs/DEVELOPMENT_NOTES.md).
+At release-candidate commit `7a17f0c6`, the GitHub Actions matrix passed:
+**102 V8 core tests and 1,334 full-repository tests each on Python 3.10 and
+3.13**. Local WSL tests also passed the D4 sandbox and focused V8 selection
+(124 tests). These are test results for that exact candidate, not a promise
+of long-horizon agent reliability or reproducibility of the pilot science.
+Curated engineering failures and fixes, including historical CI failures,
+are recorded in [development notes](docs/DEVELOPMENT_NOTES.md).
 
 ## Upstream credit and licensing
 
@@ -156,10 +155,10 @@ benchmark is claimed here.
 
 ## Development and contribution policy
 
-This repository is still being consolidated for public release. The main
-branch may lag feature branches until review and merge; use a tagged release
-or explicitly named branch rather than assuming a feature described here is
-in every checkout. Reproducible code and curated incident analyses are
+This repository is preparing its first public release. Until the integration
+PR is merged, the V8 release candidate is `release/v8-rc-20261015` and
+the default `main` may still be older. After integration, use `main` or a
+verified tag; check the currently published branch before following examples. Reproducible code and curated incident analyses are
 appropriate public development records; raw provider logs, credentials and
 private scientific datasets are not. See
 [release and contribution notes](docs/OPEN_SOURCE_RELEASE_CHECKLIST.md).
