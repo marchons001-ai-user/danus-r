@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 # Original Danus authorship is credited in the upstream citation and license.
-# Placeholder collective identity until the showcase account is selected.
 authors = [{ name = "Danus-R contributors" }]
 keywords = ["mathematics", "proof-search", "scientific-research", "multi-agent", "llm", "orchestration"]
 classifiers = [
@@ -31,7 +30,7 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/Marchons-AIuser/danus-r"
+Repository = "https://github.com/marchons001-ai-user/danus-r"
 Upstream = "https://github.com/frenzymath/Danus"
 
 [project.optional-dependencies]
