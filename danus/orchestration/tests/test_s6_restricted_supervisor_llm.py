@@ -214,7 +214,6 @@ def test_manual_apply_consults_only_after_stable_deterministic_supervision(monke
     [
         {"convergence": {"stable": False}},
         {"budget_stop": "resource_token_budget_exceeded"},
-        {"quota_policy": {"block_new_codex_rounds": True}},
         {"project_state": "PAUSED"},
     ],
 )
@@ -243,6 +242,29 @@ def test_manual_apply_gates_prevent_llm_call(monkeypatch, capsys, override):
     rendered = json.loads(capsys.readouterr().out)
     assert rendered["scientific_route_decisions"] == []
 
+
+
+def test_obsolete_quota_telemetry_does_not_gate_scientific_routing(
+        monkeypatch, capsys):
+    # Quota snapshots are observe-only. The explicit resource budget remains a gate.
+    report = {
+        "project_state": "RUNNING",
+        "convergence": {"stable": True},
+        "budget_stop": None,
+        "quota_policy": {"block_new_codex_rounds": True},
+        "actions": [{"kind": "SCIENTIFIC_ROUTE_REQUIRED", "subject_id": "a1"}],
+    }
+    from danus.orchestration import cli as CLI
+    monkeypatch.setattr(CLI, "do_supervise", lambda *a, **k: dict(report))
+    monkeypatch.setattr(S, "apply_scientific_route_dispositions", lambda *a, **k: [])
+    calls = []
+    monkeypatch.setattr(
+        S, "resolve_scientific_routes",
+        lambda root, actions, token_budget=0: calls.append(actions) or [],
+    )
+    assert S.supervise_main(["project-x", "--apply"]) == 0
+    assert calls == [report["actions"]]
+    assert json.loads(capsys.readouterr().out)["scientific_route_decisions"] == []
 
 def test_dry_run_delegates_without_llm(monkeypatch):
     delegated = []
