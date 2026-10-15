@@ -7,11 +7,35 @@ on:
   workflow_dispatch:
 
 jobs:
-  tests:
+  v8-core:
+    name: V8 core (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        # the supported floor and the current ceiling (requires-python >= 3.10)
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install (development extras)
+        run: pip install -e ".[dev]"
+      - name: V8 offline correctness and reviewer convergence
+        run: |
+          python -m pytest -q \
+            danus/tests/test_v8_adaptive.py \
+            danus/tests/test_v8_validation.py \
+            danus/tests/test_v8_review_convergence.py \
+            danus/tests/test_v8_review_feedback.py \
+            danus/tests/test_v8_inputs.py
+
+  full-repository:
+    name: Full repository with sandbox (${{ matrix.python-version }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
         python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
@@ -20,5 +44,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install (all extras)
         run: pip install -e ".[dev]"
-      - name: Run the offline test suite
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install accepted official Codex sandbox engine
+        run: npm install --global @openai/codex@0.153.4
+      - name: Resolve native sandbox executable
+        run: echo "DANUS_SANDBOX_CODEX_BIN=$(find "$(npm root -g)/@openai" -type f -name codex -executable -print -quit)" >> "$GITHUB_ENV"
+      - name: Make native engine available to Gateway subprocesses
+        run: echo "$(dirname "$DANUS_SANDBOX_CODEX_BIN")" >> "$GITHUB_PATH"
+      - name: Verify actual host sandbox restrictions
+        run: python scripts/probe_codex_sandbox.py --codex "$DANUS_SANDBOX_CODEX_BIN"
+      - name: Run full repository suite
         run: python -m pytest danus/ -q
