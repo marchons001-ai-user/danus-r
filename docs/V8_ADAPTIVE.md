@@ -683,3 +683,41 @@ evaluate the independent replay implementation, scientific comparisons and
 outstanding findings. If the receipt remains INCOMPLETE because the Codex
 tool log lacks a matching command event, investigate that format without
 rerunning production or inventing proof.
+
+
+## 2026-10-15: strict host invocation and explicit checker contract
+
+New Researcher proposals carry `check_contract=explicit_v1` as part of their
+content-addressed identity. The Reviewer approves `required_checks` with an
+explicit `checker_execution` item **only when the experiment requires an
+executable checker**:
+
+    {"id":"checker_execution","kind":"checker_execution",
+     "path":"fresh/run.py","log_path":"fresh/run_log.json"}
+
+Both paths must be safe workspace-relative, newly registered outputs. The
+validation gate verifies recorded replay/checker exits and a matching Host-owned
+completed command-execution event. It does **not** execute worker code in the
+trusted host. The check is never enabled just because the new proposal text
+mentions `--check` or `run_log.json`; omission of the typed check in a
+protocol that needs it is a Reviewer approval defect, not independent proof.
+At most one such typed check is allowed.
+
+The Host now parses command tokens instead of finding `python` and a script
+substring anywhere in an event. Only direct Python invocations of the exact
+approved registered script (optionally preceded by a single `cd <workspace> &&`)
+count. Quoted, printed, searched, piped, redirected or wrapped commands are
+not execution receipts. Unknown command forms conservatively produce
+`INCOMPLETE` rather than `PASSED`. This is a narrow proof of process
+invocation and its exit code, not a proof of scientific checker correctness.
+
+**History remains compatible**: approved proposals without
+`check_contract=explicit_v1` use the previous `--check`/`run_log.json`
+detection for their immutable contracts, but benefit from the stricter command
+verification if Host revalidation is ever authorized. No historical event or
+finished PFL3 task is edited. V8 experimental provenance, Reviewer authority
+and science-vs-execution distinctions are unchanged.
+
+Focused tests:
+
+    python -m pytest -q danus/tests/test_v8_validation.py danus/tests/test_v8_adaptive.py danus/tests/test_v8_review_convergence.py danus/tests/test_v8_review_feedback.py danus/tests/test_v8_inputs.py
