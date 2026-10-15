@@ -370,6 +370,43 @@ def verify_assets(store: Store):
             raise PermissionError(f"previously recorded artifact modified: {asset['path']}")
 
 
+def revalidate_latest(store: Store, task_id: str):
+    """Recheck unchanged newest experiment artifacts after a Host-gate bug fix.
+
+    Append a new auditable VALIDATION event; never rewrite the original.
+    No model calls, experiment execution or asset changes.
+    """
+    with store.runner_lock():
+        with store.lock():
+            state = store.state()
+            if state["done"] or state["halt"] or any(
+                    t["status"] == "RUNNING" for t in state["tasks"].values()):
+                raise ValueError("project must be active and idle")
+            newest = next((t for t in reversed(list(state["tasks"].values()))
+                           if t["purpose"] == "experiment"), None)
+            if (not newest or newest["id"] != task_id
+                    or newest["status"] != "COMPLETE"):
+                raise ValueError("only the latest completed experiment can be revalidated")
+            prior = state["latest_validation"]
+            if (not prior or prior["task_id"] != task_id
+                    or prior["status"] != "INCOMPLETE"
+                    or not any(x["id"] == "checker_execution"
+                               and x["status"] == "INCOMPLETE"
+                               for x in prior["checks"])):
+                raise ValueError("requires a checker-receipt INCOMPLETE validation")
+            verify_assets(store)
+            v8_inputs.verify_inputs(store, state)
+            contract = state["proposals"][newest["proposal_id"]]
+            report = v8_validation.run_gate(store, task_id, contract, state["assets"])
+            store.append("VALIDATION", task_id=task_id,
+                         proposal_id=newest["proposal_id"],
+                         status=report["status"], checks=report["checks"],
+                         reason=report["reason"], recheck_of_seq=prior["seq"])
+            store.publish()
+            return {"task_id": task_id, "recheck_of_seq": prior["seq"],
+                    "status": report["status"], "reason": report["reason"]}
+
+
 def initialize(store: Store, goal: str, reference=""):
     goal = _limit_text(goal, "goal")
     if store.events.exists():
@@ -1450,7 +1487,7 @@ def main(argv=None):
     stage.add_argument("--files", nargs="+", required=True)
     stage.add_argument("--extraction-script", type=Path)
     stage.add_argument("--extraction-summary", type=Path)
-    for command in ("run", "step", "status", "recover", "salvage", "reconcile", "unblock"):
+    for command in ("run", "step", "status", "recover", "salvage", "reconcile", "unblock", "revalidate"):
         sub = commands.add_parser(command)
         sub.add_argument("project")
         if command in ("unblock", "reconcile"):
@@ -1460,7 +1497,7 @@ def main(argv=None):
         if command == "run":
             sub.add_argument("--max-steps", type=int, default=0)
             sub.add_argument("--worker-timeout", type=int, default=1200)
-        if command in ("recover", "salvage"):
+        if command in ("recover", "salvage", "revalidate"):
             sub.add_argument("--task-id", required=True)
     args = parser.parse_args(argv)
     store = Store(project_root(args.project))
@@ -1487,6 +1524,9 @@ def main(argv=None):
                 raise ValueError("project is not halted")
             store.append("UNHALT", reason=_limit_text(args.reason, "reason", max_len=1000))
             store.publish()
+        return
+    if args.command == "revalidate":
+        print(json.dumps(revalidate_latest(store, args.task_id), ensure_ascii=False))
         return
     if args.command == "salvage":
         with store.runner_lock():
