@@ -4,7 +4,7 @@ type: software
 title: "Danus-R: an experimental evidence-gated scientific agent harness"
 authors:
   - name: "Danus-R contributors"
-repository-code: "https://github.com/Marchons-AIuser/danus-r"
+repository-code: "https://github.com/marchons001-ai-user/danus-r"
 license: Apache-2.0
 references:
   - type: generic
