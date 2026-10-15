@@ -14,10 +14,8 @@ This is a checkable list, not a claim that the checks have already passed.
       The public maintainer identity is collective until account transfer.
 - [x] The three local studies are labeled exploratory, not general
       benchmarks or peer-reviewed scientific discoveries.
-- [ ] Account plan chosen: **transfer the single canonical repository to
-      the showcase account** before public release; obtain its exact GitHub
-      login and accept the transfer. Current account will remain collaborator.
-      No duplicate project clone/repo.
+- [x] Transferred the single canonical repository to `marchons001-ai-user`;
+      original owner `Marchons-AIuser` retains write access. No duplicate repo.
 
 ## B. Security and privacy: hard stop before toggling Public
 
@@ -50,6 +48,12 @@ This is a checkable list, not a claim that the checks have already passed.
       that will become visible. Local runtime/ is gitignored and should remain
       untracked.
 
+- [x] Operator accepts the historical author Gmail addresses and will not
+      rewrite commits solely for email privacy. This does not approve other PII.
+- [ ] Review tracked `docs/environment_baseline_raw.txt` and
+      `docs/environment_baseline.md`: these contain a Windows username,
+      workstation details and paths, including in preserved Git history.
+
 ## C. Branches, CI and release behavior
 
 - [x] PR #121 and 14 other stacked integrated PRs were closed as superseded
@@ -64,11 +68,12 @@ This is a checkable list, not a claim that the checks have already passed.
       Previous migration intermittency tracked separately in open Issue #123.
 - [x] CI separates offline V8 correctness from the full suite, which
       installs the official Codex sandbox and runs a sandbox probe first.
-- [ ] Exercise clean-install instructions in a disposable Linux/WSL workspace.
-      Confirm minimum requirements and provider usage costs; V8 execution can
-      spend real API tokens even if a pilot ends early.
-- [ ] Decide public version (e.g. v0.x experimental), tag a verified commit
-      and write release notes that distinguish code, science, and remaining risks.
+- [x] Actions #503 passed clean-install and offline-demo jobs on Python 3.10
+      and 3.13 at `6848a1fb` (in addition to V8 core and full sandbox jobs).
+      Real model-provider runs can incur usage costs.
+- [ ] Independently exercise fresh-checkout bootstrap instructions on WSL.
+- [ ] Prepare the first experimental release as `v0.1.0` (matching
+      `pyproject.toml`), tag a verified commit and write bounded release notes.
 
 ## D. Documents and records
 
@@ -121,5 +126,9 @@ The owner makes the final visibility decision after reviewing findings.
 - [ ] Run an actual fresh-checkout bootstrap/smoke test and review third-party
       attribution and modified-file notices.
 - [ ] Audit GitHub-hosted PR/Action logs and personal paths beyond Gitleaks.
-- [ ] Transfer to confirmed showcase account, then set the verified version
-      and only later make the repository public.
+- [x] Transferred to `marchons001-ai-user`, original account remains a writer;
+      remote branches reduced to `main` and `develop`.
+- [x] Actions #503 passed six jobs at `6848a1fb`; README, citation and package
+      repository URL changes are prepared on `develop` for review.
+- [ ] Tag the verified release after final privacy/security checks, then
+      explicitly approve Public visibility.
