@@ -992,6 +992,30 @@ def _brief_state(store: Store, *, last=12):
             if k in ("seq", "kind", "task_id", "level", "action",
                      "status", "verdict", "reason", "error", "summary")
         })
+    # Supervisor routes using short previews, but must not answer a factual
+    # request by guessing the missing tail of a completed task's summary.
+    supervisor_sources = []
+    for req in state["requests"].values():
+        if req["status"] != "OPEN" or req["to"] != "supervisor":
+            continue
+        cited = re.findall(r"(?<![\\w])task-\\d+(?![\\w])", req["question"])
+        source = next((state["tasks"][tid] for tid in cited
+                       if tid in state["tasks"]
+                       and state["tasks"][tid]["status"] == "COMPLETE"), None)
+        if source is None and not cited:
+            source = next((t for t in reversed(all_tasks)
+                           if t["id"] != req["from_task"]
+                           and t["role"] == req["from_role"]
+                           and t["status"] == "COMPLETE"), None)
+        supervisor_sources.append({
+            "request_id": req["id"],
+            "question": req["question"],
+            "completed_source": (
+                {"task_id": source["id"], "summary": source["summary"]}
+                if source else None),
+        })
+        if len(supervisor_sources) == 2:
+            break
     final = state["final_review"]
     validation = state["latest_validation"]
     inputs = state["inputs"]
@@ -1004,6 +1028,7 @@ def _brief_state(store: Store, *, last=12):
         "goal": state["goal"], "reference": state["reference"][:1000],
         "tasks": selected, "task_count": len(all_tasks),
         "requests": requests, "open_request_count": len(requests),
+        "supervisor_request_sources": supervisor_sources,
         "proposals": proposals, "proposal_count": len(all_proposals),
         "assets": [{"path": a["path"], "task_id": a["task_id"]}
                    for a in list(state["assets"].values())[-24:]],
@@ -1043,6 +1068,12 @@ at a time. You choose the next task dynamically, not from a fixed DAG.
 Research Plan is high-level and stable; the goal is immutable.
 Workers may ask any one role or Supervisor one question at a time, and continue
 after a reply. Resolve the oldest material open question before making new work.
+Task summaries in the routing table are TRUNCATED PREVIEWS, not absent source
+records. For requests directed to you, use supervisor_request_sources to read
+the exact completed source summary if supplied. Do not answer that the omitted
+tail is unavailable just because the routing preview ends early. If no full
+source is available and accurate details matter, dispatch an appropriate
+answer role rather than reconstructing or inventing the missing evidence.
 Prefer existing verified asset records and reports to re-reading raw data.
 Never guess asset IDs or bypass Reviewer experiment approval. A staged
 input's recorded SHA and local source path establish only byte identity with
