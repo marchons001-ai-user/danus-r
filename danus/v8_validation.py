@@ -38,7 +38,10 @@ def normalize_checks(raw):
         names.add(name)
         allowed = {
             "asset_integrity": {"id", "kind"},
-            "checker_execution": {"id", "kind", "path", "log_path"},
+            "checker_execution": ({"id", "kind", "path", "log_path",
+                                   "require_replay"}
+                                  if "require_replay" in item
+                                  else {"id", "kind", "path", "log_path"}),
             "csv_rows": {"id", "kind", "path", "expected_rows"},
             "csv_mean": {"id", "kind", "path", "column", "report_path",
                          "report_key", "abs_tolerance"},
@@ -46,6 +49,9 @@ def normalize_checks(raw):
         }[kind]
         if set(item) != allowed:
             raise ValueError(f"{name}: check needs exactly {sorted(allowed)}")
+        if kind == "checker_execution" and "require_replay" in item:
+            if type(item["require_replay"]) is not bool:
+                raise ValueError("checker_execution require_replay must be boolean")
         if kind == "csv_rows":
             if not isinstance(item["expected_rows"], int) or isinstance(
                     item["expected_rows"], bool) or item["expected_rows"] < 1:
@@ -187,10 +193,22 @@ def _checker_receipt(store, task_id, proposal, owned, source):
     if missing:
         return outcome("INCOMPLETE", "run log has nonnumeric/missing exit evidence: " + ", ".join(missing)[:800])
     if isinstance(runlog.get("children"), list):
-        if any(len(child_exits[role]) != 1 for role in ("replay", "check")):
-            return outcome("INCOMPLETE", "run log requires exactly one --replay and --check child")
-        if any(type(code) is not int for codes in child_exits.values() for code in codes):
+        children = runlog["children"]
+        if not children or any(not isinstance(child, dict) for child in children):
+            return outcome("INCOMPLETE", "run log has missing or malformed child receipts")
+        if any(type(child.get("exit_code")) is not int for child in children):
             return outcome("INCOMPLETE", "run log has a child without a numeric exit code")
+        nonzero = [(i, child["exit_code"]) for i, child in enumerate(children)
+                   if child["exit_code"] != 0]
+        if nonzero:
+            return outcome("FAILED", f"run log has nonzero child exits: {nonzero}"[:800])
+        replay_required = (not explicit or explicit[0].get("require_replay", False))
+        if (len(child_exits["check"]) != 1
+                or len(child_exits["replay"]) > 1
+                or (replay_required and len(child_exits["replay"]) != 1)):
+            return outcome(
+                "INCOMPLETE",
+                "run log lacks exactly one --check child or required --replay child")
     if not any("check" in marker for marker in exit_markers):
         return outcome("INCOMPLETE", "run_log.json lacks numeric checker exit evidence")
 
