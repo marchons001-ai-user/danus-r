@@ -818,3 +818,34 @@ Run focused local regressions and inspect real task-38 run_log children
 before using the append-only revalidate command; never rerun the 62MB
 experiment only to correct a Host parser. New validation events preserve
 the prior INCOMPLETE and do not certify scientific conclusions.
+
+
+### 2026-10-15: actual task-38 receipt schema after append-only revalidation
+
+The first follow-up revalidation remained INCOMPLETE after 79 WSL tests
+passed: task-38's real run_log has children launched via simulate.py and
+check.py, with numeric subprocess returncode fields rather than exit_code.
+The parent also uses returncode. Moreover, Host-owned Codex logged a
+single /bin/bash -lc 'python -B fresh/task20/run.py' command with exit 0.
+Earlier synthetic tests exercised --check flags, exit_code fields and
+direct Python commands, but not these actual formats.
+
+The checker receipt now accepts numeric exit_code / returncode / return_code
+with agreement when more than one is present, detects a directly executed
+check.py or checker.py child as a checker as well as an explicit --check
+flag, requires all logged child exits to be numeric zero and checks any
+reported parent returncode. Explicit typed proposals need no replay unless
+require_replay=true; older legacy-replay safeguards remain.
+
+The Host execution receipt now understands one literal bash/sh -c/-lc
+wrapper around a direct Python entrypoint, matching Codex's actual
+command_execution event. It rejects echo, printf, chained commands, pipes,
+redirections, shell substitutions and nested shell wrappers; unknown
+forms fail closed to INCOMPLETE. The worker-authored run_log alone cannot
+prove execution or independent checker science.
+
+Added targeted offline regressions mimicking the real task-38 run_log
+and shell-wrapped Codex host trace, including missing and nonzero child
+and parent exits. No source results or old VALIDATION events are rewritten.
+Rerun focused tests, inspect actual numeric returncode values, then use
+append-only revalidate only if the recorded evidence supports it.
