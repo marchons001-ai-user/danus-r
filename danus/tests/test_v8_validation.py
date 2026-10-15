@@ -490,11 +490,16 @@ def test_task38_actual_runlog_schema_and_host_shell_trace(
     assert checker["status"] == expected
 
 
-@pytest.mark.parametrize("script,expected", [
-    ("verify_compass.py", "PASSED"),
-    ("other_script.py", "INCOMPLETE"),
+@pytest.mark.parametrize("script,command_field,expected", [
+    ("verify_compass.py", "argv", "PASSED"),
+    ("verify_compass.py", "args", "PASSED"),
+    ("other_script.py", "argv", "INCOMPLETE"),
+    ("other_script.py", "args", "INCOMPLETE"),
+    ("verify_compass.py", "both_identical", "PASSED"),
+    ("verify_compass.py", "both_conflicting", "FAILED"),
 ])
-def test_reviewer_pinned_arbitrary_checker_filename(tmp_path, script, expected):
+def test_reviewer_pinned_arbitrary_checker_filename(
+        tmp_path, script, command_field, expected):
     s = new_store(tmp_path)
     name = "generic_case"
     declared = {**checker_check(name),
@@ -507,11 +512,21 @@ def test_reviewer_pinned_arbitrary_checker_filename(tmp_path, script, expected):
     (out / "metrics.csv").write_text("mse\n1\n3\n")
     (out / "report.json").write_text('{"mse":2}')
     (out / "run.py").write_text("print('wrapper')\n")
+    checker_command = ["python", name + "/" + script]
+    if command_field in ("argv", "args"):
+        checker_receipt = {command_field: checker_command, "returncode": 0}
+    else:
+        checker_receipt = {
+            "argv": checker_command,
+            "args": (checker_command if command_field == "both_identical"
+                     else ["python", name + "/other_script.py"]),
+            "returncode": 0,
+        }
     (out / "run_log.json").write_text(json.dumps({
         "returncode": 0,
         "children": [
-            {"argv": ["python", name + "/simulate.py"], "returncode": 0},
-            {"argv": ["python", name + "/" + script], "returncode": 0},
+            {"args": ["python", name + "/simulate.py"], "returncode": 0},
+            checker_receipt,
         ],
     }))
     logs = s.root / "logs"
