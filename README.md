@@ -105,7 +105,7 @@ This codebase contains both the inherited Danus mathematics workflow and the
 new V8 prototype. The two are **not interchangeable**.
 
 ```bash
-git clone https://github.com/Marchons-AIuser/danus-r.git
+git clone https://github.com/marchons001-ai-user/danus-r.git
 cd danus-r
 bash scripts/bootstrap.sh       # toolchain/bootstrap for a fresh installation
 source scripts/env.sh
@@ -144,11 +144,10 @@ before attempting unattended work.
 
 ### Quality status
 
-At release-candidate commit `7a17f0c6`, the GitHub Actions matrix passed:
-**102 V8 core tests and 1,334 full-repository tests each on Python 3.10 and
-3.13**. Local WSL tests also passed the D4 sandbox and focused V8 selection
-(124 tests). These are test results for that exact candidate, not a promise
-of long-horizon agent reliability or reproducibility of the pilot science.
+At `6848a1fb`, GitHub Actions run #503 passed all six jobs: V8 core,
+full-repository sandbox tests, and clean-install offline-demo checks on
+Python 3.10 and 3.13. These results apply to that commit, not to
+long-horizon agent reliability or independent reproduction of pilot science.
 Curated engineering failures and fixes, including historical CI failures,
 are recorded in [development notes](docs/DEVELOPMENT_NOTES.md).
 
@@ -170,8 +169,8 @@ under the collective "Danus-R contributors" label; its `references` section
 preserves the original Danus publication and author list. The original
 upstream attribution remains in the inherited LICENSE and historical README.
 This metadata does **not** claim that the Danus-R collective wrote the
-upstream Danus code or paper. The final public maintainer identity will be
-confirmed before the GitHub account transfer.
+upstream Danus code or paper. The canonical repository is maintained at
+[Marchons001/danus-r](https://github.com/marchons001-ai-user/danus-r).
 
 Danus-R's V8 adaptations and exploratory pilot workflow are independently
 developed additions. No peer-reviewed Danus-R paper or general reliability
@@ -179,12 +178,11 @@ benchmark is claimed here.
 
 ## Development and contribution policy
 
-This repository is preparing its first public release. Until the integration
-PR is merged, the V8 release candidate is `release/v8-rc-20261015` and
-the default `main` may still be older. After integration, use `main` or a
-verified tag; check the currently published branch before following examples. Reproducible code and curated incident analyses are
-appropriate public development records; raw provider logs, credentials and
-private scientific datasets are not. See
+This repository is preparing its first public release. `main` is the stable
+integration branch; `develop` is the development branch. Use `main` or a
+verified release tag for installation. Reproducible code and curated incident
+analyses are appropriate public development records; raw provider logs,
+credentials and private scientific datasets are not. See
 [release and contribution notes](docs/OPEN_SOURCE_RELEASE_CHECKLIST.md).
 
 For the inherited mathematics system's original usage guide, refer to
