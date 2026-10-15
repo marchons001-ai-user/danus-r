@@ -788,3 +788,33 @@ requires independent Reviewer approval. A local regression checks both the
 short routing preview and the exact full source seen by the actual Supervisor
 model prompt. Additional requests with no cited completed source remain
 unresolved rather than fabricated.
+
+
+## 2026-10-15: fly-CX R2 checker and revision handoff audit
+
+After the second 8-step batch, fly-CX task-38 completed a Reviewer-approved
+simulation+checker experiment, but Host checker_execution returned INCOMPLETE
+because the nested-log parser insisted on a --replay child. The previous
+PFL3 replay requirement does not apply to every new explicit checker.
+
+Explicit checker_execution now mandates exactly one --check child. Optional
+require_replay:true in the exact approved required_checks mandates one
+--replay child as well; legacy prose-triggered receipts retain the stricter
+old replay check for compatibility. All reported children must have numeric
+zero exits, including simulator children; nonzero returns FAILED and missing
+returns INCOMPLETE. A direct Host-owned completed entrypoint command remains
+required. Host PASS only corroborates scope-limited execution evidence.
+
+R2 also exposed an independently stored REVISE proposal whose full 12K text
+was absent from Supervisor's short routing context and the corrective
+Researcher's ordinary payload. Searching writable workspace is not the
+way to retrieve authoritative frozen proposal text. Proposal IDs cited
+in Supervisor requests or Worker assignments/questions now retrieve the
+exact recorded proposal. Corrective Researcher work also receives the
+latest REVISE contract, limited to that particular role and need. The
+original proposal and approval history remain unchanged.
+
+Run focused local regressions and inspect real task-38 run_log children
+before using the append-only revalidate command; never rerun the 62MB
+experiment only to correct a Host parser. New validation events preserve
+the prior INCOMPLETE and do not certify scientific conclusions.
