@@ -139,15 +139,17 @@ Textual TUI: `"$DANUS_PY" -m danus.tui my-study --v8`.
 
 Read the [V8 operator notes](docs/V8_ADAPTIVE.md),
 [trust and security scope](docs/security-and-trust.md) and
-[open-source release checklist](docs/OPEN_SOURCE_RELEASE_CHECKLIST.md)
+[public release and operator checklist](docs/OPEN_SOURCE_RELEASE_CHECKLIST.md)
 before attempting unattended work.
 
 ### Quality status
 
-At `6848a1fb`, GitHub Actions run #503 passed all six jobs: V8 core,
-full-repository sandbox tests, and clean-install offline-demo checks on
-Python 3.10 and 3.13. These results apply to that commit, not to
-long-horizon agent reliability or independent reproduction of pilot science.
+The public [v0.1.0 pre-release](https://github.com/marchons001-ai-user/danus-r/releases/tag/v0.1.0)
+is tagged at `e4b0aaf9`. Its clean-install offline demo, V8 core tests,
+and full-repository sandbox suite each passed on Python 3.10 and 3.13 in
+[public GitHub Actions](https://github.com/marchons001-ai-user/danus-r/actions).
+These tests do not establish unattended agent reliability or independently
+reproduce the pilot science.
 Curated engineering failures and fixes, including historical CI failures,
 are recorded in [development notes](docs/DEVELOPMENT_NOTES.md).
 
@@ -178,12 +180,13 @@ benchmark is claimed here.
 
 ## Development and contribution policy
 
-This repository is preparing its first public release. `main` is the stable
-integration branch; `develop` is the development branch. Use `main` or a
-verified release tag for installation. Reproducible code and curated incident
-analyses are appropriate public development records; raw provider logs,
-credentials and private scientific datasets are not. See
-[release and contribution notes](docs/OPEN_SOURCE_RELEASE_CHECKLIST.md).
+The public experimental version is
+[v0.1.0](https://github.com/marchons001-ai-user/danus-r/releases/tag/v0.1.0).
+`main` is the integration branch and `develop` is the development branch.
+Use a tagged version for reproducible installation. Do not upload raw provider
+logs, credentials, private datasets or unpublished experimental evidence.
+See [public release status](docs/OPEN_SOURCE_RELEASE_CHECKLIST.md) and
+[contribution guidelines](CONTRIBUTING.md).
 
 For the inherited mathematics system's original usage guide, refer to
 [upstream documentation preserved here](docs/UPSTREAM_DANUS_README.md).
