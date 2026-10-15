@@ -474,7 +474,13 @@ def test_unreferenced_work_stays_bounded_and_missing_tasks_are_not_invented(tmp_
     start(s, source)
     v8._worker_result(s, source, {
         "action": "complete", "summary": "details " + "x" * 5200})
-    new = dispatch(s, "reviewer", "Assess an unrelated question")
+    new = dispatch(s, "researcher", "Assess an unrelated question")
     assert v8._referenced_completed_work(s.state(), new) == ([], [])
+    reviewer = dispatch(s, "reviewer", "Independent feasibility audit")
+    latest, missing = v8._referenced_completed_work(s.state(), reviewer)
+    assert missing == []
+    assert len(latest) == 1
+    assert latest[0]["task_id"] == source
+    assert latest[0]["summary"] == s.state()["tasks"][source]["summary"]
     named = dispatch(s, "reviewer", "Check task-9999 (not in event ledger)")
     assert v8._referenced_completed_work(s.state(), named) == ([], [])
