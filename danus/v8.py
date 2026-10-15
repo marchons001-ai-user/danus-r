@@ -1323,6 +1323,19 @@ def _referenced_completed_work(state, task_id):
         if (t["id"] in ids and t["id"] != task_id
             and t["status"] == "COMPLETE")
     ]
+    if not ids and not candidates:
+        # Role-specific handoff when Supervisor did not name a source task ID.
+        source_role, source_purpose = {
+            ("reviewer", "work"): ("researcher", "work"),
+            ("reviewer", "final_review"): ("researcher", "interpret"),
+            ("researcher", "interpret"): ("experimenter", "experiment"),
+        }.get((task["role"], task["purpose"]), (None, None))
+        source = next((t for t in reversed(list(state["tasks"].values()))
+                       if (t["role"] == source_role
+                           and t["purpose"] == source_purpose
+                           and t["status"] == "COMPLETE")), None)
+        if source:
+            candidates = [source]
     return ([{"task_id": t["id"], "role": t["role"],
               "purpose": t["purpose"], "summary": t["summary"]}
              for t in candidates[:3]],
