@@ -849,3 +849,24 @@ and shell-wrapped Codex host trace, including missing and nonzero child
 and parent exits. No source results or old VALIDATION events are rewritten.
 Rerun focused tests, inspect actual numeric returncode values, then use
 append-only revalidate only if the recorded evidence supports it.
+
+
+### 2026-10-15: checker file identity comes from approval, not a task filename
+
+The generic typed checker_execution schema optionally pins checker_path
+(a safe workspace-relative Python script path). When set, the host verifies
+the exact approved script is the successful child recorded in run_log.json;
+the script need not be named check.py or checker.py or accept --check.
+An unrelated child, even with exit zero, does not satisfy that pinned check.
+The approved checker_path is included in the content-addressed proposal.
+
+Previously approved immutable checker contracts without checker_path retain
+their established --check/check.py/checker.py interpretation and older
+legacy replay compatibility. Host verification is deliberately limited to
+approved Python wrapper commands (including a single literal sh/bash wrapper)
+and documented exit evidence; it does not claim to support arbitrary shell
+programming or to prove the independent scientific correctness of Checker.
+
+An offline regression tests an arbitrary named verify_compass.py child
+and a different child with the same successful exit code, which must remain
+INCOMPLETE. Source task/project names are not part of the production logic.
