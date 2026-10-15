@@ -1,7 +1,7 @@
 cff-version: 1.2.0
-message: "If you use Danus, please cite the paper below."
-title: "Danus"
-repository-code: "https://github.com/frenzymath/Danus"
+message: "Danus-R is an independent experimental extension; cite the original Danus paper for upstream code and ideas. No Danus-R research publication is claimed."
+title: "Danus-R (experimental extension of Danus)"
+repository-code: "https://github.com/Marchons-AIuser/danus-r"
 license: Apache-2.0
 preferred-citation:
   type: generic
