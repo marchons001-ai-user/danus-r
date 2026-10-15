@@ -15,6 +15,9 @@ import tempfile
 from pathlib import Path
 from typing import Mapping, Sequence
 
+_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+_OUTPUT_LIMIT_RC = 125
+
 _ENV_ALLOWLIST = frozenset({"HOME", "LANG", "LC_ALL", "TZ"})
 
 
@@ -255,6 +258,8 @@ def run_sandboxed(
                         pass
                     if timeout is not None and time.monotonic() - started >= timeout:
                         raise
+            if proc.returncode == _OUTPUT_LIMIT_RC:
+                raise SandboxInterrupted("sandbox output limit exceeded")
             if proc.returncode != 0:
                 raise SandboxInterrupted(f"sandbox monitor interrupted with rc={proc.returncode}")
             completion.seek(0)
@@ -300,6 +305,14 @@ def _arm_parent_death(expected_parent_pid: int) -> None:
         os.kill(os.getpid(), signal.SIGKILL)
 
 
+def _cleanup_monitor_home() -> None:
+    home = Path(os.environ.get("CODEX_HOME", ""))
+    root = _sandbox_home_root().resolve()
+    if (home.name.startswith("codex-home-") and not home.is_symlink()
+            and home.parent.resolve() == root):
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def _watch_command() -> int:
     """Own the sandbox process group before launching the official engine.
 
@@ -312,22 +325,60 @@ def _watch_command() -> int:
     completion = int(sys.argv[2])
     inherited = tuple(int(fd) for fd in sys.argv[3].split(",") if fd)
     if select.select([owner], [], [], 0)[0]:
+        _cleanup_monitor_home()
         return 126
     # Only the trusted monitor can attest completion; neither private fd enters
     # the sandbox command.
-    child = subprocess.Popen(sys.argv[4:], pass_fds=inherited)
+    import selectors
+
+    child = subprocess.Popen(sys.argv[4:], pass_fds=inherited,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    child_fd = None
+    total = 0
     try:
-        child_fd = os.pidfd_open(child.pid)
-    except ProcessLookupError:
+        with selectors.DefaultSelector() as selector:
+            selector.register(owner, selectors.EVENT_READ, "owner")
+            for stream, destination in ((child.stdout, 1), (child.stderr, 2)):
+                selector.register(stream, selectors.EVENT_READ, destination)
+            try:
+                child_fd = os.pidfd_open(child.pid)
+            except ProcessLookupError:
+                pass
+            else:
+                selector.register(child_fd, selectors.EVENT_READ, "child")
+            while len(selector.get_map()) > 1:
+                for key, _ in selector.select():
+                    if key.data == "owner":
+                        _cleanup_monitor_home()
+                        os.killpg(os.getpgrp(), signal.SIGKILL)
+                    if key.data == "child":
+                        selector.unregister(child_fd)
+                        continue
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    total += len(chunk)
+                    if total > _MAX_OUTPUT_BYTES:
+                        child.kill()
+                        child.wait()
+                        return _OUTPUT_LIMIT_RC
+                    # The parent drains both pipes; only bounded bytes reach it.
+                    while chunk:
+                        chunk = chunk[os.write(key.data, chunk):]
         returncode = child.wait()
-    else:
+    except BrokenPipeError:
+        # The caller can die while the monitor is blocked forwarding output.
         try:
-            ready, _, _ = select.select([owner, child_fd], [], [])
-            if owner in ready:
-                os.killpg(os.getpgrp(), signal.SIGKILL)
-            returncode = child.wait()
+            _cleanup_monitor_home()
         finally:
+            os.killpg(os.getpgrp(), signal.SIGKILL)
+        raise
+    finally:
+        if child_fd is not None:
             os.close(child_fd)
+        child.stdout.close()
+        child.stderr.close()
     os.write(completion, str(returncode).encode("ascii"))
     return 0
 
