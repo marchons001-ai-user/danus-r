@@ -90,7 +90,7 @@ def _direct_python_entrypoint(command, script, workspace):
         words = words[3:]
     if not words or any(x in {";", "&&", "||", "|", "&", ">", ">>", "<", "<<", "(", ")"} for x in words):
         return False
-    if not re.fullmatch(r"python(?:3(?:\\.\\d+)?)?", Path(words[0]).name):
+    if not re.fullmatch(r"python(?:3(?:\.\d+)?)?", Path(words[0]).name):
         return False
     args = words[1:]
     while args and args[0] in {"-B", "-u", "-I", "-E", "-s"}:
