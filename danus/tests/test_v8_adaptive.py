@@ -484,3 +484,50 @@ def test_unreferenced_work_stays_bounded_and_missing_tasks_are_not_invented(tmp_
     assert latest[0]["summary"] == s.state()["tasks"][source]["summary"]
     named = dispatch(s, "reviewer", "Check task-9999 (not in event ledger)")
     assert v8._referenced_completed_work(s.state(), named) == ([], [])
+
+
+def test_supervisor_reads_complete_cited_summary_not_truncated_routing_preview(
+        tmp_path, monkeypatch):
+    """R2 regression: a Supervisor reply must see the cited original result."""
+    s = new_store(tmp_path)
+    exact = "Completed input and anatomy audit: " + "x" * 4800 + " FINAL_CONCLUSION"
+    first = dispatch(s, "researcher", "Audit frozen connection data")
+    start(s, first)
+    v8._worker_result(s, first, {"action": "complete", "summary": exact})
+    second = dispatch(s, "researcher", "Prepare smallest protocol")
+    start(s, second)
+    v8._worker_result(s, second, {
+        "action": "request", "summary": "Need the recorded conclusion",
+        "to": "supervisor",
+        "question": f"Supply the remainder of {first}'s scientific audit",
+        "reason": "Only the short routing excerpt was visible"})
+    status = v8._brief_state(s)
+    assert status["tasks"][0]["summary"] == exact[:400]
+    assert len(status["tasks"][0]["summary"]) < len(exact)
+    source = status["supervisor_request_sources"][0]["completed_source"]
+    assert source == {"task_id": first, "summary": exact}
+
+    seen = {}
+    def fake_model(model, effort, prompt, workspace, log, **kwargs):
+        seen["state"] = json.loads(prompt.split("\nTrusted project status:\n", 1)[1])
+        return {"action": "answer", "request_id": next(iter(s.state()["requests"])),
+                "message": "Use the complete recorded source", "reason": "Cited result exists"}
+    monkeypatch.setattr(v8, "_call", fake_model)
+    assert v8._supervisor(s, "low")["action"] == "answer"
+    assert seen["state"]["supervisor_request_sources"][0]["completed_source"] == source
+
+
+def test_supervisor_request_sources_are_narrow_and_do_not_invent_missing_records(tmp_path):
+    s = new_store(tmp_path)
+    first = dispatch(s, "researcher", "Short earlier analysis")
+    start(s, first)
+    v8._worker_result(s, first, {"action": "complete", "summary": "recorded outcome"})
+    assert v8._brief_state(s)["supervisor_request_sources"] == []
+
+    second = dispatch(s, "researcher", "Next analysis")
+    start(s, second)
+    v8._worker_result(s, second, {
+        "action": "request", "summary": "Missing result",
+        "to": "supervisor", "question": "What did task-9999 establish?",
+        "reason": "Need to know"})
+    assert v8._brief_state(s)["supervisor_request_sources"][0]["completed_source"] is None
