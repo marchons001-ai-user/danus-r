@@ -287,6 +287,12 @@ def worker_session(wl: L.WorkerLayout, role: dict):
             mcp_cmd = [sys.executable, "-I", str(proxy), "--socket", str(socket_path)]
             config = home / "config.toml"
             with config.open("a") as stream:
+                # Noninteractive research workers use only the pinned Danus MCP.
+                # Disable Codex curated-plugin startup sync for each fresh
+                # CODEX_HOME: it can leave plugins-clone-* directories and fail
+                # the entire round before the first authorized tool call.
+                # This does not change the operator's own Codex preferences.
+                stream.write('\n[features]\nplugins = false\n')
                 stream.write('\n[shell_environment_policy]\ninherit = "none"\n')
                 stream.write('set = { PATH = "/usr/local/bin:/usr/bin:/bin", LANG = "C.UTF-8" }\n')
                 stream.write('\n[mcp_servers.danus]\n')
