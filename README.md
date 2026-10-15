@@ -133,7 +133,9 @@ on 2026-10-15). This is **not** equivalent to the entire repository test
 suite passing. The repository-wide GitHub Actions job still has outstanding
 failures, including unavailable Codex sandbox dependencies and legacy
 interface tests. See the release checklist rather than interpreting a small
-green test selection as full CI health.
+green test selection as full CI health. Curated engineering outcomes,
+including failures and their scope, are in
+[development notes](docs/DEVELOPMENT_NOTES.md).
 
 ## Upstream credit and licensing
 
