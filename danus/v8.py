@@ -223,6 +223,7 @@ class Store:
                     pid = e["proposal"]["id"]
                     state["proposals"][pid] = {"id": pid, "content": e["proposal"]["content"],
                                                "required_checks": e["proposal"].get("required_checks", []),
+                                               "check_contract": e["proposal"].get("check_contract", "legacy_text"),
                                                "status": "PENDING", "by": e["task_id"],
                                                "issue_merge_id": e["proposal"].get("issue_merge_id", "")}
                 if e.get("review"):
@@ -422,13 +423,14 @@ def _proposal(proposal, required_checks=None, issue_merge_id=""):
     text = _limit_text(proposal, "proposal",
                        max_len=OUTPUT_TEXT_LIMITS["researcher experiment proposal"])
     checks = v8_validation.normalize_checks(required_checks)
-    identity = {"proposal": text}
+    identity = {"proposal": text, "check_contract": "explicit_v1"}
     if checks:
         identity["required_checks"] = checks
     if issue_merge_id:
         identity["issue_merge_id"] = issue_merge_id
     return {"id": _hash(identity)[:16], "content": text,
-            "required_checks": checks, "issue_merge_id": issue_merge_id}
+            "required_checks": checks, "check_contract": "explicit_v1",
+            "issue_merge_id": issue_merge_id}
 
 
 def _review_evidence(value, label):
@@ -1203,7 +1205,15 @@ executable check specifications for the deterministic host Validation Gate:
 checks actual CSV rows; {"id":"mean","kind":"csv_mean","path":"output.csv",
 "column":"mse","report_path":"report.json","report_key":"mse",
 "abs_tolerance":1e-9} independently recomputes a column average against
-a reported numeric field. For already frozen V7 records, v7_evidence can
+a reported numeric field. If the experiment has a self-contained executable
+checker, REQUIRED_CHECKS MUST include {"id":"checker_execution",
+"kind":"checker_execution","path":"fresh/run.py",
+"log_path":"fresh/run_log.json"}. Both files must be new registered artifacts;
+the run log must contain real child exits, and the host-owned Codex trace
+must show direct Python execution (printed commands do NOT count).
+For new proposals, only this typed approval activates the checker receipt;
+mentioning --check or run_log.json in prose never does.
+For already frozen V7 records, v7_evidence can
 use pinned evidence_ids, scope and protocol_id (not a substitute for
 custom scientific checks). No check specification or unsupported bespoke
 checks => validation INCOMPLETE; never mark them passed from prose or a
