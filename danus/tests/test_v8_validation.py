@@ -488,3 +488,54 @@ def test_task38_actual_runlog_schema_and_host_shell_trace(
     checker = next(x for x in result["checks"]
                    if x["kind"] == "checker_execution")
     assert checker["status"] == expected
+
+
+@pytest.mark.parametrize("script,expected", [
+    ("verify_compass.py", "PASSED"),
+    ("other_script.py", "INCOMPLETE"),
+])
+def test_reviewer_pinned_arbitrary_checker_filename(tmp_path, script, expected):
+    s = new_store(tmp_path)
+    name = "generic_case"
+    declared = {**checker_check(name),
+                "checker_path": name + "/verify_compass.py"}
+    pid = approved(s, "general_checker", checks(name) + [declared])
+    task = dispatch(s, "experimenter", "Execute the approved run",
+                    "experiment", proposal_id=pid)
+    out = s.root / "workspace" / name
+    out.mkdir()
+    (out / "metrics.csv").write_text("mse\n1\n3\n")
+    (out / "report.json").write_text('{"mse":2}')
+    (out / "run.py").write_text("print('wrapper')\n")
+    (out / "run_log.json").write_text(json.dumps({
+        "returncode": 0,
+        "children": [
+            {"argv": ["python", name + "/simulate.py"], "returncode": 0},
+            {"argv": ["python", name + "/" + script], "returncode": 0},
+        ],
+    }))
+    logs = s.root / "logs"
+    logs.mkdir()
+    (logs / f"{task}-real.jsonl").write_text(json.dumps({
+        "type": "item.completed",
+        "item": {"type": "command_execution",
+                 "command": f"/bin/bash -lc 'python -B {name}/run.py'",
+                 "exit_code": 0},
+    }) + "\n")
+    complete(s, task, artifacts=[
+        f"{name}/metrics.csv", f"{name}/report.json",
+        f"{name}/run.py", f"{name}/run_log.json",
+    ])
+    gate = s.state()["latest_validation"]
+    assert gate["status"] == expected
+    assert next(c for c in gate["checks"]
+                if c["kind"] == "checker_execution")["status"] == expected
+
+
+def test_checker_path_must_be_safe_and_explicit(tmp_path):
+    spec = {**checker_check("generic"),
+            "checker_path": "generic/verify_science.py"}
+    assert v8_validation.normalize_checks([spec])[0] == spec
+    with pytest.raises(ValueError, match="safe workspace-relative"):
+        v8_validation.normalize_checks([{
+            **spec, "checker_path": "../outside.py"}])
